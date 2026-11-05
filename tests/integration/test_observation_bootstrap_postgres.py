@@ -69,6 +69,14 @@ class ObservationBootstrapPostgresTests(unittest.TestCase):
             self, lambda **options: PostgresQueryStore(current, **options), lambda: PostgresQueryStore(legacy),
         )
 
+    def test_close_overnight_reopens_native_plan_and_exits_only_detailed_fills(self):
+        from tests.unit.test_mock_automation_specification import MockAutomationSpecificationTests
+
+        url = self.enterContext(isolated_observation_schema(os.environ["KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL"]))
+        MockAutomationSpecificationTests._verify_native_close_overnight(
+            self, lambda now: PostgresQueryStore(url, now_provider=now),
+        )
+
     def test_daily_query_revision_chain_and_export_roll_back_with_latest_in_postgres(self):
         url = self.enterContext(isolated_observation_schema(os.environ['KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL']))
         first_cut = datetime(2026, 9, 14, 19, 59, tzinfo=timezone(timedelta(hours=9)))

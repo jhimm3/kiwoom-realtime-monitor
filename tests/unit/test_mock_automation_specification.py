@@ -1199,6 +1199,192 @@ class MockAutomationSpecificationTests(unittest.TestCase):
     def test_planned_sell_isolation_preserves_manual_shares_in_sqlite(self):
         verify_native_planned_sell_isolation(self, self.store, self)
 
+    def test_section12_close_overnight_reopens_native_plan_and_exits_only_detailed_fills(self):
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / "close-overnight.sqlite3"
+        self._verify_native_close_overnight(lambda now: SQLiteQueryStore(db, now_provider=now))
+
+    def _verify_native_close_overnight(self, store_factory):
+        from datetime import date, time
+        from kiwoom_monitor.application.breakout_strategy import StrategyState
+        from kiwoom_monitor.application.close_and_ipo import CloseIpoPosition, CloseIpoSetup, ClosePolicy
+        from kiwoom_monitor.application.market_session_schedule import KST, MarketPhase, MarketSession, SessionSupport, SessionWindow
+        from kiwoom_monitor.application.section12_minute_research import CLOSE_FAMILY, build_minute_evaluation
+        from tests.unit.test_close_and_ipo import CloseAndIpoTests
+
+        # An explicitly admitted synthetic envelope exercises the native
+        # order kernel. It grants no CLOSE publication or runner authority.
+        clock = [NOW]
+
+        def open_store():
+            store = store_factory(lambda: clock[0])
+            self.addCleanup(store.close)
+            store.initialize()
+            self.enterContext(patch.object(store, "_execution_wall_now", lambda: clock[0], create=True))
+            return store
+
+        store = open_store()
+        inputs = mock_specification_inputs(store)
+        example = CloseAndIpoTests()
+        example.symbol = "005930"
+        example.friday = NOW.astimezone(KST).date() + timedelta(days=4)
+        example.tuesday = example.friday + timedelta(days=4)
+        example.published = datetime.combine(example.friday, time(8), KST)
+        example.setUp()
+        inputs.profile = replace(inputs.profile, evaluation_end=example.following.ends_at)
+        inputs.spec = replace(inputs.spec, forward_profile_id=inputs.profile.profile_id)
+        entry = example.decide(example.close)
+        self.assertEqual(("ENTER", 4), (entry.action, entry.quantity))
+        cut = datetime.fromisoformat(example.signal.available_at)
+        fixture = _planned_execution_fixture(self, store, inputs, requested_at=cut)
+        clock = fixture.clock
+
+        def evaluate(result, bar):
+            return build_minute_evaluation(
+                CLOSE_FAMILY, fixture.run_id, bar, "", StrategyState(),
+                result.action, result.reason, result.quantity, result.setup, result.evidence_refs,
+            )
+
+        opening_signal = evaluate(entry, example.signal)
+        setup = opening_signal.snapshot.feature_values[0]["setup"]
+        candidate = {**opening_signal.candidate_event.to_dict(), "close_ipo_entry_setup": setup}
+        store.save_shadow_evaluation(
+            fixture.run_id, opening_signal.decision.to_dict(), candidate, entry.setup.entry_deadline.isoformat(),
+        )
+        plan = OrderPlanRef("close-fixture-plan", "close-fixture/" + _hash(setup), 0)
+        _, buy, _ = dispatch_mock_automation_decision_from_risk(
+            fixture.repository, fixture.runtime, opening_signal.decision,
+            fixture.recovery, fixture.risk, plan=plan, **fixture.scope,
+        )
+        self.assertEqual(OrderState.ACCEPTED, buy.state)
+        clock[0] += timedelta(seconds=1)
+        first_fill = BrokerFill("close-first-detail", 2, 103, clock[0])
+        partial = BrokerOrderSnapshot(
+            buy.broker_order_id, ACCOUNT_REF, example.symbol, OrderState.PARTIALLY_FILLED, 2, 2, clock[0],
+            (first_fill,),
+        )
+        self.assertEqual(OrderState.PARTIALLY_FILLED,
+                         fixture.runtime.reconcile(buy.intent.intent_id, partial).state)
+        ledger = ExecutionRepository(store)
+        first_head = ledger.load_plan_position(ACCOUNT_REF, fixture.run_id, example.symbol, plan)
+        self.assertEqual(2, first_head.quantity)
+        with patch.object(fixture.transport, "cancel", return_value=BrokerSubmission(buy.broker_order_id, clock[0])):
+            self.assertEqual(OrderState.CANCEL_PENDING, fixture.runtime.cancel(buy.intent.intent_id).state)
+        held = CloseIpoPosition(entry.setup, first_head.quantity, first_fill.price, 0)
+        overnight = example.decide(example.close, position=held)
+        self.assertEqual(("HOLD", "planned_overnight_hold"),
+                         (overnight.action, overnight.reason))
+        self.assertEqual("WAIT", example.decide(example.close, bar=example.closing, position=held).action)
+        self.assertTrue(fixture.runtime.stop())
+        store.close()
+
+        clock[0] = example.following.starts_at
+        reopened = open_store()
+        ledger = ExecutionRepository(reopened)
+        repository = ForwardEvaluationRepository(reopened)
+        runtime = ExecutionRuntime(
+            OrderLifecycle(ledger, fixture.transport, now_provider=lambda: clock[0]), ledger,
+            account_ref=ACCOUNT_REF, run_id=fixture.run_id, owner_token="close-fixture-restarted",
+            now_provider=lambda: clock[0],
+        )
+        self.addCleanup(runtime.stop)
+        runtime.start(new_orders_enabled=False)
+        self.assertEqual(OrderState.CANCEL_PENDING, runtime.load_intent(buy.intent.intent_id).state)
+        active, complete = runtime.load_account_active_intents()
+        self.assertTrue(complete)
+        self.assertEqual([buy.intent.intent_id], [row.intent.intent_id for row in active])
+        stored, = reopened.load_shadow_candidates()["events"]
+        saved_setup = stored["close_ipo_entry_setup"]
+        self.assertEqual((candidate["snapshot_id"], setup), (stored["snapshot_id"], saved_setup))
+        self.assertEqual(plan.policy_ref, "close-fixture/" + _hash(saved_setup))
+        auction = saved_setup["close_auction"]
+        restored_setup = CloseIpoSetup(
+            ClosePolicy(**saved_setup["policy"]), saved_setup["symbol"], date.fromisoformat(saved_setup["entry_date"]),
+            datetime.fromisoformat(saved_setup["entry_deadline"]), saved_setup["entry_calendar_ref"],
+            tuple(saved_setup["entry_bar_refs"]), saved_setup["listing_phase"], tuple(saved_setup["listing_refs"]),
+            saved_setup["breakout_level"],
+            SessionWindow(
+                auction["venue"], date.fromisoformat(auction["trading_date"]), MarketSession(auction["session"]),
+                MarketPhase(auction["phase"]), datetime.fromisoformat(auction["starts_at"]),
+                datetime.fromisoformat(auction["ends_at"]), auction["schedule_version"], SessionSupport(auction["support"]),
+                auction["reason"],
+            ),
+            date.fromisoformat(saved_setup["next_date"]), datetime.fromisoformat(saved_setup["next_open_at"]),
+            saved_setup["next_calendar_ref"],
+        )
+        self.assertEqual(entry.setup, restored_setup)
+        self.assertEqual(first_head.quantity, ledger.load_plan_position(
+            ACCOUNT_REF, fixture.run_id, example.symbol, plan,
+        ).quantity)
+        late_fill = BrokerFill("close-late-detail", 1, 103, cut + timedelta(minutes=1))
+        cancelled = replace(partial, state=OrderState.CANCELLED, filled_quantity=3, remaining_quantity=0,
+                            as_of=clock[0], fills=(first_fill, late_fill))
+        for _ in range(2):
+            self.assertEqual(OrderState.CANCELLED, runtime.reconcile(buy.intent.intent_id, cancelled).state)
+        restored = ledger.load_plan_position(ACCOUNT_REF, fixture.run_id, example.symbol, plan)
+        fills = [event for event in ledger.account_events("mock", ACCOUNT_REF).events if event.event_type == "FILL"]
+        self.assertEqual((3, fills[-1].accepted_sequence), (restored.quantity, restored.fill_cursor))
+        self.assertEqual(["close-first-detail", "close-late-detail"], [event.broker_execution_id for event in fills])
+        self.assertTrue(all(event.plan == plan for event in fills))
+
+        self.assertEqual([103, 103], [event.price for event in fills])
+        position = CloseIpoPosition(restored_setup, restored.quantity, fills[0].price, 0)
+        halted_calendar = (*example.calendar[:-1], replace(example.calendar[-1], sessions=None))
+        self.assertEqual("WAIT", example.decide(
+            example.close, bar=example.opening, calendar=halted_calendar, position=position,
+        ).action)
+        holiday_open = datetime.combine(example.calendar[2].trading_date, time(10), KST)
+        holiday_bar = replace(example.opening, observation_key=holiday_open.isoformat(), bar_start=holiday_open.isoformat(),
+                              bar_end=(holiday_open + timedelta(minutes=1)).isoformat(),
+                              available_at=(holiday_open + timedelta(minutes=1, seconds=2)).isoformat())
+        self.assertEqual("WAIT", example.decide(example.close, bar=holiday_bar, position=position).action)
+        self.assertEqual("WAIT", example.decide(example.close, bar=example.opening).action)
+        exit_decision = example.decide(
+            replace(example.close, exit_minutes_after_open=1), bar=example.opening,
+            history=(example.closing,), position=position,
+        )
+        self.assertEqual(("EXIT", 3, "adverse_gap_full_exit"),
+                         (exit_decision.action, exit_decision.quantity, exit_decision.reason))
+        self.assertEqual(["BUY"], [call[1] for call in fixture.transport.calls])
+
+        clock[0] = datetime.fromisoformat(example.opening.available_at)
+        account = AccountSnapshot(ACCOUNT_REF, 140_000, 0, {example.symbol: 3}, clock[0])
+        recovery = MockAccountRecovery(account, ())
+        events = ledger.account_events("mock", ACCOUNT_REF).events
+        risk = build_mock_automation_risk_snapshot(
+            recovery, events, (), (), execution_run_id=fixture.run_id, binding_revision=fixture.spec.binding_revision,
+            reconciliation_revision=2, observed_at=clock[0], broker_query_started_at=clock[0],
+            broker_query_completed_at=clock[0],
+        )
+        self.assertTrue(risk.reconciliation_complete)
+        repository.save_mock_automation_risk_snapshot(risk)
+        record_mock_automation_recovery_from_risk(
+            repository, runtime, recovery, risk, account_ref=ACCOUNT_REF, spec_id=fixture.spec.spec_id,
+        )
+        exit_signal = evaluate(exit_decision, example.opening)
+        for _ in range(2):
+            _, sell, _ = dispatch_mock_automation_decision_from_risk(
+                repository, runtime, exit_signal.decision, recovery, risk, plan=restored.plan, **fixture.scope,
+            )
+            self.assertEqual((OrderState.ACCEPTED, 3, restored.plan), (sell.state, sell.intent.quantity, sell.intent.plan))
+        self.assertEqual(["BUY", "SELL"], [call[1] for call in fixture.transport.calls])
+        runtime.reconcile(sell.intent.intent_id, BrokerOrderSnapshot(
+            sell.broker_order_id, ACCOUNT_REF, example.symbol, OrderState.FILLED, 3, 0, clock[0],
+            (BrokerFill("close-next-session-exit", 3, 102, clock[0]),),
+        ))
+        final = ledger.load_plan_position(ACCOUNT_REF, fixture.run_id, example.symbol, restored.plan)
+        self.assertEqual((0, 0), (final.quantity, final.unreconciled_sell_quantity))
+        self.assertEqual(((), True), runtime.load_account_active_intents())
+        journal_path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "close-journal.sqlite3"
+        scope = fixture.spec.account_scope
+        result = sync_journal_execution_projection(
+            _ExecutionPageSource(ledger, ACCOUNT_REF), JournalRepository(journal_path), scope, now=clock[0],
+        )
+        self.assertEqual(3, result.detailed_fill_count)
+        rows = {row["broker_execution_id"]: row for row in JournalRepository(journal_path).load_execution_fill_projections(scope)}
+        self.assertEqual({"close-first-detail", "close-late-detail", "close-next-session-exit"}, rows.keys())
+        self.assertEqual({plan.plan_id}, {row["plan"]["plan_id"] for row in rows.values()})
+        self.assertEqual({plan.policy_ref}, {row["plan"]["policy_ref"] for row in rows.values()})
+
     def test_section12_close_candidate_does_not_authorize_a_native_planned_order(self):
         from datetime import time
 
