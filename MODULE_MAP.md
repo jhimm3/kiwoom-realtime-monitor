@@ -7,7 +7,7 @@
 **S12-05 신규주 현재 연결:** 기존 `close_and_ipo.py`가 순수 정책/원셋업을, `research_process`/`research_run`이 final 수명을, `mock_automation_candidate.py`가 원본 계보를, `mock_automation_specification.py`/기존 Qt 화면이 두 방식의 명시 READY 게시/선택을 소유한다. 같은 native 어댑터/계좌 owner와 Episode/ClosePlanManagement가 원래 계획·부분/잔여·당일/익일·첫0B 구조 보호·재개를 관리하며 새 worker/권한/schema는 없다. 단계 동률의 domain 정렬 키를 native writer와 repository reader가 공유하고 원시각/ID를 유지한다. 정상 READY→공개 기동을 격리 검증했고 게시만으로 주문하지 않는다. 원계획의 실제 상세 체결→별도 일지 재개/재요청→화면 조회를 수락했다. 현재 조건 재판단/정정 우선은 S12-05 공통 실행 후속이다. [항목4 수락·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-acceptance-ipo-four).
 
 
-**S12-05 공통 정정 기반:** 기존 `mock_execution.py`는 kt10002 단일 전송을, `mock_account.py`는 조회 parent/방향을 보존한다. `ExecutionRecord`와 기존 `OrderLifecycle`가 불변 의도 아래 물리 주문별 FILL/cut·정정 명령·각 취소를, native `database_execution.py`가 같은 owner/transaction의 revision CAS와 단일 문장 원/새 번호 조회를 소유한다. Offline PositionAccount decoder도 typed 상태를 복원한다. 자동 계획은 현재 조건/Risk 승인·ACK 유실/조기00·예약/보호/증거 소비자 연결 전까지 정정하지 않으며 새 worker/권한 owner/schema는 없다. [현재 근거·남은 연결](docs/architecture/section12-development-roadmap-20261105.md#s12-amendment-physical-ledger).
+**S12-05 공통 정정 기반:** 기존 `mock_execution.py`는 단일 전송을, 계좌 reader는 조회 parent/방향을 보존한다. 기존 ExecutionRecord/Lifecycle/native owner가 물리 주문별 FILL/cut·정정 명령·미귀속00 사건/marker·응답 유실 대사와 재시작 재반영을 소유한다. Runtime과 같은 monitor queue/owned/drain이 조립하고 PositionAccount가 물리 가격/잔여·terminal 대사를 소비한다. 새 TR/worker/권한 owner/schema가 없으며 현재 조건/Risk의 native 승인·Gateway/Episode·각 전략 보호/증거 소비자는 다음 연결이다. [현재 근거·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-amendment-recovery).
 
 > **지도 읽는 순서.** 현재 진입점은 아래 기능별 코드 경로를 확인한다. 초기 국소 통합의 완료·차단 표현은 판본별 기록이며 전체 진행은 AR 정본에 있다. [관련 계약](docs/architecture/app-target-20261023.md#0-현재-기준과-진행-현황).
 

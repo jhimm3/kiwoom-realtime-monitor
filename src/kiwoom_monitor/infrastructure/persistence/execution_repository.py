@@ -82,10 +82,15 @@ class ExecutionAmendment:
     status: str = "PENDING"
     reported_broker_order_id: str = ""
     accepted_quantity: int = 0
+    observed_fills: tuple[str, ...] = ()
 
     @property
     def unresolved(self) -> bool:
         return self.status in {"PENDING", "UNKNOWN"}
+
+    @property
+    def reconciliation_pending(self) -> bool:
+        return self.unresolved or bool(self.observed_fills)
 
 
 @dataclass(frozen=True)
@@ -105,17 +110,52 @@ class ExecutionRecord:
 
 
 def broker_legs_state(legs, requested, amendment=None):
-    if amendment is not None and amendment.unresolved:
+    if amendment is not None and amendment.reconciliation_pending:
         return OrderState.SUBMISSION_UNKNOWN
     filled = sum(leg.filled_quantity for leg in legs)
-    if filled >= requested:
-        return OrderState.FILLED
     active = [leg for leg in legs if leg.state not in TERMINAL_ORDER_STATES and leg.remaining_quantity]
     if any(leg.state is OrderState.CANCEL_PENDING for leg in active):
         return OrderState.CANCEL_PENDING
     if active:
         return OrderState.PARTIALLY_FILLED if filled else OrderState.ACCEPTED
+    if filled >= requested:
+        return OrderState.FILLED
     return OrderState.CANCELLED
+
+
+def broker_fill_key(broker_order_id: str, execution_id: str) -> str:
+    return json.dumps([broker_order_id, execution_id], separators=(",", ":"))
+
+
+def amendment_from_recovery(record, recovery: MockAccountRecovery, now):
+    """An unambiguous physical order fact, not a fabricated broker ACK or fill."""
+    command = record.amendment
+    if command is None or not command.unresolved:
+        return None
+    if recovery.account.account_ref != record.intent.account_ref:
+        raise ValueError("amendment recovery account mismatch")
+    if not command.started_at <= recovery.account.as_of <= now:
+        return None
+    known = {leg.broker_order_id for leg in record.broker_legs}
+    details = [item for item in recovery.order_details
+               if item.original_broker_order_id == command.broker_order_id and item.broker_order_id not in known]
+    ids = {item.broker_order_id for item in details}
+    if len(ids) != 1:
+        return None
+    number = next(iter(ids))
+    facts = {(item.ordered_quantity, item.side, item.limit_price, item.venue) for item in details}
+    if len(facts) != 1 or any(item.reasons for item in details):
+        return None
+    quantity, side, price, venue = next(iter(facts))
+    if (type(quantity) is not int or not 0 < quantity <= command.quantity
+            or (side, price, venue) != (record.intent.side, command.limit_price, record.intent.venue)):
+        return None
+    orders = [order for order in recovery.orders if order.broker_order_id == number]
+    if (not orders or any(order.account_ref != record.intent.account_ref or order.symbol != record.intent.symbol
+            or not command.started_at <= order.as_of <= recovery.account.as_of
+            or order.state is OrderState.REJECTED for order in orders)):
+        return None
+    return number, quantity, max(order.as_of for order in orders)
 
 
 @dataclass(frozen=True)
@@ -275,7 +315,8 @@ class ExecutionRepository:
         return existing, False
 
     def apply(
-        self, record: ExecutionRecord, event: OrderEvent, *, _connection: Any = None, **changes: object,
+        self, record: ExecutionRecord, event: OrderEvent, *, _connection: Any = None,
+        _amendment_recovery: MockAccountRecovery | None = None, **changes: object,
     ) -> ExecutionRecord:
         updated = ExecutionRecord(
             intent=record.intent,
@@ -296,8 +337,13 @@ class ExecutionRepository:
             broker_revision=record.broker_revision + int(bool(record.broker_legs or changes.get("broker_legs"))),
         )
         connection_args = {} if _connection is None else {"_connection": _connection}
+        options = self._write_options()
+        if _amendment_recovery is not None:
+            if self._ownership is None:
+                raise RuntimeError("EXECUTION_REPOSITORY_OWNER_REQUIRED")
+            options = {"ownership": {**options["ownership"], "amendment_recovery": _amendment_recovery}}
         if not self._store.append_execution_event(
-            _record_document(updated), _event_document(event), **self._write_options(), **connection_args,
+            _record_document(updated), _event_document(event), **options, **connection_args,
         ):
             return self.load(record.intent.intent_id, **connection_args) or record
         return updated
@@ -496,7 +542,8 @@ def broker_leg_document(leg: ExecutionBrokerLeg) -> dict[str, Any]:
 
 
 def amendment_document(value: ExecutionAmendment | None) -> dict[str, Any] | None:
-    return {**asdict(value), "started_at": value.started_at.isoformat()} if value is not None else None
+    return {**asdict(value), "observed_fills": list(value.observed_fills),
+            "started_at": value.started_at.isoformat()} if value is not None else None
 
 
 def broker_leg_from_document(value: Mapping[str, Any]) -> ExecutionBrokerLeg:
@@ -506,10 +553,11 @@ def broker_leg_from_document(value: Mapping[str, Any]) -> ExecutionBrokerLeg:
 
 
 def amendment_from_document(value: Mapping[str, Any] | None) -> ExecutionAmendment | None:
-    return ExecutionAmendment(**{**value, "started_at": datetime.fromisoformat(value["started_at"])}) if value else None
+    return ExecutionAmendment(**{**value, "observed_fills": tuple(value.get("observed_fills", ())),
+        "started_at": datetime.fromisoformat(value["started_at"])}) if value else None
 
 
-def validate_broker_ledger_event(stored, document, event) -> None:
+def validate_broker_ledger_event(stored, document, event, *, recovery=None, now=None) -> None:
     """Validate the physical-order transition again inside the native writer's CAS."""
     before, after = _record_from_document(stored), _record_from_document(document)
     if (before.intent != after.intent or before.broker_order_id != after.broker_order_id
@@ -550,11 +598,11 @@ def validate_broker_ledger_event(stored, document, event) -> None:
                 or type(expected.quantity) is not int or type(expected.limit_price) is not int or expected.limit_price <= 0
                 or before.intent.order_type is not OrderType.LIMIT or before.intent.venue != "KRX"):
             raise RuntimeError("EXECUTION_AMENDMENT_CLAIM_CHANGED")
-    elif kind in {"AMENDMENT_ACCEPTED", "AMENDMENT_REJECTED", "AMENDMENT_RESPONSE_UNKNOWN"}:
+    elif kind in {"AMENDMENT_ACCEPTED", "AMENDMENT_RECOVERED", "AMENDMENT_REJECTED", "AMENDMENT_RESPONSE_UNKNOWN"}:
         pending = before.amendment
         if pending is None or not pending.unresolved:
             raise RuntimeError("EXECUTION_AMENDMENT_COMMAND_MISSING")
-        if kind == "AMENDMENT_ACCEPTED":
+        if kind in {"AMENDMENT_ACCEPTED", "AMENDMENT_RECOVERED"}:
             q = event["quantity"]
             expected = replace(pending, status="ACCEPTED", reported_broker_order_id=event["broker_order_id"], accepted_quantity=q)
             expected_legs = tuple(replace(leg, transferred_quantity=leg.transferred_quantity + q)
@@ -562,14 +610,35 @@ def validate_broker_ledger_event(stored, document, event) -> None:
             expected_legs += (ExecutionBrokerLeg(event["broker_order_id"], pending.broker_order_id,
                                                 q, pending.limit_price, OrderState.ACCEPTED),)
             valid = type(q) is int and 0 < q <= pending.quantity and event["price"] == pending.limit_price
+            if kind == "AMENDMENT_RECOVERED":
+                if recovery is None or now is None or amendment_from_recovery(before, recovery, now) != (
+                        event["broker_order_id"], q, datetime.fromisoformat(event["broker_as_of"])):
+                    raise RuntimeError("EXECUTION_AMENDMENT_RECOVERY_CHANGED")
         else:
             expected = replace(pending, status="REJECTED" if kind == "AMENDMENT_REJECTED" else "UNKNOWN",
                                reported_broker_order_id=command.reported_broker_order_id if command else "")
             expected_legs, valid = before.broker_legs, True
         if not valid or command != expected or legs != expected_legs:
             raise RuntimeError("EXECUTION_AMENDMENT_RESPONSE_CHANGED")
+    elif kind == "AMENDMENT_FILL_OBSERVED":
+        pending = before.amendment
+        key = broker_fill_key(event["broker_order_id"], event["broker_execution_id"])
+        if (pending is None or not pending.unresolved or key in pending.observed_fills
+                or event["broker_order_id"] in {leg.broker_order_id for leg in before.broker_legs}
+                or not event["broker_order_id"] or not event["broker_execution_id"]
+                or type(event["quantity"]) is not int or event["quantity"] <= 0
+                or type(event["price"]) is not int or event["price"] <= 0
+                or event["reason"] != f"broker_revision={after.broker_revision};amendment_parent={pending.broker_order_id}"
+                or command != replace(pending, observed_fills=(*pending.observed_fills, key))
+                or legs != before.broker_legs):
+            raise RuntimeError("EXECUTION_AMENDMENT_OBSERVATION_CHANGED")
     else:
-        if not before.broker_legs or command != before.amendment:
+        expected_command = before.amendment
+        if kind == "FILL" and expected_command is not None:
+            key = broker_fill_key(event["broker_order_id"], event["broker_execution_id"])
+            expected_command = replace(expected_command, observed_fills=tuple(
+                value for value in expected_command.observed_fills if value != key))
+        if not before.broker_legs or command != expected_command:
             raise RuntimeError("EXECUTION_AMENDMENT_COMMAND_CHANGED")
         physical = event["broker_order_id"]
         prior = next((leg for leg in before.broker_legs if leg.broker_order_id == physical), None)
@@ -593,7 +662,7 @@ def validate_broker_ledger_event(stored, document, event) -> None:
                      and updated.broker_reported_filled_quantity >= prior.broker_reported_filled_quantity)
         elif kind in {"CANCEL_STARTED", "CANCEL_ACCEPTED", "CANCEL_RESPONSE_UNKNOWN", "CANCEL_REJECTED"}:
             expected = replace(prior, state=updated.state)
-            valid = not (command and command.unresolved) and (
+            valid = not (command and command.reconciliation_pending) and (
                 updated.state is OrderState.CANCEL_PENDING if kind != "CANCEL_REJECTED"
                 else updated.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED})
         else:

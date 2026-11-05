@@ -484,7 +484,7 @@ def _validate_plan_event(stored, intent, event):
     return True
 
 
-def _validate_broker_ledger_write(cursor, p, stored, intent, event):
+def _validate_broker_ledger_write(cursor, p, stored, intent, event, ownership, now_provider):
     if not intent.get("broker_legs"):
         return stored
     from kiwoom_monitor.infrastructure.persistence.execution_repository import validate_broker_ledger_event
@@ -496,7 +496,9 @@ def _validate_broker_ledger_write(cursor, p, stored, intent, event):
         if row is None:
             raise KeyError(f"unknown execution intent: {intent['intent_id']}")
         stored = _json_document(row[0])
-    validate_broker_ledger_event(stored, intent, event)
+    validate_broker_ledger_event(stored, intent, event,
+        recovery=(ownership or {}).get("amendment_recovery"),
+        now=(kst_now() if now_provider is None else now_provider()) if event["event_type"] == "AMENDMENT_RECOVERED" else None)
     return stored
 
 
@@ -1774,7 +1776,8 @@ class SQLiteExecutionStoreMixin:
             stored = _require_execution_ownership(connection.cursor(), ownership, intent, "?",
                                          now_provider=getattr(self, '_execution_wall_now', None),
                                          submission_claim=event.get("event_type") == "SUBMISSION_STARTED")
-            stored = _validate_broker_ledger_write(connection.cursor(), "?", stored, intent, event)
+            stored = _validate_broker_ledger_write(connection.cursor(), "?", stored, intent, event, ownership,
+                                                  getattr(self, '_execution_wall_now', None))
             if "plan" in intent and not _validate_plan_event(stored, intent, event):
                 return False
             if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":
@@ -2063,7 +2066,8 @@ class PostgresExecutionStoreMixin:
             stored = _require_execution_ownership(cursor, ownership, intent, "%s",
                                          now_provider=getattr(self, '_execution_wall_now', None),
                                          submission_claim=event.get("event_type") == "SUBMISSION_STARTED")
-            stored = _validate_broker_ledger_write(cursor, "%s", stored, intent, event)
+            stored = _validate_broker_ledger_write(cursor, "%s", stored, intent, event, ownership,
+                                                  getattr(self, '_execution_wall_now', None))
             if "plan" in intent and not _validate_plan_event(stored, intent, event):
                 return False
             if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":

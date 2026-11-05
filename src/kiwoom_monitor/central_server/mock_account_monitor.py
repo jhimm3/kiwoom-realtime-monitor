@@ -33,7 +33,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
     parse_order_executions,
 )
 from kiwoom_monitor.infrastructure.persistence.execution_repository import AccountExecutionEventPage, ExecutionRepository
-from kiwoom_monitor.domain.order_contract import AccountScope, AccountSnapshot
+from kiwoom_monitor.domain.order_contract import AccountScope, AccountSnapshot, OrderSide
 
 
 logger = logging.getLogger(__name__)
@@ -600,6 +600,10 @@ class MockAccountMonitor:
                 await asyncio.to_thread(
                     self._repository.save_account_snapshot, "mock", recovery.account, received_at,
                 )
+                expected_runtime_revision += await asyncio.to_thread(
+                    self._runtime.recover_amendments, recovery,
+                    before if scope_requested and before_complete else None,
+                )
                 records, unmapped = [], []
                 for snapshot in recovery.orders:
                     record = await asyncio.to_thread(self._runtime.reconcile_by_broker_order, snapshot)
@@ -638,7 +642,7 @@ class MockAccountMonitor:
                                 input_ref=input_ref, observed_at=self._aware_now(), ledger_complete=before_complete and after_complete,
                                 runtime_stable=(expected_runtime_revision == observed_runtime_revision
                                                 and not self._runtime.observation_in_progress),
-                                ledger_read_failed=ledger_read_failed))
+                                ledger_read_failed=ledger_read_failed, reconciled_records=tuple(records)))
                             self._position_observation = replace(self._position_observation, risk_snapshot=deepcopy(risk))
                         except Exception:
                             logger.exception("계좌 전체 RAM 관측 대사 실패")
@@ -784,13 +788,17 @@ class MockAccountMonitor:
                 self._repository.find_by_broker_order_id,
                 "mock", self._runtime.account_ref, self._runtime.run_id, execution.order_no,
             )
-            if record is None or record.intent.run_id != self._runtime.run_id:
-                return
             as_of = self._aware_now()
             snapshot = snapshot_from_order_execution(
                 execution, account_ref=self._runtime.account_ref, as_of=as_of,
             )
-            await asyncio.to_thread(self._runtime.reconcile, record.intent.intent_id, snapshot)
+            if record is None:
+                side = OrderSide.BUY if execution.side == "매수" else OrderSide.SELL if execution.side == "매도" else None
+                if side is not None:
+                    await asyncio.to_thread(self._runtime.observe_amendment_fill, snapshot,
+                        original_broker_order_id=execution.original_broker_order_id, side=side)
+            elif record.intent.run_id == self._runtime.run_id:
+                await asyncio.to_thread(self._runtime.reconcile, record.intent.intent_id, snapshot)
             self.request_automation_execution_recovery()
 
     def _aware_now(self) -> datetime:

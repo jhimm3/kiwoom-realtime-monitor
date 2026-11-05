@@ -135,3 +135,7 @@ S12-05 공통 미체결 정정의 선행 전송 경계는 `KiwoomMockExecutionTr
 AMENDMENT_STARTED를 내구 저장한 뒤 한 번 전송한다. PENDING/UNKNOWN은 원주문 전량 체결 뒤에도 활성 SUBMISSION_UNKNOWN을 유지하고 다시 보내거나 취소/신규로 자동 대체하지 않는다. 정상 응답은 실제 이전 수량만 새 물리 주문으로 추가한다. 부분 이전 후 두 잔여는 각각 관리하고 한쪽 취소가 다른 잔여를 해제하지 않는다. 기존 원/새 번호 reader는 indexed direct CTE+miss leg 분기로 SQL 한 번을 유지한다. 기존 미정정 저장 문서에는 선택 필드를 추가하지 않는다.
 
 현재는 가짜 broker와 SQLite/실제 격리 PostgreSQL에서 검증한 수명 기반이다. 현재 조건·Risk의 native 승인과 ACK 유실/조기00 계좌 대사·관련 소비자·Gateway/Episode를 연결하기 전에는 이전 진입 승인으로 자동 정정을 시작하지 않는다. 이 미연결 제한은 개발 상태이며 새 사용자 전략 조건이나 수락 항목의 추가가 아니다. [검증·최초 실패·다음 연결](architecture/section12-development-roadmap-20261105.md#s12-amendment-physical-ledger).
+
+### 정정 응답 유실과 조기00 — 2026-11-06
+
+계좌 cut의 parent/새 번호·물리 수량·방향/가격·거래소가 한 정정 명령과 유일하게 대응할 때 native owner가 같은 사실을 재검증한다. 이는 관측 시점의 복구이며 ACK 시각이나 체결을 발명하지 않는다. 00의 optional 원번호904가 pending 명령과 맞는 unit FILL은 AMENDMENT_FILL_OBSERVED로 먼저 저장한다. 이 사건은 실제 포지션 FILL이 아니다. marker가 남으면 UNKNOWN/활성 상태를 유지하며, 확인된 물리 leg로 실제 FILL을 한 번만 반영하고 marker 제거를 함께 저장한다. 원/새의 raw ID가 같아도 별도 물리 체결이며 원시각을 유지한다. 원번호 결손을 symbol만으로 대체하지 않는다. 전체 전송/연구의 current-condition reassessment 조건은 유지하며 자동 정정 native 승인/각 전략 소비자는 다음 연결이다. [범위·검증·남은 연결](architecture/section12-development-roadmap-20261105.md#s12-amendment-recovery).

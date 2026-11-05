@@ -569,7 +569,8 @@ class PositionBrokerOrderExposure:
 
 
 def reconcile_position_account_observation(recovery, before, after, *, input_ref, observed_at,
-                                           ledger_complete, runtime_stable, ledger_read_failed=False):
+                                           ledger_complete, runtime_stable, ledger_read_failed=False,
+                                           reconciled_records=()):
     """Read-only account-wide reconciliation; never invent an intent or fill."""
     account = recovery.account
     reasons = []
@@ -577,25 +578,50 @@ def reconcile_position_account_observation(recovery, before, after, *, input_ref
     if not runtime_stable: reasons.append("execution_changed_during_account_query")
     broker = {order.broker_order_id: order for order in recovery.orders}
     if len(broker) != len(recovery.orders): reasons.append("duplicate_broker_order_identity")
-    local = {}
+    local, physical = {}, {}
     for record in after:
         if record.intent.account_ref != account.account_ref or record.intent.environment != "mock" or record.intent.venue != "KRX":
             raise ValueError("account order ledger scope mismatch")
-        if record.broker_order_id:
+        if record.broker_legs:
+            for leg in record.broker_legs:
+                local.setdefault(leg.broker_order_id, []).append(record)
+                physical[leg.broker_order_id, record.intent.intent_id] = leg
+                if (leg.state not in TERMINAL_ORDER_STATES and leg.remaining_quantity
+                        and leg.broker_order_id not in broker):
+                    reasons.append("local_active_order_not_confirmed_by_broker")
+        elif record.broker_order_id:
             local.setdefault(record.broker_order_id, []).append(record)
         if record.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}:
             reasons.append("unconfirmed_or_cancel_pending_order")
-        if not record.broker_order_id or record.broker_order_id not in broker:
+        if not record.broker_order_id or (not record.broker_legs and record.broker_order_id not in broker):
             reasons.append("local_active_order_not_confirmed_by_broker")
         if _time(record.intent.created_at) > _time(account.as_of):
             reasons.append("local_intent_after_account_cut")
     before_map = {r.intent.intent_id: r for r in before}
     after_map = {r.intent.intent_id: r for r in after}
+    reconciled = {r.intent.intent_id: r for r in reconciled_records}
     if set(after_map) - set(before_map): reasons.append("local_intent_added_during_account_query")
     for identity, previous in before_map.items():
         current = after_map.get(identity)
         snapshot = broker.get(previous.broker_order_id)
         if current != previous:
+            family = current or reconciled.get(identity)
+            if previous.broker_legs or (family is not None and family.broker_legs):
+                valid = (family is not None and family.intent == previous.intent
+                         and family.broker_order_id == previous.broker_order_id
+                         and (current is not None or family.state in TERMINAL_ORDER_STATES))
+                if valid:
+                    for leg in family.broker_legs:
+                        fact = broker.get(leg.broker_order_id)
+                        if fact is None:
+                            valid &= leg.state in TERMINAL_ORDER_STATES or not leg.remaining_quantity
+                        else:
+                            valid &= (leg.state, leg.filled_quantity,
+                                      0 if leg.state in TERMINAL_ORDER_STATES else leg.remaining_quantity) == (
+                                fact.state, fact.filled_quantity, fact.remaining_quantity)
+                if not valid:
+                    reasons.append("local_ledger_changed_without_broker_evidence")
+                continue
             if snapshot is None or (current is None and snapshot.state not in TERMINAL_ORDER_STATES):
                 reasons.append("local_ledger_changed_without_broker_evidence")
             elif current is not None and (current.intent != previous.intent or current.broker_order_id != previous.broker_order_id
@@ -613,6 +639,7 @@ def reconcile_position_account_observation(recovery, before, after, *, input_ref
         matches = local.get(snapshot.broker_order_id, [])
         if len(matches) > 1: reasons.append("ambiguous_local_broker_order_identity")
         record = matches[0] if len(matches) == 1 else None
+        leg = physical.get((snapshot.broker_order_id, record.intent.intent_id)) if record is not None else None
         if record is not None and record.intent.symbol != snapshot.symbol:
             reasons.append("broker_local_symbol_mismatch")
         if snapshot.state in TERMINAL_ORDER_STATES:
@@ -624,13 +651,17 @@ def reconcile_position_account_observation(recovery, before, after, *, input_ref
         venues = {d.venue for d in metadata}
         if any(len(v) > 1 for v in (quantities, sides, prices, venues)):
             reasons.append("broker_order_details_conflict")
-        quantity = next(iter(quantities)) if len(quantities) == 1 else record.intent.quantity if not quantities and record else 0
+        expected_quantity = leg.ordered_quantity if leg is not None else record.intent.quantity if record else 0
+        expected_price = leg.limit_price if leg is not None else record.intent.limit_price if record else None
+        quantity = next(iter(quantities)) if len(quantities) == 1 else expected_quantity if not quantities else 0
         side = next(iter(sides)) if len(sides) == 1 else record.intent.side if not sides and record else None
-        price = next(iter(prices)) if len(prices) == 1 else record.intent.limit_price if not prices and record else None
+        price = next(iter(prices)) if len(prices) == 1 else expected_price if not prices else None
         venue = next(iter(venues)) if len(venues) == 1 else record.intent.venue if not venues and record else "UNKNOWN"
         if record is None: unmapped.append(snapshot.broker_order_id)
-        if record is not None and (quantity != record.intent.quantity or side != record.intent.side
-                                  or price != record.intent.limit_price or venue != record.intent.venue):
+        if record is not None and (quantity != expected_quantity or side != record.intent.side
+                                  or price != expected_price or venue != record.intent.venue
+                                  or (leg is not None and any(d.original_broker_order_id is not None
+                                      and d.original_broker_order_id != (leg.original_broker_order_id or None) for d in metadata))):
             reasons.append("broker_local_order_details_mismatch")
         if (side is None or quantity <= 0 or snapshot.filled_quantity + snapshot.remaining_quantity > quantity
                 or snapshot.remaining_quantity <= 0 or venue != "KRX"):

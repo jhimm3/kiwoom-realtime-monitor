@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-06 · S12-05 원/정정 주문별 체결·사전 저장 기반**. AR 판정과 선행 개발은 11절에 둔다.
+갱신. **2026-11-06 · S12-05 정정 응답 유실·조기 체결의 계좌 대사**. AR 판정과 선행 개발은 11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04 수락·전체4/5, S12-05 대표3·4·7·9,4/11 개발 수락이다. 현재는 **현재 조건 재판단 + 접수 미체결 정정 우선**의 공통 실행 연결이다. 기존 원장에 불변 intent/계획과 물리 주문별 FILL/cut·정정 전 사전 저장·UNKNOWN 재전송 방지·부분 정정/각 취소·native CAS를 연결해 Windows115/실제PG9건을 대조했다. 첫 PG sql_calls1 위반은 기존 기대값을 유지한 단일 문장 조회로 수정했다. 다음은 ACK 유실/새 번호 조기 관측의 계좌 대사와 현재 조건·Risk의 native 정정 승인·Gateway/Episode/소비자 연결이다. 자동 정정은 아직 열지 않았으며 대표7개·DD/MICRO·운영 제외와 AR C24/C16 판정은 유지한다. [로드맵](section12-development-roadmap-20261105.md) · [정정 원장](#section12-amendment-physical-ledger) · [항목4 수락](#section12-acceptance-ipo-four) · [대표 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04 수락·전체4/5, S12-05 대표3·4·7·9,4/11 개발 수락이다. **현재 조건 재판단 + 접수 미체결 정정 우선**을 유지한다. 원/새 물리 주문 원장에 응답 유실의 native 계좌 대사·조기00 내구 관측/재개·계좌별 물리 가격/잔여 관측을 연결해 Windows224/실제PG13건을 대조했다. 다음은 현재 조건/Risk의 native 정정 승인·기존 Gateway/Episode와 각 전략의 보호/일지/전송 증거 소비자다. 자동 정정은 아직 열지 않았으며 대표7개·DD/MICRO·운영 제외와 AR C24/C16 판정은 유지한다. [로드맵](section12-development-roadmap-20261105.md) · [정정 복구](#section12-amendment-recovery) · [항목4 수락](#section12-acceptance-ipo-four) · [대표 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4811,6 +4811,12 @@ CLOSE의 실제 계약과 typed 실행 정책으로 일반 READY builder·서버
 ### 11.277 S12-05 원/정정 주문별 체결·사전 저장 기반 — 2026-11-06
 
 기존 ExecutionRecord/Lifecycle/native transaction에 물리 주문별 cut/상세·누적 체결·정정 사전 저장/UNKNOWN·부분 이전/각 취소·revision CAS를 연결했다. 원 intent/계획/기존 wire를 보존하고 새 schema/collection/worker/TR는 없다. source `ecd5f06b`의 Windows115/7모듈·실제PG9와 구조1327/소비 delta0·증분7253/미결49·worker7/PG DB·port/private 정리를 수락했다. 최초 source c83b66dc의 Windows113PASS/PG8PASS1FAIL(sql_calls2)을 보존하며 기존 PG sql_calls1 기대값은 그대로 통과했다. 원/새 번호는 하나의 indexed direct CTE+miss 분기로 조회하며 속도 향상을 주장하지 않는다. 현재 조건/Risk native 승인·ACK 유실과 조기00 보존/대사·Gateway/Episode/예약·보호/증거 소비자는 다음 연결이다. 구 진입 승인으로 자동 정정을 열지 않으며 전체4/5·대표4/11·운영 제외 유지. [범위·실행·최초 실패·잔여](section12-development-roadmap-20261105.md#s12-amendment-physical-ledger).
+
+<a id="section12-amendment-recovery"></a>
+
+### 11.278 S12-05 정정 응답 유실·조기 체결의 계좌 대사 — 2026-11-06
+
+기존 원장/owner/native transaction에서 계좌의 원·새 번호/실제 수량·방향/가격·거래소를 다시 대조해 응답 유실을 복구한다. 기존00의 원번호904·실제 unit FILL을 계획 귀속 전 사건으로 내구 보존하고, binding/재시작 후 동일 물리 ID의 FILL 한 번과 marker 제거를 원자 반영한다. cap 충돌/미반영 자료를 완료로 숨기지 않으며 원래 수량 제한을 유지한다. 기존 monitor queue/owned/drain과 계좌 query·PositionAccount의 물리 가격/잔여 관측을 연결했고 추가 TR/worker/schema/collection/권한/library0이다. source `e444f09e`의 Windows224/12모듈·실제PG13·구조1327/소비 delta0·증분7263/미결49와 worker12/PG 정리를 수락했다. 선행31건2FAIL/관련32PASS도 보존한다. 다음은 현재 조건/Risk native 정정 승인·Gateway/Episode·각 전략의 보호/일지/전송 증거다. 자동 정정/운영은 아직 미수락이며 전체4/5·대표4/11 유지. [상세·근거·최초 실패·잔여](section12-development-roadmap-20261105.md#s12-amendment-recovery).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

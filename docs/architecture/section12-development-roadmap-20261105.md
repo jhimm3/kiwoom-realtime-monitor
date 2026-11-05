@@ -4,7 +4,7 @@
 
 전체 단계와 완료 기준은 이 문서 한 곳에서 관리한다. **S12-01 → S12-02 → S12-03 → S12-04 → S12-05** 순서로 통합한다. 각 단계는 실행할 코드, 직접 관련 검사, 검증 기록과 로컬 커밋을 남긴다. [정본 12절](app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [기능별 계약](r3-ownership.md) · [남은 작업](../OPEN_ITEMS.md) · [저장소 전체 로드맵](../../FUTURE_DEVELOPMENT_ROADMAP.md).
 
-**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·7·9,4/11 개발 수락. 현재는 사용자 재확인 원칙인 **현재 조건 재판단 + 접수 미체결 정정 우선**의 공통 실행 연결이다. 단일 정정 전송/계좌 원번호 입력에 이어 기존 원장에 원/새 주문별 체결·cut·단발 사전 저장/UNKNOWN·부분 정정/각 취소를 연결했고 Windows115/실제PG9건으로 대조했다. 다음은 ACK 유실/새 번호 조기 관측의 완전한 계좌 대사, 현재 조건·Risk의 native 정정 승인과 기존 Gateway/Episode/관련 소비자 연결이다. 이전 진입 승인으로 자동 정정을 허용하지 않으며 대표7개·DD/MICRO·운영 제외와 완료 기준은 유지한다. [정정 원장 근거](#s12-amendment-physical-ledger) · [항목4 수락](#s12-acceptance-ipo-four) · [대표 잔여](#s12-acceptance-remaining).
+**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·7·9,4/11 개발 수락. **현재 조건 재판단 + 접수 미체결 정정 우선**의 공통 실행 연결을 계속한다. 원/새 주문별 원장에 이어 응답 유실의 계좌 대사·조기00 내구 관측/재시작 재반영과 물리 주문별 계좌 관측을 Windows224/실제PG13건으로 대조했다. 다음은 현재 조건·Risk의 native 정정 승인과 기존 Gateway/Episode, 각 전략의 보호·일지/전송 증거 소비자 연결이다. 이전 진입 승인으로 자동 정정을 허용하지 않으며 대표7개·DD/MICRO·운영 제외와 완료 기준은 유지한다. [정정 복구 근거](#s12-amendment-recovery) · [항목4 수락](#s12-acceptance-ipo-four) · [대표 잔여](#s12-acceptance-remaining).
 
 ## 1. 착수 기준과 선행 작업
 
@@ -605,3 +605,21 @@ Collector 생산 경로 연결 조건을 닫는다. 다음은 일반 READY 게�
 첫 source `c83b66dc`는 Windows113PASS/PG8PASS1FAIL이었다. 기존 PG 원장 계측이 miss 후 별도 조회의 sql_calls2를 거부했다. 해당 기존 기대값은 바꾸지 않고 indexed direct CTE와 miss 전용 JSON-leg 분기를 같은 한 문장으로 합쳤다. 최종 원/새 번호 모두 reader 연결/transaction/SQL1을 유지한다. JSON-leg 분기 비용은 miss 경로에 남으며 전체 성능 향상을 주장하지 않는다. 등록 검사에서 core 순서 지문 변경을 거부한2건은 지문을 변경하지 않고 기존 필수 account-order-safety profile에 신규 unit module을 배치해 종결했다. 기존 core/CI 보호 검사는 유지하고 최종 등록2건을 별도로 통과했다. [최초 실패](../../tmp/s12-03-pg-baseline/s12-05-amend-ledger/postgres-run.json) · [원문](../../tmp/s12-03-pg-baseline/s12-05-amend-ledger/official-runner.log) · [정확한 구조 비용 계약](guardrails.json).
 
 이는 **수명 기반 개발 수락**이며 자동 정정 완료가 아니다. 자동 계획의 AMENDMENT_STARTED는 현재 조건/native Risk 승인 연결 전까지 구 진입 승인으로 열리지 않는다. 다음은 pending/UNKNOWN 명령과 ka10075/ka10076의 parent/새 번호·상세 체결을 대조하는 복구, ACK보다 이른00 관측 보존/결합, 원/정정 leg 예약과 현재 가격을 보는 Risk/보호·일지/전송 증거 소비자, 현재 조건 재판단을 실제 Gateway/Episode에 연결하는 작업이다. 미확인 child를 symbol만으로 귀속하거나 ACK를 FILL/원주문 소멸 증거로 삼지 않는다. 기존 대표4/11과 운영 제외/전체 완료 기준은 변경하지 않는다.
+
+<a id="s12-amendment-recovery"></a>
+
+### S12-05 정정 응답 유실·조기 체결의 계좌 대사와 재개 — 2026-11-06
+
+기존 계좌 cut의 원번호·새 번호·실제 주문 수량/가격·방향·거래소가 pending 정정과 하나의 물리 주문으로 대응할 때만 기존 의도에 결합한다. 같은 native owner/lease/transaction에서 해당 복구 입력을 다시 대조하며 ACK 시각이나 FILL을 만들어내지 않는다. 과거·미래 cut/결손/상충·다중 새 번호·잘못된 방향/가격/수량/거래소와 native 직전 변조는 UNKNOWN을 유지하고 전송0이다. 원문 PDF781쪽의00 원번호904를 optional metadata로 보존하며 원번호 선행0·없음/0의 미확인을 유지한다. 원번호가 확인된 조기00의 실제 unit ID·수량·가격·시각은 기존 사건 원장에 AMENDMENT_FILL_OBSERVED로 먼저 내구 저장하고 계획 포지션에 합산하지 않는다. command의 pending keys와 같은 native revision CAS가 귀속 전 자료를 활성 UNKNOWN으로 보존한다. 계좌 대사/known ACK 후 같은 원장의 관측을 기존 물리 FILL 경로로 한 번만 반영하고 marker 제거를 함께 저장한다. binding COMMIT 직후 중단·재열기와 응답 도중 체결도 보존한다. 이미 원주문이 목표 수량만큼 체결됐더라도 별도 물리 잔여/미반영 관측을 완료 상태로 숨기지 않는다. 요청 수량을 넘는 합성 충돌은 raw 관측/UNKNOWN을 유지하고 기존 수량 cap을 완화하지 않는다.
+
+실제 monitor의 기존00/04 queue·owned/drain·전체 계좌 query를 그대로 사용한다. 기존 account-wide before cut이 있으면 재사용하고, 없을 때만 전체 broker recovery당 기존 run-active reader를 한 번 사용한다. 일반 회복에서 정정 작업이 비었으면 주문 operation lock을 기다리지 않는다. PositionAccount 관측은 원/새 물리 번호의 실제 주문 수량·각 가격/잔여와 동일 intent_ref를 대조하고, 이미 대사한 terminal 결과를 재사용해 활성 원장 제거도 확인한다. 새 TR·worker·DB schema/collection·주문 권한·라이브러리는 없다.
+
+source `e444f09ef7d25476f0e1581c7e2c6900a825159478e2582bfb3d27219378a070`의 **Windows224건/12모듈 + 실제 격리 PostgreSQL13건**을 수락했다. 신규10건을 포함한 unit14/PG11 모듈과 직접 영향 검사는 native 복구 입력 변조·결손/상충·restart 중간 중단·원/새 같은 체결번호·조기00→기존3회 recovery→상세3주·물리 예약210200/두 잔여·cap 충돌의 내구 보존을 대조했다. 기존 parser·실전/모의 monitor·미체결/원장·계좌 노출·barrier/종료·CLOSE 계획·일지·실제PG 권한/SQL1 검사를 보존했다. 구조1327/위반0·소비 delta0·증분7263/기존미결49·worker12와PG DB/port/private 정리를 확인했다. [Windows](../../tmp/s12-04-shadow/s12-05-amend-recovery-final/evidence.json) · [PG](../../tmp/s12-03-pg-baseline/s12-05-amend-recovery-final/postgres-run.json) · [증분](../../tmp/s12-05-amend-recovery/review-verified-final.json).
+
+추가 SQLite 합성 terminal 실험1건은 실제 상세6주→native 활성0/화면용 미체결0·동일 물리 두 번호의 종결 관측을 확인했다. 이 실험은 정규224/13건과 따로 기록한다. [실행](../../tmp/s12-05-amend-recovery/terminal-family-probe.json).
+
+선행31건 probe의2FAIL은 일반 계좌 조회가 비어 있는 정정 operation lock을 기다린 원인과 새 테스트의 관측 시점 순서였다. 기존 계좌 검사/기한·가짜 transport의 사전 저장 assertion은 유지하고 빈 작업은 lock 전에 반환하며 새 가짜 요청은 최초 사전 저장 assertion 후00을 전달하도록 고쳤다. 같은 두 모듈32건 재검증과 최종224건을 분리 보존한다. [최초](../../tmp/s12-05-amend-recovery/probe.json) · [관련 재검증](../../tmp/s12-05-amend-recovery/probe-v2.json).
+
+이 수락은 복구/계좌 관측의 개발 근거이며 자동 정정·현재 조건/Risk 승인·각 전략의 보호/일지/실제 운영 수락은 아니다. 원번호가 결손인00은 이 번호만으로 plan 귀속하지 않고 계좌 대사로 확인된 사실만 사용한다. 다음은 실제 현재 조건 재판단→native 승인→기존 Gateway/Episode와 physical 예약·보호/전송 증거 소비자다. 전체4/5·대표4/11과 운영 제외/원래 완료 기준은 유지한다.
+
+현재 단계의 첫 정규 source `bda53781`도224/13PASS였지만 별도 부분 취소 terminal 실험이 보유1/활성 주문0을 불일치로 표시했다. 원인은 미사용 할당량과 취소 후 실제 미체결을 같은 값으로 비교한 소비자였다. 해당 비교에서 terminal 물리 주문의 broker 미체결0을 사용하고 기존 partial-transfer/cancel 공유 unit/PG 시나리오에 보유1·미체결0·관측 완료를 추가했다. 원래 cap·취소/늦은 FILL·queue deadline과 기존 assertion은 유지한다. 최종 source의224/13 및 증분 대조로 재검증했다. [최초 정규](../../tmp/s12-04-shadow/s12-05-amend-recovery/evidence.json) · [부분 취소 재현](../../tmp/s12-05-amend-recovery/cancelled-terminal-probe-failed.json) · [같은 입력 보완](../../tmp/s12-05-amend-recovery/cancelled-terminal-probe-passed.json).

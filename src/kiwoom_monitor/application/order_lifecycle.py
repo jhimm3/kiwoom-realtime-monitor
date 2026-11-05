@@ -15,6 +15,7 @@ from typing import Any, Callable, Protocol
 from kiwoom_monitor.application.market_session_schedule import mock_order_entry_decision
 from kiwoom_monitor.domain.order_contract import (
     AccountSnapshot,
+    BrokerFill,
     BrokerOrderSnapshot,
     BrokerSubmission,
     BrokerAmendmentSubmission,
@@ -28,7 +29,8 @@ from kiwoom_monitor.domain.order_contract import (
 )
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import AmendmentResponseUnknown, SubmissionRejected, SubmissionUnknown
 from kiwoom_monitor.infrastructure.persistence.execution_repository import (
-    ExecutionAmendment, ExecutionBrokerLeg, ExecutionRecord, ExecutionRepository, broker_legs_state,
+    ExecutionAmendment, ExecutionBrokerLeg, ExecutionRecord, ExecutionRepository, amendment_from_recovery,
+    broker_fill_key, broker_legs_state,
 )
 
 
@@ -830,7 +832,7 @@ class OrderLifecycle:
     ) -> ExecutionRecord:
         """Claim once before transport. Strategy/current-Risk admission belongs to the caller/native owner."""
         record = self._required(intent_id)
-        if record.amendment is not None and record.amendment.unresolved:
+        if record.amendment is not None and record.amendment.reconciliation_pending:
             return record
         if record.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}:
             raise ValueError("order must be reconciled and accepted before amendment")
@@ -858,15 +860,34 @@ class OrderLifecycle:
             raise RuntimeError("amendment command was not claimed")
         if after_amendment_claim is not None:
             after_amendment_claim()
+        def pending_response():
+            latest = self._required(intent_id)
+            current = latest.amendment
+            same = (current is not None and current.unresolved
+                    and (current.broker_order_id, current.quantity, current.limit_price, current.started_at)
+                    == (command.broker_order_id, command.quantity, command.limit_price, command.started_at))
+            return latest, same
         try:
             response = transport.amend(record.intent, leg.broker_order_id, quantity, limit_price)
         except SubmissionUnknown as error:
+            record, pending = pending_response()
+            if not pending:
+                return record
+            command = record.amendment
             reported = error.reported_broker_order_id if isinstance(error, AmendmentResponseUnknown) else ""
             return self._apply(record, "AMENDMENT_RESPONSE_UNKNOWN", record.state,
                 amendment=replace(command, status="UNKNOWN", reported_broker_order_id=reported), reason=str(error))
         except SubmissionRejected as error:
-            return self._apply(record, "AMENDMENT_REJECTED", broker_legs_state(record.broker_legs, record.intent.quantity),
-                amendment=replace(command, status="REJECTED"), reason=str(error))
+            record, pending = pending_response()
+            if not pending:
+                return record
+            command = replace(record.amendment, status="UNKNOWN" if record.amendment.observed_fills else "REJECTED")
+            return self._apply(record, "AMENDMENT_RESPONSE_UNKNOWN" if command.unresolved else "AMENDMENT_REJECTED",
+                broker_legs_state(record.broker_legs, record.intent.quantity, command), amendment=command, reason=str(error))
+        record, pending = pending_response()
+        if not pending:
+            return record
+        command = record.amendment
         if (not isinstance(response, BrokerAmendmentSubmission)
                 or response.original_broker_order_id != leg.broker_order_id
                 or response.quantity > quantity
@@ -874,18 +895,66 @@ class OrderLifecycle:
             return self._apply(record, "AMENDMENT_RESPONSE_UNKNOWN", record.state,
                 amendment=replace(command, status="UNKNOWN", reported_broker_order_id=getattr(response, "broker_order_id", "")),
                 reason="amendment response does not match the durable command")
-        legs = tuple(replace(value, transferred_quantity=value.transferred_quantity + response.quantity)
-                     if value.broker_order_id == leg.broker_order_id else value for value in record.broker_legs)
-        legs += (ExecutionBrokerLeg(response.broker_order_id, leg.broker_order_id,
-                                   response.quantity, limit_price, OrderState.ACCEPTED),)
-        return self._apply(record, "AMENDMENT_ACCEPTED", broker_legs_state(legs, record.intent.quantity),
-            broker_legs=legs, amendment=replace(command, status="ACCEPTED",
-                reported_broker_order_id=response.broker_order_id, accepted_quantity=response.quantity),
-            event_broker_order_id=response.broker_order_id, quantity=response.quantity, price=limit_price,
-            occurred_at=response.accepted_at)
+        record = self._accept_amendment(record, response.broker_order_id, response.quantity, response.accepted_at)
+        return self._replay_amendment_fills(record)
+
+    def _accept_amendment(self, record, broker_order_id, quantity, at, *, recovery=None):
+        command = replace(record.amendment, status="ACCEPTED", reported_broker_order_id=broker_order_id,
+                          accepted_quantity=quantity)
+        legs = tuple(replace(value, transferred_quantity=value.transferred_quantity + quantity)
+                     if value.broker_order_id == command.broker_order_id else value for value in record.broker_legs)
+        legs += (ExecutionBrokerLeg(broker_order_id, command.broker_order_id,
+                                   quantity, command.limit_price, OrderState.ACCEPTED),)
+        return self._apply(record, "AMENDMENT_RECOVERED" if recovery is not None else "AMENDMENT_ACCEPTED",
+            broker_legs_state(legs, record.intent.quantity, command), broker_legs=legs, amendment=command,
+            event_broker_order_id=broker_order_id, quantity=quantity, price=command.limit_price, occurred_at=at,
+            **({"broker_as_of": at, "_amendment_recovery": recovery} if recovery is not None else {}))
+
+    def recover_amendment(self, intent_id, recovery):
+        record = self._required(intent_id)
+        match = amendment_from_recovery(record, recovery, self._now())
+        if match is not None:
+            record = self._accept_amendment(record, *match, recovery=recovery)
+        return self._replay_amendment_fills(record)
+
+    def observe_amendment_fill(self, intent_id, snapshot, *, original_broker_order_id, side):
+        """Retain an actual 00 fill without attributing it to the plan before binding."""
+        record = self._required(intent_id)
+        command = record.amendment
+        if (command is None or not command.unresolved or original_broker_order_id != command.broker_order_id
+                or snapshot.broker_order_id in {leg.broker_order_id for leg in record.broker_legs}
+                or (snapshot.account_ref, snapshot.symbol, side)
+                != (record.intent.account_ref, record.intent.symbol, record.intent.side)):
+            raise ValueError("unbound fill does not match the pending amendment scope")
+        for fill in snapshot.fills:
+            command = record.amendment
+            key = broker_fill_key(snapshot.broker_order_id, fill.execution_id)
+            if key in command.observed_fills:
+                continue
+            record = self._apply(record, "AMENDMENT_FILL_OBSERVED", OrderState.SUBMISSION_UNKNOWN,
+                amendment=replace(command, observed_fills=(*command.observed_fills, key)),
+                event_broker_order_id=snapshot.broker_order_id, broker_execution_id=fill.execution_id,
+                quantity=fill.quantity, price=fill.price, occurred_at=fill.occurred_at,
+                broker_as_of=snapshot.as_of, reason=f"amendment_parent={original_broker_order_id}")
+        return record
+
+    def _replay_amendment_fills(self, record):
+        if record.amendment is None or not record.amendment.observed_fills:
+            return record
+        known = {leg.broker_order_id for leg in record.broker_legs}
+        for event in self._repository.events(record.intent.intent_id):
+            key = broker_fill_key(event["broker_order_id"], event["broker_execution_id"])
+            if (event["event_type"] != "AMENDMENT_FILL_OBSERVED" or event["broker_order_id"] not in known
+                    or key not in record.amendment.observed_fills):
+                continue
+            leg = next(value for value in record.broker_legs if value.broker_order_id == event["broker_order_id"])
+            fill = BrokerFill(event["broker_execution_id"], event["quantity"], event["price"],
+                              datetime.fromisoformat(event["occurred_at"]))
+            record = self._apply_known_leg_fill(record, leg, fill, datetime.fromisoformat(event["broker_as_of"]))
+        return record
 
     def _cancel_broker_leg(self, record, quantity, broker_order_id, after_cancel_claim):
-        if record.amendment is not None and record.amendment.unresolved:
+        if record.amendment is not None and record.amendment.reconciliation_pending:
             raise ValueError("amendment must be reconciled before cancellation")
         active = [leg for leg in record.broker_legs if leg.state not in TERMINAL_ORDER_STATES and leg.remaining_quantity]
         selected = [leg for leg in active if leg.broker_order_id == broker_order_id] if broker_order_id else active
@@ -1006,28 +1075,12 @@ class OrderLifecycle:
         # A late unique execution is a fact even when its snapshot's state cut is older.
         def apply(event_type, updated_leg, **fields):
             nonlocal record, leg
-            legs = tuple(updated_leg if value.broker_order_id == leg.broker_order_id else value
-                         for value in record.broker_legs)
-            detailed = sum(value.detailed_filled_quantity for value in legs)
-            reported = sum(value.broker_reported_filled_quantity for value in legs)
-            filled = sum(value.filled_quantity for value in legs)
-            if detailed > record.intent.quantity or filled > record.intent.quantity:
-                raise ValueError("broker fills exceed the requested quantity")
-            cuts = [value.last_broker_as_of for value in legs if value.last_broker_as_of is not None]
-            record = self._apply(record, event_type, broker_legs_state(legs, record.intent.quantity, record.amendment),
-                broker_legs=legs, filled_quantity=filled, detailed_filled_quantity=detailed,
-                broker_reported_filled_quantity=reported,
-                last_broker_as_of=max(cuts) if cuts else None,
-                event_broker_order_id=leg.broker_order_id, broker_as_of=snapshot.as_of,
-                **fields, **connection_args)
+            record = self._apply_broker_leg_event(record, event_type, updated_leg, snapshot.as_of,
+                                                  **fields, **connection_args)
             leg = next(value for value in record.broker_legs if value.broker_order_id == snapshot.broker_order_id)
         for fill in sorted(snapshot.fills, key=lambda value: (value.occurred_at, value.execution_id)):
-            if fill.execution_id in leg.fill_ids:
-                continue
-            updated = replace(leg, detailed_filled_quantity=leg.detailed_filled_quantity + fill.quantity,
-                              fill_ids=(*leg.fill_ids, fill.execution_id))
-            apply("FILL", updated, broker_execution_id=fill.execution_id, quantity=fill.quantity, price=fill.price,
-                  occurred_at=fill.occurred_at, fill_ids=(*record.fill_ids, fill.execution_id))
+            record = self._apply_known_leg_fill(record, leg, fill, snapshot.as_of, **connection_args)
+            leg = next(value for value in record.broker_legs if value.broker_order_id == snapshot.broker_order_id)
         if newer:
             reported = max(leg.broker_reported_filled_quantity, snapshot.filled_quantity)
             updated = replace(leg, broker_reported_filled_quantity=reported,
@@ -1036,6 +1089,34 @@ class OrderLifecycle:
             apply("BROKER_FILL_AGGREGATE" if increase else "BROKER_RECONCILED", updated,
                   quantity=increase, occurred_at=snapshot.as_of)
         return record
+
+    def _apply_known_leg_fill(self, record, leg, fill, broker_as_of, **connection_args):
+        if fill.execution_id in leg.fill_ids:
+            return record
+        updated = replace(leg, detailed_filled_quantity=leg.detailed_filled_quantity + fill.quantity,
+                          fill_ids=(*leg.fill_ids, fill.execution_id))
+        command = record.amendment
+        if command is not None:
+            key = broker_fill_key(leg.broker_order_id, fill.execution_id)
+            command = replace(command, observed_fills=tuple(value for value in command.observed_fills if value != key))
+        return self._apply_broker_leg_event(record, "FILL", updated, broker_as_of,
+            amendment=command, broker_execution_id=fill.execution_id, quantity=fill.quantity, price=fill.price,
+            occurred_at=fill.occurred_at, fill_ids=(*record.fill_ids, fill.execution_id), **connection_args)
+
+    def _apply_broker_leg_event(self, record, event_type, updated_leg, broker_as_of, **fields):
+        legs = tuple(updated_leg if value.broker_order_id == updated_leg.broker_order_id else value
+                     for value in record.broker_legs)
+        detailed = sum(value.detailed_filled_quantity for value in legs)
+        reported = sum(value.broker_reported_filled_quantity for value in legs)
+        filled = sum(value.filled_quantity for value in legs)
+        if detailed > record.intent.quantity or filled > record.intent.quantity:
+            raise ValueError("broker fills exceed the requested quantity")
+        cuts = [value.last_broker_as_of for value in legs if value.last_broker_as_of is not None]
+        command = fields.get("amendment", record.amendment)
+        return self._apply(record, event_type, broker_legs_state(legs, record.intent.quantity, command),
+            broker_legs=legs, filled_quantity=filled, detailed_filled_quantity=detailed,
+            broker_reported_filled_quantity=reported, last_broker_as_of=max(cuts) if cuts else None,
+            event_broker_order_id=updated_leg.broker_order_id, broker_as_of=broker_as_of, **fields)
 
     @staticmethod
     def _snapshot_state(snapshot: BrokerOrderSnapshot, filled: int, requested: int) -> OrderState:

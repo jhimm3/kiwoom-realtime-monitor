@@ -1,6 +1,7 @@
 """Amendment physical facts and claims use the real isolated PostgreSQL writer."""
 import os
 import unittest
+import asyncio
 
 
 class OrderAmendmentPostgresTests(unittest.TestCase):
@@ -41,3 +42,19 @@ class OrderAmendmentPostgresTests(unittest.TestCase):
     def test_existing_planned_entry_approval_cannot_authorize_a_new_amendment(self):
         from tests.unit.test_order_amendment import verify_planned_admission_is_not_reused
         verify_planned_admission_is_not_reused(self, self.factory())
+
+    def test_unknown_ack_recovers_from_parent_details_and_retained_fill_without_transmission(self):
+        from tests.unit.test_order_amendment import verify_recovered_amendment
+        verify_recovered_amendment(self, self.factory())
+
+    def test_restart_after_binding_replays_durable_observation_exactly_once(self):
+        from tests.unit.test_order_amendment import verify_recovered_amendment
+        verify_recovered_amendment(self, self.factory(), crash=True)
+
+    def test_account_monitor_retains_early_child_00_and_recovers_using_existing_reads(self):
+        from tests.unit.test_order_amendment import verify_amendment_monitor
+        asyncio.run(verify_amendment_monitor(self, self.factory()))
+
+    def test_conflicting_excess_fill_stays_durable_and_unresolved_without_weakening_quantity_cap(self):
+        from tests.unit.test_order_amendment import verify_recovered_amendment
+        verify_recovered_amendment(self, self.factory(), overfill=True)

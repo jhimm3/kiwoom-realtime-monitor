@@ -3133,6 +3133,18 @@
         "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.find_execution_intent_by_broker_order_id|cursor.execute": 1,
         "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.find_execution_intent_by_broker_order_id|connection.execute": 1
       }
+    },
+    {
+      "id": "S12-05-amendment-recovery-and-observed-fills-20261106",
+      "reason": "Close the approved S12-05 response-loss/early-fill recovery boundary before enabling reassessed automatic amendments.",
+      "connection": "Reuse original ExecutionRecord/Lifecycle/native event transaction and existing account-monitor queue. Immutable AMENDMENT_FILL_OBSERVED events retain actual unit IDs/quantities with no position attribution; command pending keys and native CAS make binding/replay restart-safe. Existing account recovery supplies optional parent/side/price/quantity metadata; native writer rechecks the same recovery fact under lease. No TR, table, collection, worker, order authority or library is added. The monitor reuses its account-wide before cut; only when unavailable the runtime makes one existing run-active read per full broker recovery, never per0B. Empty amendment work avoids the operation lock. One post-transport reload preserves fills/observations received during the network call. PositionAccount maps each real leg and its current price/remainder to the original intent and verifies terminal results from already reconciled records.",
+      "validation": "Fake collector00 parent904 -> same monitor queue -> durable unbound observation -> existing broker recovery -> original/new leg binding -> FILL exactly once after database reopen. Wrong/ambiguous/stale/future/quantity/side/price/venue inputs and changed native recovery proof retain UNKNOWN. Crash after binding leaves pending observation active until replay. Excess actual fill remains durable/unresolved while requested-quantity cap is unchanged. Same-price new/old execution IDs remain separately scoped; reservations use each physical price/remainder. Existing account observation test exposed an empty-work operation-lock wait; fix skips that lock, without altering its assertions or queue deadline. Actual SQLite/PostgreSQL and impacted original parser/monitor/ledger/Risk/position/journal boundaries remain required.",
+      "evidence": [
+        "tests/unit/test_order_amendment.py",
+        "tests/integration/test_order_amendment_postgres.py",
+        "tests/unit/test_mock_account_monitor.py"
+      ],
+      "limits": {}
     }
   ]
 }

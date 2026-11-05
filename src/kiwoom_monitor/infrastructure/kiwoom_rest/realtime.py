@@ -105,6 +105,7 @@ class OrderExecution:
     remaining_quantity: int | None = None
     cumulative_filled_quantity: int | None = None
     origin_scope: AccountScope = LEGACY_ACCOUNT_SCOPE
+    original_broker_order_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -369,6 +370,7 @@ def parse_order_executions(
         raw_side = str(values.get("905", "")).strip().replace("+", "").replace("-", "")
         side = "매수" if "매수" in raw_side else "매도" if "매도" in raw_side else raw_side
         raw_code = str(values.get("9001") or entry.get("item") or "").strip()
+        original = str(values.get("904") or "").strip()
         result.append(OrderExecution(
             str(values.get("9203", "")).strip(), str(values.get("909", "")).strip(),
             raw_code.removeprefix("A").removesuffix("_NX").removesuffix("_AL"),
@@ -378,6 +380,7 @@ def parse_order_executions(
             _number(values.get("902"), absolute=True),
             _cumulative_fill(values, quantity),
             scope,
+            original if original and original.strip("0") else None,
         ))
     return tuple(result)
 

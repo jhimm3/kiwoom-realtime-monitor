@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import json
+import asyncio
 from unittest.mock import patch
 
 from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
@@ -16,6 +17,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import (
     AmendmentResponseUnknown, SubmissionRejected, SubmissionUnknown,
 )
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
+from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import BrokerOrderDetails, MockAccountRecovery
 from tests.unit.test_order_lifecycle import NOW, _Transport, _account, _intent
 
 
@@ -177,6 +179,16 @@ def verify_partial_transfer_and_cancel(case, factory=None):
     case.assertEqual((OrderState.CANCELLED, 1), (final.state, final.filled_quantity))
     case.assertEqual((1, 2, 1), (transport.submit_calls, transport.cancel_calls, len(transport.amend_calls)))
     case.assertEqual(intent, repository.load(intent.intent_id).intent)
+    from kiwoom_monitor.application.position_target import reconcile_position_account_observation
+    recovery = MockAccountRecovery(replace(_account(), as_of=NOW + timedelta(seconds=2), positions={intent.symbol: 1}),
+        (broker_snapshot(intent, "broker-2", 0, 0, 1, state=OrderState.CANCELLED),
+         broker_snapshot(intent, "broker-1", 1, 0, 2, state=OrderState.CANCELLED)))
+    active, complete = repository.account_active_intents(intent.account_ref)
+    observed = reconcile_position_account_observation(recovery, (accepted,), active,
+        input_ref="cancelled-family", observed_at=recovery.account.as_of, ledger_complete=complete,
+        runtime_stable=True, reconciled_records=(final,))
+    case.assertTrue(observed.open_orders_complete, observed.reasons)
+    case.assertEqual((1, (), ()), (observed.account.positions[intent.symbol], observed.open_orders, observed.broker_open_orders))
 
 
 def verify_rejected_and_invalid_response(case, factory=None):
@@ -233,7 +245,199 @@ def verify_planned_admission_is_not_reused(case, factory=None):
     case.assertEqual((), context.execution.load(context.buy.intent.intent_id).broker_legs)
 
 
+def verify_recovered_amendment(case, factory=None, *, crash=False, overfill=False):
+    from kiwoom_monitor.central_server.execution_runtime import ExecutionRuntime
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import broker_fill_key
+    factory_, store, repository, transport, clock, lifecycle, intent = amendment_fixture(case, factory)
+    lifecycle.reconcile(intent.intent_id, broker_snapshot(intent, "broker-1", 2, 4, 1,
+        (BrokerFill("shared", 2, 70_000, NOW),)))
+    clock[0] += timedelta(seconds=2)
+    transport.error = SubmissionUnknown("lost amendment ACK")
+    lifecycle.amend(intent.intent_id, 4, 70_100)
+    store._execution_wall_now = lambda: clock[0]
+    runtime = ExecutionRuntime(lifecycle, repository, account_ref=intent.account_ref, run_id=intent.run_id,
+                               owner_token="recovery-owner", now_provider=lambda: clock[0])
+    runtime.start(new_orders_enabled=False)
+    case.addCleanup(runtime.stop)
+    clock[0] += timedelta(seconds=1)
+    early = broker_snapshot(intent, "broker-2", 1, 2, 3,
+        (BrokerFill("shared", 1, 70_100, NOW + timedelta(seconds=2)),))
+    observed = runtime.observe_amendment_fill(early, original_broker_order_id="broker-1", side=OrderSide.BUY)
+    case.assertEqual((2, 2, OrderState.SUBMISSION_UNKNOWN),
+        (observed.filled_quantity, observed.detailed_filled_quantity, observed.state))
+    case.assertEqual((broker_fill_key("broker-2", "shared"),), observed.amendment.observed_fills)
+    case.assertEqual(1, len([event for event in repository.events(intent.intent_id) if event["event_type"] == "FILL"]))
+    case.assertEqual(observed, runtime.observe_amendment_fill(early, original_broker_order_id="broker-1", side=OrderSide.BUY))
+    clock[0] += timedelta(seconds=1)
+    recovery = MockAccountRecovery(replace(_account(), as_of=clock[0], positions={"005930": 3},
+        reserved_open_buy_won=70_000 + 2 * 70_100),
+        (broker_snapshot(intent, "broker-1", 2, 1, 4), broker_snapshot(intent, "broker-2", 1, 2, 4)),
+        (BrokerOrderDetails("broker-1", 6, OrderSide.BUY, 70_000, "KRX"),
+         BrokerOrderDetails("broker-2", 3, OrderSide.BUY, 70_100, "KRX", original_broker_order_id="broker-1")))
+    # Rejected/ambiguous/stale data cannot resolve the command or consume the observation.
+    invalids = [replace(recovery, order_details=(replace(recovery.order_details[1], **change),)) for change in (
+        {"original_broker_order_id": "other"}, {"side": OrderSide.SELL}, {"limit_price": 70_200},
+        {"ordered_quantity": 5}, {"ordered_quantity": True}, {"venue": "NXT"})]
+    invalids += [replace(recovery, order_details=()), replace(recovery, orders=()),
+        replace(recovery, order_details=(*recovery.order_details, replace(recovery.order_details[1], broker_order_id="ambiguous"))),
+        replace(recovery, account=replace(recovery.account, as_of=clock[0] + timedelta(seconds=1)))]
+    for invalid in invalids:
+        runtime.recover_amendments(invalid)
+        case.assertEqual(observed, repository.load(intent.intent_id))
+    apply = repository.apply
+    def changed_native_proof(record, event, **kwargs):
+        if event.event_type == "AMENDMENT_RECOVERED":
+            kwargs["_amendment_recovery"] = replace(recovery, order_details=(
+                replace(recovery.order_details[1], limit_price=70_200),))
+        return apply(record, event, **kwargs)
+    with patch.object(repository, "apply", side_effect=changed_native_proof):
+        with case.assertRaisesRegex(RuntimeError, "EXECUTION_AMENDMENT_RECOVERY_CHANGED"):
+            runtime.recover_amendments(recovery)
+    case.assertEqual(observed, repository.load(intent.intent_id))
+    if overfill:
+        runtime.reconcile(intent.intent_id, broker_snapshot(intent, "broker-1", 6, 0, 4,
+            (BrokerFill("original-rest", 4, 70_000, NOW + timedelta(seconds=3)),), OrderState.FILLED))
+        recovery = replace(recovery, account=replace(recovery.account, positions={"005930": 7}), orders=(
+            broker_snapshot(intent, "broker-1", 6, 0, 4, state=OrderState.FILLED), recovery.orders[1]))
+        with case.assertRaisesRegex(ValueError, "fills exceed"):
+            runtime.recover_amendments(recovery)
+        blocked = repository.load(intent.intent_id)
+        case.assertEqual((6, OrderState.SUBMISSION_UNKNOWN, 1),
+            (blocked.detailed_filled_quantity, blocked.state, len(blocked.amendment.observed_fills)))
+        case.assertEqual((blocked,), repository.active_intents("mock", intent.account_ref, intent.run_id))
+        case.assertEqual(1, len([event for event in repository.events(intent.intent_id)
+                                if event["event_type"] == "AMENDMENT_FILL_OBSERVED"]))
+        case.assertFalse(any(event["event_type"] == "FILL" and event["broker_order_id"] == "broker-2"
+                             for event in repository.events(intent.intent_id)))
+        return
+    if crash:
+        with patch.object(lifecycle, "_replay_amendment_fills", side_effect=RuntimeError("crash after binding")):
+            with case.assertRaisesRegex(RuntimeError, "crash after binding"):
+                runtime.recover_amendments(recovery)
+        bound = repository.load(intent.intent_id)
+        case.assertEqual(("ACCEPTED", OrderState.SUBMISSION_UNKNOWN, 2),
+            (bound.amendment.status, bound.state, bound.detailed_filled_quantity))
+        case.assertEqual((bound,), repository.active_intents("mock", intent.account_ref, intent.run_id))
+    else:
+        runtime.recover_amendments(recovery)
+    runtime.stop()
+    reopened = factory_(); reopened.initialize(); case.addCleanup(reopened.close)
+    reopened._execution_wall_now = lambda: clock[0]
+    restored = ExecutionRepository(reopened)
+    restarted = ExecutionRuntime(OrderLifecycle(restored, None, now_provider=lambda: clock[0]), restored,
+        account_ref=intent.account_ref, run_id=intent.run_id, owner_token="new-recovery-owner", now_provider=lambda: clock[0])
+    restarted.start(new_orders_enabled=False); case.addCleanup(restarted.stop)
+    restarted.recover_amendments(recovery)
+    for order in recovery.orders:
+        restarted.reconcile_by_broker_order(order)
+    final = restored.load(intent.intent_id)
+    case.assertEqual((intent, 3, 3, "ACCEPTED", ()),
+        (final.intent, final.filled_quantity, final.detailed_filled_quantity, final.amendment.status, final.amendment.observed_fills))
+    from kiwoom_monitor.application.position_target import reconcile_position_account_observation
+    observation = reconcile_position_account_observation(recovery, (observed,), (final,), input_ref="recovered-family",
+        observed_at=clock[0], ledger_complete=True, runtime_stable=True, reconciled_records=(final,))
+    case.assertTrue(observation.open_orders_complete, observation.reasons)
+    case.assertEqual([("broker-1", intent.intent_id, 70_000, 1), ("broker-2", intent.intent_id, 70_100, 2)],
+        [(row.broker_order_id, row.intent_ref, row.limit_price, row.remaining_quantity) for row in observation.broker_open_orders])
+    facts = [event for event in restored.events(intent.intent_id) if event["event_type"] == "FILL"]
+    case.assertEqual([("broker-1", "shared", 2), ("broker-2", "shared", 1)],
+        [(event["broker_order_id"], event["broker_execution_id"], event["quantity"]) for event in facts])
+    before = restored.events(intent.intent_id)
+    restarted.recover_amendments(recovery)
+    for order in recovery.orders:
+        restarted.reconcile_by_broker_order(order)
+    case.assertEqual(before, restored.events(intent.intent_id))
+    case.assertEqual((1, 0, 1), (transport.submit_calls, transport.cancel_calls, len(transport.amend_calls)))
+    return recovery, final
+
+
+async def verify_amendment_monitor(case, factory=None):
+    from tests.unit.test_mock_account_monitor import _Reader
+    from kiwoom_monitor.central_server.mock_account_monitor import MockAccountMonitor, MockAccountRealtimeCollector
+    from kiwoom_monitor.central_server.execution_runtime import ExecutionRuntime
+    _, store, repository, transport, clock, lifecycle, intent = amendment_fixture(case, factory)
+    lifecycle.reconcile(intent.intent_id, broker_snapshot(intent, "broker-1", 2, 4, 1,
+        (BrokerFill("shared", 2, 70_000, NOW),)))
+    clock[0] += timedelta(seconds=2)
+    transport.error = SubmissionUnknown("lost amendment ACK")
+    lifecycle.amend(intent.intent_id, 4, 70_100)
+    store._execution_wall_now = lambda: clock[0]
+    reader = _Reader(MockAccountRecovery(replace(_account(), as_of=clock[0], positions={"005930": 2}),
+        (broker_snapshot(intent, "broker-1", 2, 4, 2),)))
+    runtime = ExecutionRuntime(lifecycle, repository, account_ref=intent.account_ref, run_id=intent.run_id,
+                               owner_token="monitor-owner", now_provider=lambda: clock[0])
+    monitor = MockAccountMonitor(reader, runtime, repository, now_provider=lambda: clock[0], new_orders_enabled_on_start=False)
+    monitor.set_account_order_observation_enabled(True)
+    try:
+        await monitor.start()
+        clock[0] += timedelta(seconds=1)
+        collector = MockAccountRealtimeCollector(lambda: "fake-token", monitor.handle_realtime, lambda: clock[0])
+        collector._dispatch_realtime({"trnm": "REAL", "data": [{"type": "00", "item": "A005930", "values": {
+            "913": "체결", "914": "70100", "915": "1", "905": "+매수정정", "9203": "broker-2", "904": "broker-1",
+            "909": "shared", "908": "090003", "900": "3", "902": "2", "2135": "KRX"}}]})
+        await asyncio.wait_for(monitor._queue.join(), 5)
+        retained = repository.load(intent.intent_id)
+        case.assertEqual((2, OrderState.SUBMISSION_UNKNOWN), (retained.detailed_filled_quantity, retained.state))
+        case.assertEqual(1, len(retained.amendment.observed_fills))
+        clock[0] += timedelta(seconds=1)
+        reader.recovery = MockAccountRecovery(replace(_account(), as_of=clock[0], positions={"005930": 3},
+            reserved_open_buy_won=70_000 + 2 * 70_100),
+            (broker_snapshot(intent, "broker-1", 2, 1, 4), broker_snapshot(intent, "broker-2", 1, 2, 4)),
+            (BrokerOrderDetails("broker-1", 6, OrderSide.BUY, 70_000, "KRX"),
+             BrokerOrderDetails("broker-2", 3, OrderSide.BUY, 70_100, "KRX", original_broker_order_id="broker-1")))
+        monitor.handle_realtime("order_changed", None)
+        await asyncio.wait_for(monitor._queue.join(), 5)
+        final = repository.load(intent.intent_id)
+        case.assertEqual((3, (), "ACCEPTED"), (final.detailed_filled_quantity, final.amendment.observed_fills, final.amendment.status))
+        observation = monitor.latest_position_observation
+        case.assertIsNotNone(observation)
+        case.assertTrue(observation.open_orders_complete, observation.reasons)
+        case.assertEqual(2, len(observation.broker_open_orders))
+        case.assertEqual(3, reader.calls)
+        case.assertEqual((1, 0, 1), (transport.submit_calls, transport.cancel_calls, len(transport.amend_calls)))
+    finally:
+        await monitor.close()
+
+
+
 class OrderAmendmentTests(unittest.TestCase):
+    def test_conflicting_excess_fill_stays_durable_and_unresolved_without_weakening_quantity_cap(self):
+        verify_recovered_amendment(self, overfill=True)
+
+    def test_account_monitor_retains_early_child_00_and_recovers_using_existing_reads(self):
+        asyncio.run(verify_amendment_monitor(self))
+
+    def test_known_ack_preserves_a_fill_observed_during_the_network_call(self):
+        _, _, repository, transport, clock, lifecycle, intent = amendment_fixture(self)
+        original = transport.amend
+        def observed_during_request(*args):
+            response = original(*args)
+            snapshot = broker_snapshot(intent, "broker-2", 1, 2, 0, (BrokerFill("early", 1, 70_100, NOW),))
+            lifecycle.observe_amendment_fill(intent.intent_id, snapshot, original_broker_order_id="broker-1", side=OrderSide.BUY)
+            return response
+        with patch.object(transport, "amend", side_effect=observed_during_request):
+            final = lifecycle.amend(intent.intent_id, 3, 70_100)
+        self.assertEqual((1, (), "ACCEPTED"),
+            (final.detailed_filled_quantity, final.amendment.observed_fills, final.amendment.status))
+        self.assertEqual(["AMENDMENT_FILL_OBSERVED", "AMENDMENT_ACCEPTED", "FILL"],
+            [event["event_type"] for event in repository.events(intent.intent_id)][-3:])
+
+    def test_unknown_ack_recovers_from_parent_details_and_retained_fill_without_transmission(self):
+        verify_recovered_amendment(self)
+
+    def test_restart_after_binding_replays_durable_observation_exactly_once(self):
+        verify_recovered_amendment(self, crash=True)
+
+    def test_official_00_parent_preserves_leading_zeros_and_missing_parent_is_unknown(self):
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import parse_order_executions
+        for original, expected in (("0000139", "0000139"), ("0000000", None), (None, None)):
+            message = {"trnm": "REAL", "data": [{"type": "00", "item": "A005930", "values": {
+                "913": "체결", "914": "70100", "915": "1", "905": "+매수정정", "9203": "0000140",
+                "909": "same-fill", "908": "090002", "904": original}}]}
+            result, = parse_order_executions(message)
+            self.assertEqual(("0000140", expected, "same-fill", "매수", 1),
+                (result.order_no, result.original_broker_order_id, result.execution_no, result.side, result.quantity))
+
     def test_legacy_wire_and_indexed_lookup_cost_and_offline_input_roundtrip(self):
         from kiwoom_monitor.application.position_target import _json_value, _position_account_orders_from_dict
         _, store, repository, transport, _, lifecycle, intent = amendment_fixture(self)

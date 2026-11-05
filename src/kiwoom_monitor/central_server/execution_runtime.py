@@ -292,6 +292,37 @@ class ExecutionRuntime:
                 # Start a fresh read after the lease commit, even on the same session.
                 return self._lifecycle.reconcile(record.intent.intent_id, snapshot, **connection_args)
 
+    def recover_amendments(self, recovery: MockAccountRecovery, records=None) -> int:
+        """Bind broker facts/replay retained fills under the same run owner; never transmit."""
+        if recovery.account.account_ref != self.account_ref:
+            raise ValueError("amendment recovery account mismatch")
+        active = records if records is not None else self._repository.active_intents(
+            "mock", self.account_ref, self.run_id)
+        selected = [record for record in active if record.intent.run_id == self.run_id
+                    and record.amendment is not None and record.amendment.reconciliation_pending]
+        if not selected:
+            return 0  # Ordinary recovery must not wait on an unrelated in-flight order command.
+        with self._operation_lock:
+            before = self.observation_revision
+            for record in selected:
+                self._require_active(record.intent)
+                with self._observe_operation():
+                    self._lifecycle.recover_amendment(record.intent.intent_id, recovery)
+            return self.observation_revision - before
+
+    def observe_amendment_fill(self, snapshot, *, original_broker_order_id, side):
+        with self._operation_lock:
+            if not original_broker_order_id:
+                return None
+            record = self._repository.find_by_broker_order_id(
+                "mock", self.account_ref, self.run_id, original_broker_order_id)
+            if record is None or record.amendment is None or not record.amendment.unresolved:
+                return None
+            self._require_active(record.intent)
+            with self._observe_operation():
+                return self._lifecycle.observe_amendment_fill(record.intent.intent_id, snapshot,
+                    original_broker_order_id=original_broker_order_id, side=side)
+
     def cancel(self, intent_id: str, quantity: int = 0) -> ExecutionRecord:
         with self._operation_lock, self._observe_operation():
             record = self._repository.load(intent_id)
