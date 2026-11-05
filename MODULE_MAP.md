@@ -4,6 +4,8 @@
 
 > **지도 읽는 순서.** 현재 진입점은 아래 기능별 코드 경로를 확인한다. 초기 국소 통합의 완료·차단 표현은 판본별 기록이며 전체 진행은 AR 정본에 있다. [관련 계약](docs/architecture/app-target-20261023.md#0-현재-기준과-진행-현황).
 
+종가베팅 마감 가격은 기존 Collector가 RAM·보류/재시도·flush 수명을 소유하고 `market_observations.closing_auction_price_observation`이 실제 체결의 시간·출처를 정의한다. 기존 `database_datasets`가 native metadata·불변 판본을 저장하고 `database_observation_readers`가 마감 가격·첫 분봉의 가용 판본을 읽는다. 갭 수치 계산은 `close_and_ipo`에서 공유하며 원장 재대조는 기존 주문 트랜잭션에서 한다. 관측 가격을 OHLC로 변환하거나 별도 수집 task·writer·주문 owner를 만들지 않는다. [구현·검증](docs/architecture/section12-development-roadmap-20261105.md#s12-close-collector-gap).
+
 종가베팅 첫 손절의 RAM 수신·고정·깨우기와 durable checkpoint는 기존 Episode가 소유한다. ClosePlanManagement는 그 요청으로 기존 Gateway 취소·청산을 진행하며, `database_execution._close_native_stop_risk`가 같은 native 주문 트랜잭션에서 최초 Risk와 원매수 체결 커서를 대조한다. 별도 stop worker·권한·매 틱 DB 경로는 없다. [수락·잔여](docs/architecture/section12-development-roadmap-20261105.md#s12-close-sticky-stop).
 
 중지 관리 선택은 `domain/execution_activation.CloseMockExecutionPolicy`의 v2 명세가 소유한다. application의 기존 EXIT gate와 native control fence가 같은 선택을 사용하며 실제 원래 계획 증거는 native 취소/제출 경계가 검증한다. 기존 v1 직렬화·중지 권한과 신규 진입 차단은 유지한다. [명시 정책 연결](docs/architecture/section12-development-roadmap-20261105.md#s12-close-stopped-management).

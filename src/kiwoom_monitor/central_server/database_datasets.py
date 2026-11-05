@@ -8,7 +8,7 @@ from time import monotonic
 from typing import Any
 
 from kiwoom_monitor.domain.market_data_contract import MarketDataObservation
-from kiwoom_monitor.domain.research_contract import DATASET_SNAPSHOT_RESEARCH_KINDS
+from kiwoom_monitor.domain.research_contract import DATASET_SNAPSHOT_HISTORY_KINDS
 from kiwoom_monitor.infrastructure.market_data_metadata_codec import market_metadata_storage_values
 from kiwoom_monitor.central_server.database_codec import bounded_limit, dataset_snapshot_result_rows
 from kiwoom_monitor.central_server.database_observation_writes import (
@@ -35,6 +35,7 @@ ASYNC_COMMIT_DATASET_KINDS = frozenset({
 })
 
 COMMON_OBSERVED_DATASET_KINDS = frozenset({
+    'closing_auction_price',
     "market_state", "new_high", "program_flow", "ranking", "top20_membership",
     "top20_index", "top20_index_reconciled", "market_index_chart",
     "investor_flow", "stock_fundamentals", "nxt_eligibility",
@@ -97,7 +98,7 @@ class SQLiteDatasetStoreMixin:
                         _market_metadata_upsert_sql("?", "excluded"),
                         market_metadata_storage_values(snapshot_key, observation),
                     )
-                    if self._observation_history_enabled and kind in DATASET_SNAPSHOT_RESEARCH_KINDS:
+                    if self._observation_history_enabled and kind in DATASET_SNAPSHOT_HISTORY_KINDS:
                         _append_sqlite_observation_revision(
                             connection, kind, subject, snapshot_key, payload, observation,
                             now_provider=self._now_provider,
@@ -198,7 +199,7 @@ class PostgresDatasetStoreMixin:
                     len(serialized) > 1 and len(snapshot_kinds) == 1
                     and all(type(part) is str for key in keys for part in key)
                     and not (self._observation_history_enabled
-                             and snapshot_kinds & DATASET_SNAPSHOT_RESEARCH_KINDS)
+                              and snapshot_kinds & DATASET_SNAPSHOT_HISTORY_KINDS)
                     and not any(_top20_statistics_cache_day(kind, subject) for kind, subject, _ in keys)
                 )
                 if can_batch:
@@ -271,7 +272,7 @@ class PostgresDatasetStoreMixin:
                                 _market_metadata_upsert_sql("%s", "EXCLUDED"),
                                 market_metadata_storage_values(snapshot_key, observation),
                             )
-                            if self._observation_history_enabled and kind in DATASET_SNAPSHOT_RESEARCH_KINDS:
+                            if self._observation_history_enabled and kind in DATASET_SNAPSHOT_HISTORY_KINDS:
                                 _append_postgres_observation_revision(
                                     cursor, kind, subject, snapshot_key, payload, observation,
                                     now_provider=self._now_provider,

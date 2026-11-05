@@ -1202,7 +1202,7 @@ class MockAutomationSpecificationTests(unittest.TestCase):
     def test_close_entry_uses_native_shadow_quote_policy_and_one_plan(self):
         self._verify_close_entry_claim(self.store)
 
-    def _verify_close_entry_claim(self, store, *, prepare_only=False, close_terms=None):
+    def _verify_close_entry_claim(self, store, *, prepare_only=False, close_terms=None, native_windows=False):
         from dataclasses import asdict
         from datetime import time
         from kiwoom_monitor.application.close_mock_execution import (
@@ -1223,6 +1223,18 @@ class MockAutomationSpecificationTests(unittest.TestCase):
         example.tuesday = example.friday + timedelta(days=4)
         example.published = datetime.combine(example.friday, time(8), KST)
         example.setUp()
+        if native_windows:
+            example.entry = session_window_at(example.entry.starts_at, venue='KRX')
+            example.auction = session_window_at(example.auction.starts_at, venue='KRX')
+            example.following = session_window_at(datetime.combine(example.tuesday, time(9), KST), venue='KRX')
+            example.calendar = tuple(replace(day, sessions=tuple(
+                example.auction if window.session.value == 'KRX_CLOSING_AUCTION' else
+                example.entry if day.trading_date == example.friday else example.following
+                for window in day.sessions)) for day in example.calendar)
+            example.prior = tuple(replace(bar, schedule_version=example.entry.schedule_version) for bar in example.prior)
+            example.signal = replace(example.signal, schedule_version=example.entry.schedule_version)
+            example.closing = example.bar(example.auction, time(15, 20), price=105, revision='closing-auction')
+            example.opening = example.bar(example.following, time(9), price=102, revision='first-next-bar', opening=96)
         cut = datetime.fromisoformat(example.signal.available_at)
         clock = [cut]
         self.enterContext(patch.object(store, '_execution_wall_now', lambda: clock[0], create=True))

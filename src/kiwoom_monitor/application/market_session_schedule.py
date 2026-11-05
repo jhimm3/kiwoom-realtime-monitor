@@ -21,6 +21,9 @@ KST = ZoneInfo("Asia/Seoul")
 # 2024 https://kind.krx.co.kr/external/2024/10/31/000080/20241031000019/32104.htm
 # 2025 https://kind.krx.co.kr/external/2025/10/30/000102/20251030000137/99303.htm
 # Only dates checked against a venue notice and/or source bars belong here.
+# KRX call auctions may match within 30 seconds after the scheduled close.
+# https://global.krx.co.kr/contents/GLB/06/0602/0602010202/GLB0602010202T1.jsp
+KRX_AUCTION_RANDOM_END_SECONDS = 30
 KRX_VERIFIED_DELAYED_DATES = frozenset({
     date(2021, 11, 18), date(2022, 11, 17), date(2023, 11, 16),
     date(2024, 11, 14), date(2025, 11, 13),

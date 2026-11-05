@@ -140,11 +140,11 @@ def _require_fresh_collector(collector):
     _empty(collector, {name: dict for name in (
         "_pending_snapshots", "_latest_snapshots", "_pending_account_entry_symbols",
         "_pending_stock_references", "_ram_stock_references", "_pending_market_history", "_pending_minute_retries",
-        "_pending_minute_finalizations", "_continuous_from")})
+        "_pending_minute_finalizations", '_pending_closing_auction_prices', "_continuous_from")})
     _empty(collector, {"_inflight_minute_bars": list, "_approved_trade_sources": set,
         "_token_tasks": set, "_flush_tasks": set, "_credential_drain_task": None,
         "_credential_resume_task": None, "_reconnect_expiry_task": None})
-    _scalars(collector, {"_credential_phase": "IDLE", "_credential_paused": False,
+    _scalars(collector, {'_closing_minute': None, "_credential_phase": "IDLE", "_credential_paused": False,
         "_credential_shutdown": False, "_connection_generation": 0, "_planned_reconnect": False,
         "_connected_once": False, "_abnormal_disconnects": 0, "_reconnects": 0,
         "_last_registration_sent_at": 0.0, "_last_trade_observed_at": None,

@@ -179,6 +179,9 @@ class _MeasuredStore:
     def finalize_minute_bars(self, values):
         return self._write("finalize_minute_bars", "realtime_minute_finalize", values)
 
+    def save_dataset_snapshots(self, values):
+        return self._write('save_dataset_snapshots', 'realtime_market_history', values)
+
     def save_second_trade_bars(self, values):
         return self._write("save_second_trade_bars", "realtime_second_bar", values)
 

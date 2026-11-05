@@ -59,6 +59,35 @@ class _HeldDocumentStore:
 
 
 class CentralRealtimeCollectorTests(unittest.TestCase):
+    def test_closing_price_point_uses_actual_schedule_boundary_and_preserves_raw_session(self):
+        from dataclasses import replace
+        from kiwoom_monitor.central_server.market_observations import closing_auction_price_observation
+        from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
+
+        at = datetime.fromisoformat('2026-09-25T15:30:00.100000+09:00')
+        tick = TradeTick('005930', 105, 100, 1, 1, 105, '153000', market='KRX', session_type='raw-session')
+        quote = {'price_won': 105, 'available_at': at, 'input_ref': 'collector-trade:closing-point',
+                 'durable': False, 'market_status': 'TRADABLE'}
+        key, point = closing_auction_price_observation(tick, quote)
+        self.assertEqual('closing-auction:2026-09-25T15:30:00+09:00', key)
+        self.assertEqual(('005930:KRX', MarketDatasetKind.CLOSING_AUCTION_PRICE, 'raw-session'),
+                         (point.subject, point.kind, point.value['session_type']))
+        self.assertEqual(at.replace(microsecond=0), point.metadata.effective_at)
+        self.assertEqual(at, point.metadata.available_at)
+        for invalid in (replace(tick, market='NXT'), replace(tick, trade_time='152959'),
+                        replace(tick, trade_time='153031'), replace(tick, trade_time=None),
+                        replace(tick, current_price=None)):
+            self.assertIsNone(closing_auction_price_observation(invalid, quote))
+        self.assertIsNone(closing_auction_price_observation(tick, None))
+        self.assertIsNone(closing_auction_price_observation(tick,
+            {**quote, 'available_at': at.replace(second=0, microsecond=0) - timedelta(microseconds=1)}))
+        _, extended = closing_auction_price_observation(replace(tick, trade_time='153030'),
+            {**quote, 'available_at': at + timedelta(seconds=30)})
+        self.assertEqual(at.replace(second=30, microsecond=0), extended.metadata.effective_at)
+        delayed = {**quote, 'available_at': datetime.fromisoformat('2025-11-13T16:30:00.100000+09:00')}
+        _, shifted = closing_auction_price_observation(replace(tick, trade_time='163000'), delayed)
+        self.assertEqual('2025-11-13T16:30:00+09:00', shifted.value['auction_end'])
+
     @staticmethod
     def _reference_message(price, market="KRX", code="005930"):
         return {"trnm": "REAL", "data": [{
@@ -442,13 +471,13 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
 
     def test_operational_status_covers_all_native_save_kinds_without_draining(self) -> None:
         from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import TradeTick
-        from kiwoom_monitor.central_server.market_observations import market_state_observation
+        from kiwoom_monitor.central_server.market_observations import closing_auction_price_observation, market_state_observation
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / 'health.sqlite3')
             store.initialize()
-            at = datetime(2026, 10, 6, 10, 4, 50, tzinfo=timezone(timedelta(hours=9)))
+            at = datetime(2026, 10, 6, 15, 29, 50, tzinfo=timezone(timedelta(hours=9)))
             collector = CentralRealtimeCollector(lambda: 'token', 'real', RealtimeHub(), lambda: at + timedelta(seconds=15), store)
-            tick = TradeTick('005930', 100, None, None, 2, None, '100450')
+            tick = TradeTick('005930', 100, None, None, 2, None, '152950')
             collector._minute_bars.add(tick, at, at.timestamp())
             collector._pending_snapshots[('trade', '005930')] = {
                 'event_type': 'trade', 'item_key': '005930', 'received_at': at.timestamp(), 'event': {'type': 'trade', 'payload': {}},
@@ -464,9 +493,15 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
                 'KOSPI', '2026-10-06T10:04', payload,
                 market_state_observation('KOSPI', '2026-10-06T10:04', payload, at),
             )
+            quote = {'price_won': 100, 'available_at': at + timedelta(seconds=15),
+                     'input_ref': 'collector-trade:status-closing-point', 'durable': False, 'market_status': 'TRADABLE'}
+            key, point = closing_auction_price_observation(
+                TradeTick('005930', 100, None, None, 2, None, '153005'), quote)
+            collector._pending_closing_auction_prices[(quote['input_ref'], 100)] = (
+                point.kind.value, point.subject, key, point.value, point)
             try:
                 before = collector.operational_status()['persistence']
-                self.assertEqual(5, before['pending_records'])
+                self.assertEqual(6, before['pending_records'])
                 self.assertEqual(before, collector.operational_status()['persistence'])
                 self.assertFalse(store.load_minute_bars('005930', '2026-10-06', 'KRX'))
                 asyncio.run(collector._flush_snapshots())

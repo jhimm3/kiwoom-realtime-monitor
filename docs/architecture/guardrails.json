@@ -3074,6 +3074,18 @@
         "tests/unit/test_mock_automation_specification.py"
       ],
       "limits": {}
+    },
+    {
+      "id": "S12-05-close-collector-price-and-native-gap-20261105",
+      "reason": "The actual Collector writes one-minute observations with venue-qualified symbols; the original synthetic CLOSE fixture alone did not prove an actual closing/opening input connection.",
+      "connection": "Collector retains the approved KRX closing print as a price point in its existing RAM/flush lifetime and reuses save_dataset_snapshots and native immutable revisions. A per-day schedule-minute value avoids repeated window construction on ordinary ticks. KRX's documented 30-second random end preserves actual trade time. Existing one-minute bars and research-kind selection retain their semantics. Native gap reads indexed pinned windows and accepts the actual venue-qualified key while preserving old plain-symbol comparison proofs. The original order transaction rereads both native revision IDs.",
+      "validation": "Shared SQLite/PostgreSQL actual Collector/Runner cases cover the closing print seven seconds after the scheduled boundary, COMMIT response loss and idempotent retry, source reset, first completed opening minute, exact availability and UTC/KST arguments, DB reopen with Shadow disabled and a three-share native exit. A frozen price mutation is rejected before order/plan change. Unsupported/nonclosing observations remain ordinary source data. Existing recorder counts the dataset flush; no per-tick DB access or new worker is added.",
+      "evidence": [
+        "tests/unit/test_close_mock_execution.py",
+        "tests/integration/test_close_mock_execution_postgres.py",
+        "tests/unit/test_central_realtime_collector.py"
+      ],
+      "limits": {}
     }
   ]
 }

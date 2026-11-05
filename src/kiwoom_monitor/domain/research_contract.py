@@ -18,6 +18,8 @@ THEME_BACKUP_VERSION = 1
 OBSERVATION_REVISION_SCHEMA_VERSION = 1
 DATASET_SNAPSHOT_RESEARCH_KINDS = frozenset({"ranking", "top20_membership", "minute_bar"})
 RESEARCH_OBSERVATION_KINDS = DATASET_SNAPSHOT_RESEARCH_KINDS | {"daily_bar"}
+DATASET_SNAPSHOT_HISTORY_KINDS = DATASET_SNAPSHOT_RESEARCH_KINDS | {'closing_auction_price'}
+OBSERVATION_REVISION_KINDS = RESEARCH_OBSERVATION_KINDS | DATASET_SNAPSHOT_HISTORY_KINDS
 REPORTED_RESEARCH_RESULT_KIND = "research-run-report"
 REPORTED_RESEARCH_RESULT_COLLECTION = "reported_research_results"
 CLOSE_FINAL_CANDIDATE_VERSION = "final_research_candidate/v1"
@@ -245,7 +247,7 @@ class ObservationRevisionSource:
         observation: MarketDataObservation[object],
     ) -> "ObservationRevisionSource":
         normalized_kind = str(kind).strip()
-        if normalized_kind not in RESEARCH_OBSERVATION_KINDS:
+        if normalized_kind not in OBSERVATION_REVISION_KINDS:
             raise ValueError(f"unsupported research observation kind: {normalized_kind}")
         key = str(observation_key).strip()
         if not key:

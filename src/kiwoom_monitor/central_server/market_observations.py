@@ -10,6 +10,8 @@ from kiwoom_monitor.domain.time_basis import KST, as_kst, kst_now
 
 from kiwoom_monitor.application.market_session_schedule import (
     KRX_AFTER_MARKET_EFFECTIVE_DATE,
+    KRX_AUCTION_RANDOM_END_SECONDS,
+    MarketSession,
     session_window_at,
 )
 from kiwoom_monitor.domain.market_data_contract import (
@@ -27,6 +29,40 @@ from kiwoom_monitor.domain.market_data_contract import (
 )
 
 
+
+
+def closing_auction_price_observation(tick, quote):
+    """Retain an actual acknowledged KRX trade at the scheduled auction close, without constructing a bar."""
+    if quote is None or tick.market != 'KRX':
+        return None
+    at, raw = quote['available_at'], tick.trade_time
+    if (not isinstance(at, datetime) or at.utcoffset() is None
+            or not isinstance(raw, str) or len(raw) != 6 or not raw.isdigit()):
+        return None
+    at = as_kst(at)
+    try:
+        traded_at = at.replace(hour=int(raw[:2]), minute=int(raw[2:4]), second=int(raw[4:]), microsecond=0)
+    except ValueError:
+        return None
+    window = session_window_at(traded_at - timedelta(seconds=KRX_AUCTION_RANDOM_END_SECONDS + 1), venue='KRX')
+    if (window.session is not MarketSession.KRX_CLOSING_AUCTION
+            or not 0 <= (traded_at - window.ends_at).total_seconds() <= KRX_AUCTION_RANDOM_END_SECONDS
+            or traded_at > at or quote.get('durable') is not False or quote.get('market_status') != 'TRADABLE'
+            or not str(quote.get('input_ref', '')).startswith('collector-trade:')
+            or type(tick.current_price) is not int or tick.current_price <= 0
+            or tick.current_price != quote['price_won']):
+        return None
+    payload = {'version': 'closing_auction_price/v1', 'code': tick.code, 'market': 'KRX',
+        'trading_date': window.trading_date.isoformat(), 'auction_start': window.starts_at.isoformat(),
+        'auction_end': window.ends_at.isoformat(), 'event_at': traded_at.isoformat(), 'available_at': at.isoformat(),
+        'price_won': tick.current_price, 'input_ref': quote['input_ref'], 'session_type': tick.session_type,
+        'session': window.session.value, 'phase': window.phase.value, 'schedule_version': window.schedule_version,
+        'price_unit': 'won', 'window_closed': True, 'capture_quality': 'complete'}
+    key = 'closing-auction:' + window.ends_at.isoformat()
+    return key, MarketDataObservation(MarketDatasetKind.CLOSING_AUCTION_PRICE, f'{tick.code}:KRX', payload,
+        MarketDataMetadata(effective_at=traded_at, available_at=at, venue=TradingVenue.KRX, unit=DataUnit.WON,
+            value_kind=DataValueKind.ACTUAL, completeness=DataCompleteness.COMPLETE, origin=ObservationOrigin.REALTIME,
+            source='kiwoom-websocket-0B'))
 
 
 def ranking_observation(

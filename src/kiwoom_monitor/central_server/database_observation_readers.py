@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from threading import Lock
 from time import monotonic
 from typing import Any
+from kiwoom_monitor.application.market_session_schedule import KRX_AUCTION_RANDOM_END_SECONDS
 
 from kiwoom_monitor.central_server.database_codec import (
     _observation_revision_columns,
@@ -114,7 +115,9 @@ def _select_close_gap_rows(rows, windows):
             payload = row['payload']
             try:
                 at = datetime.fromisoformat(row['available_at'])
-                bar_start, bar_end = (datetime.fromisoformat(payload[key]) for key in ('bar_start', 'bar_end'))
+                keys = (('auction_start', 'auction_end') if row['kind'] == 'closing_auction_price'
+                        else ('bar_start', 'bar_end'))
+                bar_start, bar_end = (datetime.fromisoformat(payload[key]) for key in keys)
                 if (any(value.utcoffset() is None for value in (at, bar_start, bar_end))
                         or (bar_start, bar_end) != (start, end) or at > cut
                         or payload.get('window_closed') is not True):
@@ -126,6 +129,9 @@ def _select_close_gap_rows(rows, windows):
                 by_key[row['observation_key']] = (at, row)
         if not by_key:
             return ()
+        prices = {key: value for key, value in by_key.items() if value[1]['kind'] == 'closing_auction_price'}
+        if prices:
+            by_key = prices  # A direct closing print is the price fact; completed OHLC remains the legacy fallback.
         latest_at = max(at for at, row in by_key.values())
         latest = [row for at, row in by_key.values() if at == latest_at]
         if len(latest) != 1:
@@ -138,14 +144,22 @@ def _select_close_gap_rows(rows, windows):
     return tuple(selected)
 
 
+def _close_gap_observation_select(p, *, postgres=False):
+    instant = (lambda name: name) if postgres else (lambda name: f'datetime({name})')
+    return (f'SELECT {_observation_revision_columns(postgres=postgres)} FROM central_observation_revisions '
+            f"WHERE subject IN ({p},{p}) AND venue='KRX' AND ((kind='minute_bar' AND {instant('effective_at')} IN "
+            f"({instant(p)},{instant(p)})) OR (kind='closing_auction_price' AND {instant('effective_at')} "
+            f"BETWEEN {instant(p)} AND {instant(p)}))")
+
+
 class SQLiteObservationReaderStoreMixin:
     def load_close_gap_observations(self, symbol: str, closing_start: datetime, closing_end: datetime,
                                     next_open: datetime, as_of: datetime) -> tuple[dict[str, Any], ...]:
         windows = _close_gap_windows(closing_start, closing_end, next_open, as_of)
-        sql = _observation_revision_select('?') + " AND subject=? AND venue='KRX' " \
-            "AND datetime(effective_at) IN (datetime(?),datetime(?))"
+        sql = _close_gap_observation_select('?')
         with self._lock, self._connection() as connection:
-            rows = connection.execute(sql, ('minute_bar', symbol, closing_start.isoformat(), next_open.isoformat())).fetchall()
+            rows = connection.execute(sql, (symbol, symbol + ':KRX', closing_start.isoformat(), next_open.isoformat(),
+                closing_end.isoformat(), (closing_end + timedelta(seconds=KRX_AUCTION_RANDOM_END_SECONDS)).isoformat())).fetchall()
         return _select_close_gap_rows(observation_revision_result_rows(rows), windows)
 
     def load_observation_revisions(
@@ -220,11 +234,12 @@ class PostgresObservationReaderStoreMixin:
         from .postgres_access import DBWriterContext, open_observed_connection
 
         windows = _close_gap_windows(closing_start, closing_end, next_open, as_of)
-        sql = _observation_revision_select('%s', postgres=True) + " AND subject=%s AND venue='KRX' AND effective_at IN (%s,%s)"
+        sql = _close_gap_observation_select('%s', postgres=True)
         context = DBWriterContext(writer_family='read.close_gap', writer_kind='observation_revision',
                                   operation='load_close_gap_observations', access_mode='read')
         with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
-            cursor.execute(sql, ('minute_bar', symbol, closing_start, next_open))
+            cursor.execute(sql, (symbol, symbol + ':KRX', closing_start, next_open, closing_end,
+                                  closing_end + timedelta(seconds=KRX_AUCTION_RANDOM_END_SECONDS)))
             rows = cursor.fetchall()
         return _select_close_gap_rows(observation_revision_result_rows(rows), windows)
 

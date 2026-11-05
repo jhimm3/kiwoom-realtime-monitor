@@ -67,6 +67,7 @@ class CandidateUniverse(StrEnum):
 
 
 class MarketDatasetKind(StrEnum):
+    CLOSING_AUCTION_PRICE = 'closing_auction_price'
     MINUTE_BAR = "minute_bar"
     DAILY_BAR = "daily_bar"
     MARKET_STATE = "market_state"

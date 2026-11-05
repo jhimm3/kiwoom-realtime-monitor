@@ -7,8 +7,10 @@ from datetime import datetime, timedelta
 import json
 
 from .breakout_strategy import StrategyState
-from .close_and_ipo import CloseIpoPosition, CloseIpoSetup, ClosePolicy, evaluate_close_gap, matches_close_shadow
-from .market_session_schedule import KST, MarketPhase, MarketSession, SessionSupport
+from .close_and_ipo import (
+    CloseIpoPosition, CloseIpoSetup, ClosePolicy, evaluate_close_gap, evaluate_close_gap_at_price, matches_close_shadow,
+)
+from .market_session_schedule import KST, KRX_AUCTION_RANDOM_END_SECONDS, MarketPhase, MarketSession, SessionSupport
 from .research_replay import KrxMinuteBarFrame
 from .mock_automation_execution import (
     MockAutomationGateStatus,
@@ -299,10 +301,31 @@ def _completed_close_gap(position, observations, decided_at):
     if len(observations) != 2 or len({row['revision_id'] for row in observations}) != 2:
         raise ValueError('CLOSE gap requires two distinct native bar revisions')
     frames = []
-    for row in observations:
+    point = observations[0] if observations[0]['kind'] == 'closing_auction_price' else None
+    if point is not None:
+        payload, auction = point['payload'], setup.close_auction
+        if ((point['subject'], point['venue'], point['unit'], point['value_kind'], point['completeness'],
+             point['origin'], point['source_id']) != (setup.symbol + ':KRX', 'KRX', 'won', 'actual', 'complete',
+                                                      'realtime', 'kiwoom-websocket-0B')
+                or payload.get('version') != 'closing_auction_price/v1' or payload.get('window_closed') is not True
+                or payload.get('capture_quality') != 'complete' or payload.get('code') != setup.symbol
+                or payload.get('market') != 'KRX' or payload.get('price_unit') != 'won'
+                or type(payload.get('price_won')) is not int or payload['price_won'] <= 0
+                or not str(payload.get('input_ref', '')).startswith('collector-trade:')
+                or (payload.get('session'), payload.get('phase'), payload.get('schedule_version'))
+                != (auction.session.value, auction.phase.value, auction.schedule_version)
+                or datetime.fromisoformat(payload['auction_start']) != auction.starts_at
+                or datetime.fromisoformat(payload['auction_end']) != auction.ends_at
+                or datetime.fromisoformat(payload['event_at']) != datetime.fromisoformat(point['effective_at'])
+                or not 0 <= (datetime.fromisoformat(point['effective_at']) - auction.ends_at).total_seconds() <= KRX_AUCTION_RANDOM_END_SECONDS
+                or not datetime.fromisoformat(point['effective_at']) <= datetime.fromisoformat(point['available_at']) <= setup.next_open_at
+                or datetime.fromisoformat(payload['available_at']) != datetime.fromisoformat(point['available_at'])):
+            raise ValueError('CLOSE gap requires the original actual closing price observation')
+    for row in observations[1:] if point is not None else observations:
         payload = row['payload']
-        if ((row['kind'], row['subject'], row['venue'], row['value_kind'], row['completeness'])
-                != ('minute_bar', setup.symbol, 'KRX', 'actual', 'complete')
+        if (row['subject'] not in {setup.symbol, setup.symbol + ':KRX'}
+                or (row['kind'], row['venue'], row['value_kind'], row['completeness'])
+                != ('minute_bar', 'KRX', 'actual', 'complete')
                 or payload.get('window_closed') is not True or payload.get('capture_quality') != 'complete'
                 or payload.get('market') != 'KRX' or payload.get('code') != setup.symbol
                 or payload.get('price_unit') != 'won'
@@ -315,7 +338,9 @@ def _completed_close_gap(position, observations, decided_at):
             payload['trade_value_million_won'], bool(payload.get('session_finalized', False)),
             payload['capture_quality'], payload['finalization_source'], market_session=payload['session'],
             market_phase=payload['phase'], schedule_version=payload['schedule_version']))
-    result = evaluate_close_gap(position, frames, session=window, cut=decided_at)
+    result = (evaluate_close_gap_at_price(position, point['payload']['price_won'], frames,
+                  session=window, cut=decided_at, refs=(point['revision_id'],)) if point is not None else
+              evaluate_close_gap(position, frames, session=window, cut=decided_at))
     return result if result.action == 'EXIT' else None
 
 
@@ -370,7 +395,8 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
         reason = "next_session_exit_deadline_0B"
     elif gap_observations is not None and _completed_close_gap(
             CloseIpoPosition(setup, head.quantity, basis, 0), gap_observations, decided_at) is not None:
-        reason = 'adverse_gap_full_exit_completed_bars'
+        reason = ('adverse_gap_full_exit_closing_trade_and_completed_open' if gap_observations[0]['kind'] == 'closing_auction_price'
+                  else 'adverse_gap_full_exit_completed_bars')
     else:
         return None
     snapshot = {"version": "close_exit_snapshot/v1", "spec_id": spec.spec_id,
@@ -379,8 +405,10 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
         "entry_intent_id": root.intent.intent_id, "quantity": head.quantity, "fill_cursor": head.fill_cursor,
         "entry_price_won": basis, "entry_fill_ref": content_id("close_fills", fills),
         "trigger_quote": trigger, "quote": execution_quote, "reason": reason}
-    if reason == 'adverse_gap_full_exit_completed_bars':
+    if reason in {'adverse_gap_full_exit_completed_bars', 'adverse_gap_full_exit_closing_trade_and_completed_open'}:
         snapshot['gap_observations'] = gap_observations
+    if reason == 'adverse_gap_full_exit_closing_trade_and_completed_open':
+        snapshot['version'] = 'close_exit_snapshot/v3'
     if protection_notice is not None:
         snapshot.update(version='close_exit_snapshot/v2', protection_notice=protection_notice)
     state = StrategyState(status="open", symbol=event["symbol"], entry_price=basis,

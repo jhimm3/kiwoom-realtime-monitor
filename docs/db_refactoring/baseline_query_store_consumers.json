@@ -5149,6 +5149,17 @@
       "",
       "",
       "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/realtime_collector.py",
+      "CentralRealtimeCollector._flush_snapshot_cycle",
+      "self._store",
+      "save_dataset_snapshots",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
     ]
   ],
   "forwarding_identities": [

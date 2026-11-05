@@ -19,7 +19,7 @@ from typing import Any, Awaitable, Callable, ContextManager, Protocol
 
 from websockets.asyncio.client import connect
 
-from kiwoom_monitor.application.market_session_schedule import realtime_subscription_target
+from kiwoom_monitor.application.market_session_schedule import krx_regular_session_hours, realtime_subscription_target
 
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
     parse_account_balance_changes, parse_market_index_ticks, parse_market_operation_ticks,
@@ -41,6 +41,7 @@ from .market_observations import (
     KST,
     as_kst,
     bar_observation_key,
+    closing_auction_price_observation,
     market_state_observation,
     minute_bar_observation,
 )
@@ -209,6 +210,8 @@ class CentralRealtimeCollector:
         self._pending_minute_retries: dict[str, dict[str, Any]] = {}
         self._inflight_minute_bars: list[dict[str, Any]] = []
         self._pending_minute_finalizations: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        self._pending_closing_auction_prices: dict[tuple[str, int], tuple] = {}
+        self._closing_minute = None
         self._minute_bars = MinuteBarAccumulator()
         # Individual 0B receipts, owned by this collector; never persisted as bars.
         self._ram_trades: deque[dict[str, Any]] = deque()
@@ -302,6 +305,8 @@ class CentralRealtimeCollector:
             "account_entry_symbols": self._save_record_summary(self._pending_account_entry_symbols.values()),
             "stock_references": self._save_record_summary(self._pending_stock_references.values()),
             "minute_finalizations": self._save_record_summary(self._pending_minute_finalizations.values()),
+            'closing_auction_prices': self._save_record_summary(
+                {'available_at': value[4].metadata.available_at} for value in self._pending_closing_auction_prices.values()),
             # Empty compatibility bucket in the existing diagnostic HTTP v1.
             "second_bars": self._save_record_summary(()),
             "market_history": self._save_record_summary(
@@ -575,6 +580,7 @@ class CentralRealtimeCollector:
                 + len(self._pending_minute_retries)
                 + len(self._inflight_minute_bars) + len(self._pending_minute_finalizations)
                 + len(self._pending_market_history)
+                + len(self._pending_closing_auction_prices)
                 + len(self._pending_stock_references) + len(self._pending_account_entry_symbols),
                 "stopped": self._credential_phase == "STOPPED"}
 
@@ -1129,9 +1135,21 @@ class CentralRealtimeCollector:
                     self._pending_snapshots[(name, item_key)] = snapshot
                     self._latest_snapshots[(name, item_key)] = snapshot
                 if name == "trade":
-                    if self._automation_price_listener is not None:
+                    boundary = False
+                    if self._store is not None and value.market == 'KRX':
+                        day = datetime.fromtimestamp(snapshot['received_at'], KST).date()
+                        if self._closing_minute is None or self._closing_minute[0] != day:
+                            self._closing_minute = (day, krx_regular_session_hours(day)[1].strftime('%H%M'))
+                        boundary = str(value.trade_time)[:4] == self._closing_minute[1]
+                    if self._automation_price_listener is not None or boundary:
                         observation = self.automation_price_observation(code)
-                        if observation is not None:
+                        if boundary:
+                            close = closing_auction_price_observation(value, observation)
+                            if close is not None:
+                                key, point = close
+                                self._pending_closing_auction_prices[(point.value['input_ref'], point.value['price_won'])] = (
+                                    point.kind.value, point.subject, key, point.value, point)
+                        if observation is not None and self._automation_price_listener is not None:
                             try:
                                 self._automation_price_listener(code, observation)
                             except Exception:
@@ -1409,6 +1427,17 @@ class CentralRealtimeCollector:
             except Exception:
                 for value in reference_values:
                     self._pending_stock_references.setdefault(str(value["owner"]), value)
+                raise
+        auction_prices = self._pending_closing_auction_prices
+        self._pending_closing_auction_prices = {}
+        if auction_prices:
+            try:
+                with self._observe_save('closing_auction_prices', (
+                        {'available_at': value[4].metadata.available_at} for value in auction_prices.values())):
+                    await owned_to_thread(self._store.save_dataset_snapshots, list(auction_prices.values()))
+            except Exception:
+                for key, value in auction_prices.items():
+                    self._pending_closing_auction_prices.setdefault(key, value)
                 raise
         closures = list(self._pending_minute_finalizations.values())
         self._pending_minute_finalizations.clear()

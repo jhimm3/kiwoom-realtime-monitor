@@ -320,7 +320,24 @@ def evaluate_close_gap(position, frames, *, session, cut, refs=()):
     if closing is None or opening is None:
         return CloseIpoDecision("HOLD", 0, "completed_close_or_open_proxy_unavailable", setup, refs)
     refs = tuple(dict.fromkeys((closing.revision_id, opening.revision_id, *refs)))
-    if opening.open * 10_000 > closing.close * (10_000 - policy.adverse_gap_bps):
+    return _close_gap_prices(position, closing.close, opening.open, refs)
+
+
+def evaluate_close_gap_at_price(position, closing_price, frames, *, session, cut, refs=()):
+    """Use a separately verified actual closing price and the first completed opening minute."""
+    setup = position.setup
+    opening = _window_bar(frames, setup.symbol, session, setup.next_open_at,
+                          setup.next_open_at + timedelta(minutes=1), cut)
+    if opening is None:
+        return CloseIpoDecision('HOLD', 0, 'completed_close_or_open_proxy_unavailable', setup, refs)
+    return _close_gap_prices(position, closing_price, opening.open,
+                            tuple(dict.fromkeys((*refs, opening.revision_id))))
+
+
+def _close_gap_prices(position, closing_price, opening_price, refs):
+    setup, policy = position.setup, position.setup.policy
+    _positive(closing_price, opening_price)
+    if opening_price * 10_000 > closing_price * (10_000 - policy.adverse_gap_bps):
         return CloseIpoDecision("HOLD", 0, "no_adverse_opening_gap", setup, refs)
     if policy.ipo_reduction_quantity is None:
         return CloseIpoDecision("EXIT", position.quantity, "adverse_gap_full_exit", setup, refs)

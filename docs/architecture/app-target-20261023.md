@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-05 · S12-05 명시한 종가베팅 정책의 중지 후 관리**. AR 판정과 선행 개발은 11절에 둔다.
+갱신. **2026-11-05 · S12-05 Collector 마감 가격·첫 분봉의 native 연결**. AR 판정과 선행 개발은 11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 연결 11개 중 항목 7·9를 개발 수락했다. 종가베팅 내부 계획 수명·첫 손절·부분 체결 보호와 명시한 v2 정책의 중지 후 관리를 연결했다. 기존 v1 중지 권한과 새 진입 차단은 보존한다. 실제 완전한 동시호가 공급과 일반 READY/UI 등 대표 연결 9개, DD·MICRO 경계가 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [종가베팅 중지 관리](#section12-close-stopped-management) · [S12-05 수락·잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05는 12.12 대표 연결 11개 중 항목 7·9를 개발 수락했다. 종가베팅 내부 계획 수명·첫 손절·부분 체결 보호·명시한 v2 정책의 중지 후 관리에 이어 Collector 마감 가격·첫 분봉 생산 코드를 합성 0B로 연결 검증했다. 기존 v1 권한·연구 비교와 새 진입 차단은 보존한다. 일반 READY/UI 등 대표 연결 9개, DD·MICRO 경계가 남아 있다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [항목 7·9 수락](#section12-acceptance-seven-nine) · [마감 가격 생산 경로](#section12-close-collector-gap) · [S12-05 수락·잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4745,6 +4745,12 @@ source264의새CLI는type=Path가raw빈문자열을점(.)으로접어full owner�
 ### 11.266 S12-05 명시한 종가베팅 정책의 중지 후 원계획 관리 — 2026-11-05
 
 - 기존 실행 정책 v1의 JSON·ID·중지 권한을 보존한다. v2는 중지 후 원계획 관리 계속을 명시해야 한다. application EXIT gate와 native control fence에서 같은 선택을 확인하며, 같은 계좌/run/spec/revision·lease·최신 대사·Risk·원체결 검사를 유지한다. STOPPED를 재개하지 않고 원래 잔량 취소·청산을 완료하며 새 BUY는 거절한다. 현재 소스 `b762960b`의 Windows 336건과 PostgreSQL 17건, 구조·소비·증분 대조를 수락했다. 실제 동시호가 공급·일반 READY/UI 등 항목 3 잔여와 전체 대표 연결은 계속 진행이다. [명시 정책·검증·잔여](section12-development-roadmap-20261105.md#s12-close-stopped-management).
+
+<a id="section12-close-collector-gap"></a>
+
+### 11.267 S12-05 Collector 마감 가격·첫 분봉의 native 연결 — 2026-11-05
+
+- 기존 Collector의 RAM·보류/재시도·flush와 dataset/불변 원장을 재사용해 승인 KRX의 실제 마감 가격을 보존한다. 랜덤 종료와 지연 개장을 반영하고 실제 체결·수신 시각을 유지한다. 실제 분봉의 거래소 포함 키를 native 갭 조회·검증에 함께 연결했다. 완료 동시호가 봉 연구 비교는 보존하며 가격 관측에서 OHLC를 만들지 않는다. 합성 0B를 실제 생산 코드에 공급해 COMMIT 응답 유실·source 교체·DB 재개방·원계획 3주 청산과 변조 차단을 확인했다. 현재 소스 `39b6be7c`의 Windows 431건과 PostgreSQL 고유 19건, 구조·소비·증분 대조를 수락했다. 일반 READY/UI와 전체 대표 연결의 수락은 남아 있다. [생산·검증·비용·잔여](section12-development-roadmap-20261105.md#s12-close-collector-gap).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

@@ -12,6 +12,8 @@
 
 종가베팅 실행 정책 v1은 기존 JSON·spec/plan ID와 중지 권한을 보존한다. v2는 `stopped_management: continue_original_plan/v1`을 명시해야 저장할 수 있으며 그 선택은 내용 hash에 포함한다. 중지 중 원래 계획의 취소·청산만 해당 native control fence를 통과할 수 있다. 계좌·run·spec·revision·lease·최신 대사와 원체결 검증은 공통 원장에 남고 신규 진입은 계속 거절한다. 스키마 변경이나 기존 명세의 일괄 변환은 없다.
 
+종가베팅의 `closing_auction_price`는 기존 dataset snapshot·시장 metadata·불변 observation revision에 저장한다. subject는 `종목코드:KRX`이며 payload의 `event_at`과 metadata `effective_at`은 실제 0B 체결 시각, `available_at`은 원래 수신 시각이다. 별도 OHLC나 테이블을 만들지 않는다. 이 새 종류는 불변 보관 대상으로만 확장하며 기존 일반 연구의 선택 종류와 과거 결과는 바꾸지 않는다. native 갭 조회는 고정 구간의 실제 마감 가격을 우선하고 기존 완료 동시호가 봉 비교도 보존한다. v3 청산 근거는 사용한 원장 두 판본을 그대로 보존한다. schema 25와 기존 운영 DB는 변경하지 않았다. [생산·검증 경로](docs/architecture/section12-development-roadmap-20261105.md#s12-close-collector-gap).
+
 ## 새 명시full 로컬 저장 계약 — AR04/05 source253·기동/복원 연결257
 
 **실제사본265 검증:** source267의현재고유30 중실제1case에서같은full root의3owner를소비했다. 닫힌monitor/중앙2.3GB는공개소비후원사본전체bytes와같고journal3는신규native원자수락/원raw·판본·receipt/noop을보존했다. 새schema변경/원source SQL0이며기존journal11/central24/ownedfull 계약은그대로다. 실제sourcecut/T0·연구HTTP/설치소비는별도다. [실제수락·근거](docs/architecture/app-target-20261023.md#ar05-joint-native-copy265).

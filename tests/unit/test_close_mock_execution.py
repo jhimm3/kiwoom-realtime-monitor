@@ -215,6 +215,72 @@ def publish_gap_observations(store, example, clock):
     return [rows[key] for key in keys]
 
 
+async def publish_collector_gap_observations(case, store, example):
+    import asyncio
+    from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
+    from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+    from kiwoom_monitor.central_server.diagnostic_replay_contract import validate_collector_message
+    from kiwoom_monitor.central_server.diagnostic_collector_replay import _MeasuredStore
+    from types import SimpleNamespace
+
+    at = [example.auction.ends_at + timedelta(seconds=7, milliseconds=100)]
+    async def held_timer(_):
+        await asyncio.Event().wait()
+    measured = _MeasuredStore(store, SimpleNamespace(now=lambda: at[0]))
+    collector = CentralRealtimeCollector(lambda: 'unused-offline-token', 'mock', RealtimeHub(), lambda: at[0], measured,
+                                         snapshot_sleep=held_timer)
+    await collector.start_input_replay(message_validator=validate_collector_message)
+    case.addAsyncCleanup(collector.close)
+    source = (example.symbol, 'KRX')
+    collector.restore_replay_source_state({source}, {source: example.auction.starts_at})
+    def trade(raw_time, price):
+        collector.accept_replay_message({'trnm': 'REAL', 'data': [{'type': '0B', 'item': example.symbol,
+            'values': {'20': raw_time, '10': str(price), '13': '100', '14': '1', '15': '1', '290': '2'}}]})
+    trade((example.auction.ends_at + timedelta(seconds=7)).strftime('%H%M%S'), example.closing.close)
+    case.assertEqual(1, len(collector._pending_closing_auction_prices))
+    native_save = store.save_dataset_snapshots
+    failed = [False]
+    def lose_ack(values):
+        native_save(values)
+        if not failed[0] and any(value[0] == 'closing_auction_price' for value in values):
+            failed[0] = True
+            raise OSError('synthetic closing price COMMIT response lost')
+    with patch.object(store, 'save_dataset_snapshots', side_effect=lose_ack):
+        with case.assertRaisesRegex(OSError, 'COMMIT response lost'):
+            await collector._flush_snapshots(flush_latest=False)
+        original, = store.load_observation_revisions('closing_auction_price', example.symbol + ':KRX')
+        case.assertEqual(1, len(collector._pending_closing_auction_prices))
+        await collector._flush_snapshots(flush_latest=False)
+    case.assertEqual([original], store.load_observation_revisions('closing_auction_price', example.symbol + ':KRX'))
+    case.assertFalse(collector._pending_closing_auction_prices)
+    case.assertEqual(['failed', 'returned'], [row['state'] for row in measured.calls if row['kind'] == 'realtime_market_history'])
+    case.assertFalse(set(original['payload']) & {'open', 'high', 'low', 'close', 'bar_start', 'bar_end'})
+    # A later trade is a new minute, never a replacement of the retained close.
+    at[0] += timedelta(minutes=1)
+    trade(at[0].strftime('%H%M%S'), 1)
+    at[0] = example.following.starts_at - timedelta(minutes=1)
+    collector.accept_replay_sources({source}, reset_all=True, subscribed_at=at[0])
+    at[0] = example.following.starts_at + timedelta(milliseconds=100)
+    trade(example.following.starts_at.strftime('%H%M%S'), example.opening.open)
+    at[0] = example.following.starts_at + timedelta(seconds=59)
+    trade(at[0].strftime('%H%M%S'), example.opening.close)
+    at[0] = example.following.starts_at + timedelta(minutes=1, seconds=2)
+    await collector._flush_snapshots(flush_latest=False)
+    selected = store.load_close_gap_observations(example.symbol, example.auction.starts_at,
+        example.auction.ends_at, example.following.starts_at, at[0])
+    case.assertEqual(['closing_auction_price', 'minute_bar'], [row['kind'] for row in selected],
+        [(row['kind'], row['effective_at'], row['available_at'], row['completeness'],
+          row['payload'].get('bar_start'), row['payload'].get('bar_end'), row['payload'].get('capture_quality'))
+         for kind in ('closing_auction_price', 'minute_bar') for row in store.load_observation_revisions(kind, example.symbol + ':KRX')[:2]])
+    case.assertEqual(original, selected[0])
+    case.assertEqual(example.opening.open, selected[1]['payload']['open'])
+    case.assertEqual((), store.load_close_gap_observations(example.symbol, example.auction.starts_at,
+        example.auction.ends_at, example.following.starts_at, at[0] - timedelta(microseconds=1)))
+    await collector.close()
+    case.assertEqual(0, collector.input_replay_status()['pending_records'])
+    return list(selected)
+
+
 class CloseDeadlineExecutionTests(unittest.TestCase):
     def test_v1_stopped_policy_does_not_gain_protective_cancel_authority(self):
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
@@ -360,7 +426,8 @@ def verify_close_legacy_entry(case, store_factory):
     case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
 
 
-async def verify_close_runner(case, store_factory, *, protective=False, stopped=False):
+async def verify_close_runner(case, store_factory, *, protective=False, stopped=False, collector_gap=False,
+                              tamper_collector_gap=False):
     import asyncio
     from dataclasses import replace
     from types import SimpleNamespace
@@ -381,7 +448,8 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
     terms = (CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1', 'cancel_at_entry_deadline/v1',
         'acknowledged_0B_bounded_slippage/v1', version='close-mock-execution-policy/v2',
         stopped_management='continue_original_plan/v1') if stopped else None)
-    context = MockAutomationSpecificationTests._verify_close_entry_claim(case, store, prepare_only=True, close_terms=terms)
+    context = MockAutomationSpecificationTests._verify_close_entry_claim(case, store, prepare_only=True,
+        close_terms=terms, native_windows=collector_gap)
     clock, quotes = context.clock, {context.event['symbol']: context.quote}
     broker_orders, broker_positions = {}, {}
     execution, repository, runtime = context.execution, context.repository, context.runtime
@@ -572,7 +640,8 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
     await runner.episode.advance_once()
     if not protective:
         case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
-    expected_gap = publish_gap_observations(store, context.example, clock)
+    expected_gap = (await publish_collector_gap_observations(case, store, context.example) if collector_gap else
+                    publish_gap_observations(store, context.example, clock))
     selected = store.load_close_gap_observations(buy.intent.symbol, context.example.auction.starts_at,
         context.example.auction.ends_at, context.example.following.starts_at, clock[0])
     case.assertEqual(expected_gap, list(selected))
@@ -582,6 +651,26 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
     case.assertEqual(selected, store.load_close_gap_observations(buy.intent.symbol,
         context.example.auction.starts_at.astimezone(timezone.utc), context.example.auction.ends_at.astimezone(timezone.utc),
         context.example.following.starts_at.astimezone(timezone.utc), clock[0].astimezone(timezone.utc)))
+    if tamper_collector_gap:
+        from kiwoom_monitor.application.close_mock_execution import CLOSE_EXIT_COLLECTION, close_exit_key
+
+        original_submit = runtime.submit_automation_intent
+        def change_frozen_closing_price(intent, account, **kwargs):
+            proof = repository.load_close_exit_evidence(ACCOUNT_REF, close_exit_key(intent.plan))
+            changed = deepcopy(proof)
+            changed['snapshot']['gap_observations'][0]['payload']['price_won'] += 1
+            store.upsert_documents(CLOSE_EXIT_COLLECTION,
+                [{'owner': ACCOUNT_REF, 'key': close_exit_key(intent.plan), 'document': changed}])
+            return original_submit(intent, account, **kwargs)
+        with patch.object(runtime, 'submit_automation_intent', side_effect=change_frozen_closing_price):
+            with case.assertRaisesRegex(RuntimeError, 'CLOSE_EXIT_PROOF_OR_ORDER_CHANGED'):
+                await runner.episode.advance_once()
+        case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
+        case.assertEqual((), execution.active_intents('mock', ACCOUNT_REF, runtime.run_id))
+        head = execution.load_plan_position(ACCOUNT_REF, runtime.run_id, buy.intent.symbol, buy.intent.plan)
+        case.assertEqual((3, 0), (head.quantity, head.unreconciled_sell_quantity))
+        await supervisor.close()
+        return
     await runner.episode.advance_once()
     sell, = execution.active_intents('mock', ACCOUNT_REF, runtime.run_id)
     case.assertEqual((OrderState.ACCEPTED, 3, 103, buy.intent.plan.plan_id),
@@ -592,6 +681,11 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
         case.assertEqual(('close_exit_snapshot/v2', 94, 103, 'filled_position_protection_0B'),
             (evidence['snapshot']['version'], evidence['snapshot']['trigger_quote']['price_won'],
              evidence['snapshot']['quote']['price_won'], evidence['snapshot']['reason']))
+    if collector_gap:
+        from kiwoom_monitor.application.close_mock_execution import close_exit_key
+        evidence = repository.load_close_exit_evidence(ACCOUNT_REF, close_exit_key(sell.intent.plan))
+        case.assertEqual(('close_exit_snapshot/v3', 'adverse_gap_full_exit_closing_trade_and_completed_open'),
+                         (evidence['snapshot']['version'], evidence['snapshot']['reason']))
     clock[0] += timedelta(seconds=1)
     broker_positions.clear()
     broker_orders[sell.broker_order_id] = BrokerOrderSnapshot(sell.broker_order_id, ACCOUNT_REF, buy.intent.symbol,
@@ -609,6 +703,18 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
 
 
 class CloseRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_collector_gap_rechecks_original_closing_price_before_native_order_claim(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-collector-gap-tamper.sqlite3'
+        await verify_close_runner(self, lambda: SQLiteQueryStore(db), collector_gap=True, tamper_collector_gap=True)
+
+    async def test_actual_collector_closing_price_and_first_minute_drive_original_native_gap_exit(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-collector-gap.sqlite3'
+        await verify_close_runner(self, lambda: SQLiteQueryStore(db), collector_gap=True)
+
     async def test_explicit_stopped_plan_management_keeps_deadline_and_gap_exit_without_price_stop(self):
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
 

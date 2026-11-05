@@ -55,6 +55,26 @@ class CloseDeadlinePostgresTests(unittest.TestCase):
 
 
 class CloseRunnerPostgresTests(unittest.IsolatedAsyncioTestCase):
+    async def test_collector_gap_rechecks_original_closing_price_before_native_order_claim(self):
+        from tests.integration.test_observation_bootstrap_postgres import isolated_observation_schema, PostgresQueryStore
+        from tests.unit.test_close_mock_execution import verify_close_runner
+
+        url = os.environ.get('KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL', '')
+        if not url:
+            raise unittest.SkipTest('dedicated diagnostic PostgreSQL URL is required')
+        scoped = self.enterContext(isolated_observation_schema(url))
+        await verify_close_runner(self, lambda: PostgresQueryStore(scoped), collector_gap=True, tamper_collector_gap=True)
+
+    async def test_actual_collector_closing_price_and_first_minute_drive_original_native_gap_exit(self):
+        from tests.integration.test_observation_bootstrap_postgres import isolated_observation_schema, PostgresQueryStore
+        from tests.unit.test_close_mock_execution import verify_close_runner
+
+        url = os.environ.get('KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL', '')
+        if not url:
+            raise unittest.SkipTest('dedicated diagnostic PostgreSQL URL is required')
+        scoped = self.enterContext(isolated_observation_schema(url))
+        await verify_close_runner(self, lambda: PostgresQueryStore(scoped), collector_gap=True)
+
     async def test_explicit_stopped_plan_management_keeps_deadline_and_gap_exit_without_price_stop(self):
         from tests.integration.test_observation_bootstrap_postgres import isolated_observation_schema, PostgresQueryStore
         from tests.unit.test_close_mock_execution import verify_close_runner
