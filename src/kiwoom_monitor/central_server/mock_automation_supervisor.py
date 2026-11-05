@@ -24,6 +24,7 @@ from kiwoom_monitor.application.mock_automation_execution import (
 from kiwoom_monitor.application.mock_automation_recovery import (
     record_mock_automation_recovery_from_risk,
 )
+from kiwoom_monitor.domain.execution_activation import LEADER_NATIVE_PLAN_MODE
 from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
     ForwardEvaluationRepository,
 )
@@ -384,6 +385,11 @@ class MockAutomationSupervisor:
                 if prior is None or prior != replace(context, control_revision=prior.control_revision):
                     raise MockAutomationSupervisorError("MOCK_AUTOMATION_RUNTIME_CONTEXT_MISMATCH")
                 bundle.refresh_automation_control(control)
+            planned_resume = getattr(spec, "execution_plan_mode", None) == LEADER_NATIVE_PLAN_MODE
+            if planned_resume and (runner := self._runners.get(account_ref)) is not None:
+                # Drain the STOPPED episode before acknowledging its review.
+                # The existing account monitor and native lease stay owned.
+                await self._close_runner(runner)
             recovery = await bundle.monitor.refresh_recovery()
             risk = await drain_thread_call(
                 self._repository.load_latest_mock_automation_risk, account_ref,
@@ -399,19 +405,29 @@ class MockAutomationSupervisor:
                 account_ref=account_ref,
                 spec_id=spec_id,
             )
-            resumed = await drain_thread_call(
-                resume_mock_automation,
-                self._repository,
-                bundle.runtime,
-                account_ref=account_ref,
-                spec_id=spec_id,
-                resumed_at=self._now(),
-                reason=reason,
-            )
-            bundle.refresh_automation_control(resumed)
+            async def commit_resume(episode=None):
+                receipt = None
+                if episode is not None:
+                    notice = episode._protection_snapshot()
+                    if notice is not None:
+                        resolved = await drain_thread_call(
+                            episode.resolve_protection_review, expected_revision=notice["revision"],
+                            recovery=recovery, risk=risk, planned_resume_control=control,
+                        )
+                        receipt = resolved["planned_review_resume_id"]
+                resumed = await drain_thread_call(
+                    resume_mock_automation, self._repository, bundle.runtime, account_ref=account_ref,
+                    spec_id=spec_id, resumed_at=self._now(), reason=reason,
+                    **({"planned_review_resume_id": receipt} if receipt is not None else {}),
+                )
+                bundle.refresh_automation_control(resumed)
+
+            if not planned_resume:
+                await commit_resume()
             if account_ref not in self._runners:
                 try:
-                    runner = await self._assemble_runner(bundle, spec, credential_profile_id)
+                    runner = await self._assemble_runner(bundle, spec, credential_profile_id,
+                        **({"before_attach": commit_resume} if planned_resume else {}))
                 except BaseException:
                     if self._owner.bundle(credential_profile_id) is bundle:
                         bundle.runtime.set_new_orders_enabled(False)
@@ -423,7 +439,7 @@ class MockAutomationSupervisor:
                 self._restore_retry_after.pop(account_ref, None)
             return self.status(account_ref, credential_profile_id=credential_profile_id)
 
-    async def _assemble_runner(self, bundle, spec, credential_profile_id):
+    async def _assemble_runner(self, bundle, spec, credential_profile_id, *, before_attach=None):
         from .mock_automation_episode import MockAutomationEpisode
         from .mock_automation_runner import MockAutomationRunner
         episode = MockAutomationEpisode(
@@ -437,6 +453,10 @@ class MockAutomationSupervisor:
             await drain_thread_call(runner.episode.prepare_restore)
             if self._closing or self._owner.bundle(credential_profile_id) is not bundle:
                 raise MockAutomationSupervisorError("PROFILE_RUNTIME_NOT_READY", 503)
+            if before_attach is not None:
+                await before_attach(runner.episode)
+                if self._closing or self._owner.bundle(credential_profile_id) is not bundle:
+                    raise MockAutomationSupervisorError("PROFILE_RUNTIME_NOT_READY", 503)
             runner.attach_inputs()
             await runner.start()
             if self._closing or self._owner.bundle(credential_profile_id) is not bundle:

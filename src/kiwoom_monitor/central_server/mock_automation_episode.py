@@ -53,8 +53,8 @@ from kiwoom_monitor.application.leader_breakout import (
 from kiwoom_monitor.application.research_replay import (
     KrxMinuteBarFrame, MinuteStrategyInputs,
 )
-from kiwoom_monitor.domain.execution_activation import MockAutomationOperatingSpec
-from kiwoom_monitor.domain.order_contract import OrderIntent, OrderSide, OrderState, OrderType, PlannedOrderIntent, TERMINAL_ORDER_STATES
+from kiwoom_monitor.domain.execution_activation import LEADER_NATIVE_PLAN_MODE, MockAutomationOperatingSpec
+from kiwoom_monitor.domain.order_contract import OrderIntent, OrderPlanRef, OrderSide, OrderState, OrderType, PlannedOrderIntent, TERMINAL_ORDER_STATES
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
 from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import (
     ForwardEvaluationRepository,
@@ -432,6 +432,12 @@ class MockAutomationEpisode:
         self._leader_context_source = leader_context_source
         self._strategy_inputs = None
         self._leader_position_proof = None
+        self._leader_plan_mode = self._spec.execution_plan_mode == LEADER_NATIVE_PLAN_MODE
+        self._leader_plan_root = None
+        self._leader_plan_deadline = None
+        self._leader_plan_cancel_attempt = None
+        self._leader_plan_refresh_quote = None
+        self._leader_plan_reprepare_requested = None
         self._planned_protection_restore = None
         self._planned_protection_readback = None
         self._price_source = price_source
@@ -596,6 +602,8 @@ class MockAutomationEpisode:
         self._family = get_research_family(family_id)
         self._config = parse_strategy_config(family_id, candidate.get("parameters", {}))
         self._leader = isinstance(self._config, LeaderBreakoutConfig)
+        if self._leader_plan_mode and (not self._leader or not isinstance(self._bundle.repository, ExecutionRepository)):
+            raise ValueError("native leader plan requires the existing leader execution owner")
         if spec.session_profile != str(candidate.get("session_profile", {}).get("profile", "")):
             raise ValueError("MOCK_AUTOMATION_SESSION_PROFILE_MISMATCH")
         if spec.unfilled_execution_policy is not None:
@@ -972,6 +980,9 @@ class MockAutomationEpisode:
                 or quote is not self._strategy_inputs.latest_stop_quote):
             return
         risk, positions = self._stop_loss_cut
+        if self._leader_plan_mode and (not risk.reconciliation_complete or risk.submission_unknown_count
+                                      or risk.balance_mismatch_count):
+            return  # The historical cut needs exact owned exposure before it can arm a typed stop.
         context = validate_leader_position_proof(self._leader_position_proof, self._config, self._spec, self._bundle.run_id)
         symbol = context.symbol
         quantity = dict(risk.owned_position_quantities).get(symbol)
@@ -1071,7 +1082,10 @@ class MockAutomationEpisode:
                         "operational_revision": current.get("revision") if isinstance(current, Mapping) else None,
                         "policy_hash": config.policy.fingerprint,
                         "policy": config.policy.to_dict(), "position_proof": self._leader_position_proof}}])
-                gate, record, _ = await drain_thread_call(self._dispatch_original_and_register, decision, recovery, risk)
+                plan = await drain_thread_call(self._leader_plan_for_decision, decision) if self._leader_plan_mode else None
+                gate, record, _ = await drain_thread_call(
+                    self._dispatch_original_and_register, decision, recovery, risk, plan=plan,
+                )
                 self._status = {"state": "ORDER_SUBMITTED" if record is not None else "BLOCKED",
                     "reason": ";".join(gate.reasons) if gate.reasons else "approved", "last_decision_id": decision.decision_id,
                     "pending_intent_id": record.intent.intent_id if record is not None else "", "input_mode": "0B", "orders_enabled": False}
@@ -1136,6 +1150,9 @@ class MockAutomationEpisode:
             if self._closing and not draining_cancel:
                 raise RuntimeError("MOCK_AUTOMATION_RUNNER_CLOSED")
             previous = self._protection_review
+            if (self._leader_plan_mode and previous is not None and previous["state"] == "PENDING"
+                    and "planned_leader_stop" in previous):
+                return deepcopy(previous)  # The same stop/notice must match any durable cancel receipt.
             # Select the historical stop while its source is still current.
             # A later source reset can retire future quotes, but not this stop.
             if leader_stop_quote is not None and leader_stop_quote is not self._strategy_inputs.latest_stop_quote:
@@ -1163,6 +1180,15 @@ class MockAutomationEpisode:
                     leader_stop_observation = previous["leader_stop_observation"]
             if leader_stop_observation is not None:
                 notice["leader_stop_observation"] = deepcopy(leader_stop_observation)
+                if self._leader_plan_mode:
+                    from kiwoom_monitor.application.mock_automation_risk import PlannedLeaderStop
+
+                    proof = risk_trigger["stop_loss"]
+                    pin = proof["position_proof"]
+                    notice["planned_leader_stop"] = PlannedLeaderStop(
+                        pin["entry_intent_id"], pin["proof_id"], risk_trigger["snapshot_id"],
+                        risk_trigger["reconciliation_revision"], leader_stop_observation, proof,
+                    ).to_dict()
             self._validate_protection_review(notice)
             self._protection_review = notice
             notify = None if self._closing else self._wake_notification()
@@ -1173,11 +1199,123 @@ class MockAutomationEpisode:
     async def _pause_for_protection_review(self) -> bool:
         if not self._protection_pending():
             return False
-        await self._poll_first_protection_exit()
+        if not self._leader_plan_mode:
+            await self._poll_first_protection_exit()
         self._status = {**self._status, "state": "PROTECTION_REVIEW_REQUIRED", "reason": "protection_review_pending",
                         "orders_enabled": False}
         await drain_thread_call(self._save_checkpoint)
         return True
+
+    async def _manage_leader_plan(self, control, root):
+        """Use the existing account owner for the selected plan; legacy management stays separate."""
+        if root is None:
+            return await self._pause_for_protection_review()
+        now = self._now()
+        notice = self._protection_snapshot() or {}
+        stop = notice.get("planned_leader_stop") if notice.get("state") == "PENDING" else None
+        gateway = getattr(self._bundle, "gateway", None)
+        execution = self._bundle.repository
+        if root.state is OrderState.QUEUED and now >= root.intent.expires_at:
+            await drain_thread_call(self._bundle.runtime.cancel, root.intent.intent_id)
+        if gateway is not None and root.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}:
+            await self._cancel_leader_plan_root(control, root, notice, now, gateway, execution)
+        if stop and root.state in {OrderState.CANCELLED, OrderState.FILLED} and root.detailed_filled_quantity:
+            await self._submit_leader_plan_protection(control, root, notice, now, execution)
+        if await self._pause_for_protection_review():
+            return True
+        if root.state in TERMINAL_ORDER_STATES:
+            return False
+        status = {"state": "WAITING_ORDER", "reason": root.state.value, "orders_enabled": False,
+                  "pending_intent_id": root.intent.intent_id, "input_mode": "0B"}
+        if status != self._status or self._checkpoint.pending:
+            self._status = status
+            await drain_thread_call(self._save_checkpoint)
+        return True
+
+    async def _cancel_leader_plan_root(self, control, root, notice, now, gateway, execution):
+        from kiwoom_monitor.application.mock_automation_risk import PlannedLeaderStopCancelRequest
+
+        stop = notice.get("planned_leader_stop")
+        expiry = root.state is OrderState.ACCEPTED or stop is None
+        if expiry and (self._leader_plan_deadline is None or now < self._leader_plan_deadline):
+            return
+        key = (root.intent.intent_id, notice.get("revision") if not expiry else None)
+        if key == self._leader_plan_cancel_attempt:
+            return
+        head = await drain_thread_call(execution.load_plan_position, self._bundle.account_ref, self._bundle.run_id,
+                                       root.intent.symbol, root.intent.plan)
+        if not expiry:
+            await drain_thread_call(self._save_checkpoint, force=True)
+        terms = ({"expired_entry_plan": head.plan} if expiry else
+                 {"planned_stop_cancel_request": PlannedLeaderStopCancelRequest(head.plan, stop["trigger_id"], notice["revision"])})
+        try:
+            await gateway.cancel_automation_intent(root, spec_id=self._spec.spec_id,
+                                                   control_revision=control.control_revision, **terms)
+        except (ValueError, RuntimeError) as error:
+            self._status["planned_cancel_reason"] = str(error)
+            return
+        self._leader_plan_cancel_attempt = key
+
+    async def _submit_leader_plan_protection(self, control, root, notice, now, execution):
+        from kiwoom_monitor.application.mock_automation_risk import (
+            prepare_planned_leader_protection_exit, read_planned_leader_protection_checkpoint,
+        )
+
+        monitor = self._bundle.monitor
+        cut = getattr(monitor, "latest_automation_execution_cut", None)
+        quote = self._leader_plan_refresh_quote
+        if quote is not None:
+            max_age = min(self._config.max_data_age_seconds or 0, self._spec.maximum_data_gap_seconds or 0,
+                          self._spec.unfilled_execution_policy.max_snapshot_age_seconds)
+            if (not self._strategy_inputs.stop_quote_generation_is_current(quote)
+                    or not 0 <= (now - datetime.fromisoformat(quote.raw["observed_at"])).total_seconds() <= max_age
+                    or not 0 <= (now - quote.envelope.received_at).total_seconds() <= max_age):
+                self._leader_plan_refresh_quote = quote = None
+        if quote is None:
+            quote = self._strategy_inputs.latest_stop_quote
+        stop = notice["planned_leader_stop"]["stop_loss"]
+        if (quote is None or quote.envelope.received_at <= datetime.fromisoformat(stop["available_at"])
+                or root.last_broker_as_of is None or quote.envelope.received_at < root.last_broker_as_of):
+            return
+        if cut is None or cut["risk"].observed_at < quote.envelope.received_at:
+            if self._leader_plan_refresh_quote is None:
+                # Keep this cut while Risk catches up, even during continuous 0B delivery.
+                self._leader_plan_refresh_quote = quote
+                monitor.request_automation_execution_recovery()
+            return
+        observation = cut["observation"]
+        if (not observation.reconciliation_complete or not observation.open_orders_complete
+                or observation.unmapped_broker_order_ids or observation.open_orders):
+            return
+        risk, recovery = cut["risk"], cut["recovery"]
+        head = await drain_thread_call(execution.load_plan_position, self._bundle.account_ref, self._bundle.run_id,
+                                       root.intent.symbol, root.intent.plan)
+        try:
+            workflow = prepare_planned_leader_protection_exit(
+                self._spec, run_id=self._bundle.run_id, control_revision=control.control_revision, notice=notice,
+                plan=head.plan, observation=quote.observation(), risk=risk,
+                plan_position={"version": "mock_plan_position/v1", "plan_id": head.plan.plan_id,
+                               "policy_ref": head.plan.policy_ref, "revision": head.plan.expected_revision,
+                               "run_id": self._bundle.run_id, "symbol": head.symbol, "quantity": head.quantity,
+                               "fill_cursor": head.fill_cursor, "unreconciled_sell_quantity": head.unreconciled_sell_quantity},
+                leader_config=self._config, position_proof=self._leader_position_proof,
+                confirmed_root_state=root.state.value, confirmed_root_at=root.last_broker_as_of, now=now,
+            )
+            plan, decision = read_planned_leader_protection_checkpoint(workflow, notice, self._spec, self._bundle.run_id)
+            await drain_thread_call(record_mock_automation_recovery_from_risk, self._repository, self._bundle.runtime,
+                                    recovery, risk, account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id)
+            with self._protection_lock:
+                if (self._protection_review != notice
+                        or not self._strategy_inputs.stop_quote_generation_is_current(quote)):
+                    return
+                self._protection_review = {**notice, "planned_leader_protection_exit": workflow}
+                self._planned_protection_restore = (workflow, plan, decision)
+                self._leader_plan_refresh_quote = None
+            await drain_thread_call(self._save_checkpoint, force=True)
+            await drain_thread_call(self._dispatch_original_and_register, decision, recovery, risk,
+                                    plan=plan, protection_exit_id=workflow["workflow_id"])
+        except (ValueError, RuntimeError) as error:
+            self._status["planned_protection_reason"] = str(error)
 
     async def _poll_first_protection_exit(self):
         if self._spec.unfilled_execution_policy is None:
@@ -1342,8 +1480,10 @@ class MockAutomationEpisode:
                 first_protection_exit_reason=record.state.value)
             self._save_checkpoint()
 
-    def resolve_protection_review(self, *, expected_revision: int, recovery, risk) -> dict[str, Any]:
+    def resolve_protection_review(self, *, expected_revision: int, recovery, risk, planned_resume_control=None) -> dict[str, Any]:
         """Explicit OFF review completion, only with current fully flat native proof."""
+        from kiwoom_monitor.application.mock_automation_risk import is_planned_zero_fill_reconciliation_review
+
         if self._closing or self._scheduled_task_is_present() or not self._unfilled_preflight_lock.acquire(blocking=False):
             raise RuntimeError("mock_protection_resolution_requires_idle_runner")
         try:
@@ -1352,13 +1492,23 @@ class MockAutomationEpisode:
                 raise ValueError("mock_protection_review_revision_changed")
             with self._bundle.runtime.automation_decision_guard():
                 control = self._repository.load_mock_automation_control(self._bundle.account_ref)
+                resolving_before_resume = planned_resume_control is not None
+                zero_fill_review = self._leader_plan_mode and is_planned_zero_fill_reconciliation_review(notice)
+                typed_review = self._planned_protection_restore is not None or zero_fill_review
+                if self._leader_plan_mode and typed_review and not resolving_before_resume:
+                    raise ValueError("planned_protection_resolution_requires_explicit_resume")
+                control_allows_resolution = (
+                    self._leader_plan_mode and typed_review and control == planned_resume_control
+                    and (control.desired_state.value == "STOPPED" or control.entry_resume_required)
+                    if resolving_before_resume else control is not None and control.desired_state.value == "RUNNING"
+                )
                 current = self._repository.load_latest_mock_automation_risk(self._bundle.account_ref)
                 admission = self._repository.load_mock_automation_admission_for_spec(self._bundle.account_ref, self._spec.spec_id)
                 linked = self._repository.load_latest_mock_automation_recovery(self._bundle.account_ref, admission.admission_id) if admission else None
                 active = self._bundle.repository.account_active_intents(self._bundle.account_ref)
                 now = self._bundle.runtime.server_now()
                 if (current != risk or control is None or control.active_spec_id != self._spec.spec_id
-                        or control.execution_run_id != self._bundle.run_id or control.desired_state.value != "RUNNING"
+                        or control.execution_run_id != self._bundle.run_id or not control_allows_resolution
                         or linked is None or linked.risk_snapshot_id != risk.snapshot_id
                         or linked.risk_reconciliation_revision != risk.reconciliation_revision
                         or risk.account_ref != self._bundle.account_ref or risk.execution_run_id != self._bundle.run_id
@@ -1378,6 +1528,15 @@ class MockAutomationEpisode:
                 )
                 if not self._episode_position.matches_risk(risk):
                     raise ValueError("mock_protection_resolution_native_flat_unverified")
+                if self._planned_protection_restore is not None:
+                    self._read_planned_protection(self._bundle.repository)
+                    readback = self._planned_protection_readback
+                    projection = readback[1] if readback is not None else {}
+                    if (projection.get("state") != "FILLED" or any(projection.get(name) != 0 for name in (
+                        "plan_quantity", "reserved_quantity", "unreconciled_sell_quantity",
+                    ))):
+                        raise ValueError("planned_protection_resolution_terminal_fill_unverified")
+                zero_fill_receipt = self._read_zero_fill_plan_receipt(recovery) if zero_fill_review else None
                 # Keep the request visible throughout native I/O. A newer cue
                 # wins; resolution cannot overwrite it while saving its ACK.
                 with self._protection_lock:
@@ -1385,6 +1544,13 @@ class MockAutomationEpisode:
                         raise ValueError("mock_protection_review_revision_changed")
                     resolved = {**notice, "state": "RESOLVED_FLAT", "resolved_risk_snapshot_id": risk.snapshot_id,
                                 "resolved_risk_revision": risk.reconciliation_revision}
+                    if resolving_before_resume:
+                        from kiwoom_monitor.application.mock_automation_risk import planned_review_resume_id
+
+                        if zero_fill_receipt is not None:
+                            resolved["planned_zero_fill_root"] = zero_fill_receipt
+                        resolved["resume_from_control_revision"] = control.control_revision
+                        resolved["planned_review_resume_id"] = planned_review_resume_id(resolved)
                 self._save_checkpoint(protection_review=resolved)
                 if (self._repository.load_latest_mock_automation_risk(self._bundle.account_ref) != risk
                         or self._repository.load_mock_automation_control(self._bundle.account_ref) != control
@@ -1762,12 +1928,27 @@ class MockAutomationEpisode:
                 return False
         return True
 
-    def _dispatch_original_and_register(self, decision, recovery, risk, *, protection_exit_id=None):
+    def _leader_plan_for_decision(self, decision):
+        pin = self._leader_position_proof
+        if pin is None:
+            raise ValueError("leader plan requires the pinned entry evidence")
+        plan = OrderPlanRef(pin["entry_intent_id"], pin["proof_id"], 0)
+        if decision.final_action == "ENTER":
+            return plan
+        head = self._bundle.repository.load_plan_position(self._bundle.account_ref, self._bundle.run_id, decision.symbol, plan)
+        if head.quantity != decision.quantity or head.unreconciled_sell_quantity:
+            raise ValueError("leader exit does not match the durable plan position")
+        return head.plan
+
+    def _dispatch_original_and_register(self, decision, recovery, risk, *, protection_exit_id=None, plan=None):
+        if self._leader_plan_mode and plan is None:
+            raise ValueError("native leader plan cannot dispatch a planless order")
         result = dispatch_mock_automation_decision_from_risk(self._repository, self._bundle.runtime, decision,
             recovery, risk, account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id,
             strategy_ref=self._spec.strategy_ref,
+            **({"plan": plan} if plan is not None else {}),
             **({'protection_exit_id':protection_exit_id} if protection_exit_id is not None else {}))
-        if result[1] is not None:
+        if result[1] is not None and plan is None:
             self._register_native_unfilled(result[1], result[0], decision)
         return result
 
@@ -2427,6 +2608,34 @@ class MockAutomationEpisode:
 
 
 
+    async def _reprepare_unclaimed_leader_protection(self, control, projection, execution):
+        """A checkpoint alone spends no intent; native first-claim fencing still owns submission."""
+        selected = self._planned_protection_restore
+        workflow, plan, _ = selected
+        root = self._leader_plan_root[2] if self._leader_plan_root is not None else None
+        notice = self._protection_snapshot() or {}
+        if (projection["state"] != "PREPARED_NO_INTENT" or projection["plan_revision"] != plan.expected_revision
+                or projection["reserved_quantity"] or projection["unreconciled_sell_quantity"]
+                or root is None or root.state not in {OrderState.CANCELLED, OrderState.FILLED}
+                or not root.broker_order_id or not 0 < root.detailed_filled_quantity == projection["plan_quantity"]
+                or (root.intent.plan.plan_id, root.intent.plan.policy_ref) != (plan.plan_id, plan.policy_ref)
+                or notice.get("planned_leader_protection_exit") != workflow
+                or "planned_leader_stop" not in notice or self._strategy_inputs.latest_stop_quote is None):
+            return
+        monitor = self._bundle.monitor
+        cut = monitor.latest_automation_execution_cut
+        if cut is None or cut["risk"].reconciliation_revision <= workflow["snapshot"]["risk_reconciliation_revision"]:
+            if self._leader_plan_reprepare_requested != workflow["workflow_id"]:
+                self._leader_plan_reprepare_requested = workflow["workflow_id"]
+                self._leader_plan_refresh_quote = self._strategy_inputs.latest_stop_quote
+                monitor.request_automation_execution_recovery()
+            return
+        try:
+            await self._submit_leader_plan_protection(control, root, notice, self._now(), execution)
+        finally:
+            if self._planned_protection_restore is not selected:
+                self._planned_protection_readback = None
+
     def _read_planned_protection(self, execution: ExecutionRepository, *, _reader=None):
         from kiwoom_monitor.application.mock_automation_execution import MockAutomationGateStatus, mock_automation_intent_id
         from kiwoom_monitor.application.mock_automation_risk import PROTECTION_EXIT_VERSION
@@ -2473,6 +2682,32 @@ class MockAutomationEpisode:
         self._planned_protection_readback = ((revision, projection)
                                              if revision == self._bundle.runtime.observation_revision else None)
 
+    def _read_leader_plan_root(self, execution: ExecutionRepository, *, _reader=None):
+        pin = self._leader_position_proof
+        if pin is None:
+            self._leader_plan_root = None
+            return
+        revision = self._bundle.runtime.observation_revision
+        if self._leader_plan_root is not None and self._leader_plan_root[:2] == (pin["entry_intent_id"], revision):
+            return
+        root = execution.load(pin["entry_intent_id"], _reader=_reader)
+        if root is not None:
+            intent = root.intent
+            if (not isinstance(intent, PlannedOrderIntent) or intent.side is not OrderSide.BUY
+                    or (intent.account_ref, intent.run_id, intent.plan.plan_id, intent.plan.policy_ref)
+                    != (self._bundle.account_ref, self._bundle.run_id, pin["entry_intent_id"], pin["proof_id"])):
+                raise ValueError("leader plan root does not match the restored pin")
+            if self._leader_plan_root is None or self._leader_plan_root[0] != pin["entry_intent_id"] or self._leader_plan_deadline is None:
+                from kiwoom_monitor.application.order_lifecycle import anchored_unfilled_policy
+
+                reader_args = {} if _reader is None else {"_reader": _reader}
+                source = self._store.load_document("execution_leader_decisions", self._bundle.account_ref,
+                                                   intent.decision_id, **reader_args)["document"]
+                signal_until = datetime.fromisoformat(source["snapshot"]["feature_values"][0]["value"]["valid_until"])
+                policy = anchored_unfilled_policy(intent, self._spec.unfilled_execution_policy, "BUY_OPPORTUNITY")
+                self._leader_plan_deadline = min(signal_until, policy.wait_until)
+        self._leader_plan_root = (pin["entry_intent_id"], revision, root)
+
     def _apply_fills_and_read_control(self, execution: ExecutionRepository):
         with self._repository.mock_automation_read_scope() as reader:
             reader_args = {} if reader is None else {'_reader': reader}
@@ -2482,6 +2717,8 @@ class MockAutomationEpisode:
             )
             if self._planned_protection_restore is not None:
                 self._read_planned_protection(execution, **reader_args)
+            if self._leader_plan_mode:
+                self._read_leader_plan_root(execution, **reader_args)
             # Read control after all FILLs have been applied. The read scope
             # releases its cursor before any input or checkpoint work starts.
             return self._repository.load_mock_automation_control(self._bundle.account_ref, **reader_args)
@@ -2518,11 +2755,15 @@ class MockAutomationEpisode:
                     self._status = status
                     await drain_thread_call(self._save_checkpoint)
                 return 0
-            if self._planned_protection_restore is not None:
+            if self._planned_protection_restore is not None and self._protection_pending():
                 stopped = control.desired_state.value != "RUNNING"
                 if stopped and self._leader:
                     self._strategy_inputs.reset("user_stopped")
                 projection = self._planned_protection_readback
+                if (self._leader_plan_mode and not stopped and projection is not None
+                        and projection[1]["state"] == "PREPARED_NO_INTENT"):
+                    await self._reprepare_unclaimed_leader_protection(control, projection[1], execution)
+                    projection = self._planned_protection_readback
                 status = {"state": "STOPPED" if stopped else "PROTECTION_REVIEW_REQUIRED",
                           "reason": "planned_protection_readback", "orders_enabled": False,
                           "planned_protection": projection[1] if projection else {"state": "WAIT_NATIVE_READBACK"}}
@@ -2547,6 +2788,12 @@ class MockAutomationEpisode:
                     self._status = status
                     await drain_thread_call(self._save_checkpoint)
                 return 0
+
+            if self._leader_plan_mode:
+                root = self._leader_plan_root[2] if self._leader_plan_root is not None else None
+                if await self._manage_leader_plan(control, root):
+                    return 0
+                return await self._run_leader_page(control, limit)
 
             unfilled_ready = ((not self._input_progress.bootstrap_pending and not self._input_progress.recovering)
                     or self._unfilled_registration is not None
@@ -3042,11 +3289,12 @@ class MockAutomationEpisode:
                     self._planned_protection_restore = (deepcopy(workflow), plan, decision)
                     self._planned_protection_readback = None
                 self._protection_review = deepcopy(notice)
-                # A persisted flat resolution is historical evidence, never
-                # authority to resume after restart or an ambiguous ACK.
-                self._protection_review["state"] = "PENDING"
-                self._protection_review.pop("resolved_risk_snapshot_id", None)
-                self._protection_review.pop("resolved_risk_revision", None)
+                if not self._restored_planned_resume_matches(notice):
+                    # A checkpoint ACK alone cannot enable entry after restart.
+                    self._protection_review["state"] = "PENDING"
+                    for key in ("resolved_risk_snapshot_id", "resolved_risk_revision", "planned_zero_fill_root",
+                                "resume_from_control_revision", "planned_review_resume_id"):
+                        self._protection_review.pop(key, None)
             try:
                 self._input_progress.restore_cursor(document.get("input_cursor", 0))
                 self._episode_position.restore_fill_cursor(document.get("fill_cursor", 0))
@@ -3075,6 +3323,55 @@ class MockAutomationEpisode:
             self._store, self._strategy_inputs, leader=self._leader,
             publish_status=lambda value: setattr(self, "_status", value), checkpoint=self._save_checkpoint,
         )
+
+    def _read_zero_fill_plan_receipt(self, recovery=None):
+        from kiwoom_monitor.application.mock_automation_risk import planned_zero_fill_root_receipt
+
+        pin = self._leader_position_proof
+        if pin is None:
+            raise ValueError("planned_resume_zero_fill_root_unconfirmed")
+        account, run_id = self._bundle.account_ref, self._bundle.run_id
+        execution = self._bundle.repository
+        with self._repository.mock_automation_read_scope() as reader:
+            root = execution.load(pin["entry_intent_id"], _reader=reader)
+            gate = self._repository.load_mock_automation_approved_gate(account, pin["entry_intent_id"], _reader=reader)
+            events = execution.events(pin["entry_intent_id"], _reader=reader)
+            receipt = planned_zero_fill_root_receipt(
+                root, gate, pin, events, account_ref=account, run_id=run_id, spec_id=self._spec.spec_id,
+            )
+            head = execution.load_plan_position(account, run_id, root.intent.symbol, root.intent.plan, _reader=reader)
+            if (head.quantity or head.fill_cursor or head.unreconciled_sell_quantity
+                    or head.plan.expected_revision <= root.intent.plan.expected_revision + 1):
+                raise ValueError("planned_resume_zero_fill_head_unconfirmed")
+        if recovery is not None and not any(
+            (order.account_ref, order.broker_order_id, order.symbol, order.state, order.as_of)
+            == (account, root.broker_order_id, root.intent.symbol, OrderState.CANCELLED, root.last_broker_as_of)
+            and not (order.filled_quantity or order.remaining_quantity or order.fills) for order in recovery.orders
+        ):
+            raise ValueError("planned_resume_zero_fill_broker_order_unconfirmed")
+        return receipt
+
+    def _restored_planned_resume_matches(self, notice) -> bool:
+        if not self._leader_plan_mode or notice["state"] != "RESOLVED_FLAT" or not notice.get("planned_review_resume_id"):
+            return False
+        from kiwoom_monitor.application.mock_automation_risk import planned_review_resume_id
+
+        control = self._repository.load_mock_automation_control(self._bundle.account_ref)
+        linked = (control is not None and control.desired_state.value == "RUNNING" and not control.entry_resume_required
+                and (control.active_spec_id, control.execution_run_id) == (self._spec.spec_id, self._bundle.run_id)
+                and control.control_revision == notice["resume_from_control_revision"] + 1
+                and control.planned_review_resume_id == notice["planned_review_resume_id"] == planned_review_resume_id(notice))
+        if not linked:
+            return False
+        if self._planned_protection_restore is None:
+            try:
+                return self._read_zero_fill_plan_receipt() == notice.get("planned_zero_fill_root")
+            except ValueError:
+                return False
+        self._read_planned_protection(self._bundle.repository)
+        readback = self._planned_protection_readback
+        return (readback is not None and readback[1]["state"] == "FILLED"
+                and all(readback[1][name] == 0 for name in ("plan_quantity", "reserved_quantity", "unreconciled_sell_quantity")))
 
     def _save_checkpoint(self, *, recovery=None, force: bool = False, protection_review=None) -> None:
         # The proposed flat proof may be persisted while the RAM cue stays

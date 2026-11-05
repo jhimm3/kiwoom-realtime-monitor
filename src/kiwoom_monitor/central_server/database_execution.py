@@ -107,6 +107,158 @@ def _plan_document(cursor, p, collection, account, key):
     return _json_document(row[0]) if row is not None else None
 
 
+def _require_planned_resume_control(cursor, p, value, current, owner_token, now_provider):
+    """Fence the existing RUNNING CAS against one acknowledged flat native review."""
+    from kiwoom_monitor.application.mock_automation_admission import mock_automation_admission_from_dict
+    from kiwoom_monitor.application.mock_automation_execution import (
+        MockAutomationGateStatus, mock_automation_decision_gate_from_dict, mock_automation_intent_id,
+    )
+    from kiwoom_monitor.application.mock_automation_recovery import (
+        MockAutomationRecoveryStatus, mock_automation_recovery_decision_from_dict,
+    )
+    from kiwoom_monitor.application.mock_automation_risk import (
+        PROTECTION_EXIT_VERSION, mock_automation_risk_snapshot_from_dict,
+        planned_review_resume_id, read_planned_leader_protection_checkpoint,
+    )
+    from kiwoom_monitor.domain.execution_activation import LEADER_NATIVE_PLAN_MODE, mock_automation_spec_from_dict
+    from kiwoom_monitor.domain.time_basis import same_aware_instant
+    from .database_account_identity import _account_binding_row, _latest_account_binding_row
+
+    resume_id = value.get("planned_review_resume_id")
+    if (not current or value.get("desired_state") != "RUNNING" or value.get("entry_resume_required")
+            or (current.get("desired_state") != "STOPPED" and not current.get("entry_resume_required"))):
+        if owner_token is not None or resume_id is not None:
+            raise RuntimeError("PLANNED_RESUME_CONTROL_CHANGED")
+        return
+    account, run_id, spec_id = (value.get(key) for key in ("account_ref", "execution_run_id", "active_spec_id"))
+    spec_doc = _plan_document(cursor, p, "execution_mock_automation_specs", account, current.get("active_spec_id"))
+    if not spec_doc or spec_doc.get("execution_plan_mode") != LEADER_NATIVE_PLAN_MODE:
+        if owner_token is not None or resume_id is not None:
+            raise RuntimeError("PLANNED_RESUME_SCOPE_CHANGED")
+        return
+    if not owner_token or (current.get("active_spec_id"), current.get("execution_run_id")) != (spec_id, run_id):
+        raise RuntimeError("PLANNED_RESUME_SCOPE_CHANGED")
+
+    def document(collection, key):
+        result = _plan_document(cursor, p, collection, account, key)
+        if result is None:
+            raise RuntimeError("PLANNED_RESUME_PROOF_MISSING")
+        return result
+
+    spec = mock_automation_spec_from_dict(spec_doc)
+    now = now_provider()
+    # The binding writer uses this same key, after the account lease/control
+    # acquisition above. A newer binding cannot cross the flat CAS.
+    if p == "%s":
+        cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"{spec.credential_profile_id}:kiwoom:mock",))
+    binding = _latest_account_binding_row(cursor, spec.credential_profile_id, "kiwoom", "mock", p)
+    latest = _account_binding_row(binding) if binding else {}
+    if ((latest.get("account_ref"), latest.get("binding_revision"), latest.get("verification_method"))
+            != (account, spec.binding_revision, "ka00001")
+            or not same_aware_instant(latest.get("verified_at", ""), spec.binding_verified_at)):
+        raise RuntimeError("PLANNED_RESUME_BINDING_CHANGED")
+    risk = mock_automation_risk_snapshot_from_dict(document("execution_mock_automation_current_risk", account))
+    admission = mock_automation_admission_from_dict(document("execution_mock_automation_admission_by_spec", spec_id))
+    recovery = mock_automation_recovery_decision_from_dict(document(
+        "execution_mock_automation_current_recovery", admission.admission_id,
+    ))
+    age = spec.maximum_data_gap_seconds
+    if ((risk.account_ref, risk.execution_run_id, risk.binding_revision, risk.data_path)
+            != (account, run_id, spec.binding_revision, spec.data_path)
+            or (admission.account_ref, admission.execution_run_id, admission.spec_id) != (account, run_id, spec_id)
+            or (recovery.account_ref, recovery.execution_run_id, recovery.spec_id) != (account, run_id, spec_id)
+            or recovery.status is not MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED
+            or (recovery.risk_snapshot_id, recovery.risk_reconciliation_revision, recovery.account_as_of)
+            != (risk.snapshot_id, risk.reconciliation_revision, risk.account_as_of)
+            or recovery.open_order_count or recovery.position_count or recovery.reserved_open_buy_won
+            or not risk.reconciliation_complete or risk.owned_position_quantities or risk.pending_sell_quantities
+            or risk.submission_unknown_count or risk.balance_mismatch_count or age is None
+            or risk.broker_query_started_at < datetime.fromisoformat(current["changed_at"])
+            or any(not 0 <= (now - at).total_seconds() <= age for at in (risk.observed_at, risk.account_as_of))
+            or _account_active_execution_rows(cursor, "mock", account, 1, p)):
+        raise RuntimeError("PLANNED_RESUME_NATIVE_FLAT_CHANGED")
+
+    checkpoint = _plan_document(cursor, p, "execution_mock_automation_runner_current", account, "current") or {}
+    notice = checkpoint.get("protection_review")
+    if not notice:
+        if resume_id is not None:
+            raise RuntimeError("PLANNED_RESUME_REVIEW_CHANGED")
+        return
+    if ((checkpoint.get("spec_id"), checkpoint.get("execution_run_id")) != (spec_id, run_id)
+            or notice.get("state") != "RESOLVED_FLAT" or not resume_id
+            or notice.get("resume_from_control_revision") != current["control_revision"]
+            or (notice.get("resolved_risk_snapshot_id"), notice.get("resolved_risk_revision"))
+            != (risk.snapshot_id, risk.reconciliation_revision)
+            or notice.get("planned_review_resume_id") != resume_id or planned_review_resume_id(notice) != resume_id):
+        raise RuntimeError("PLANNED_RESUME_REVIEW_CHANGED")
+    if "planned_leader_protection_exit" not in notice:
+        _require_planned_zero_fill_resume_root(cursor, p, checkpoint, notice, spec, run_id, risk)
+        return
+    workflow = notice["planned_leader_protection_exit"]
+    plan, decision = read_planned_leader_protection_checkpoint(workflow, notice, spec, run_id)
+    identity = mock_automation_intent_id(spec_id, decision.decision_id)
+    row = _execution_intent_row(cursor, identity, p)
+    sell = _json_document(row[0]) if row else {}
+    claim = sell.get("mock_protection_claim") or {}
+    head = document(PLAN_POSITION_COLLECTION, plan.plan_id)
+    gate = mock_automation_decision_gate_from_dict(document("execution_mock_automation_approved_gates", identity))
+    if ((sell.get("account_ref"), sell.get("run_id"), sell.get("environment"), sell.get("state"),
+         sell.get("side"), sell.get("policy_version"), sell.get("plan"), sell.get("decision_id"))
+            != (account, run_id, "mock", "FILLED", "SELL", PROTECTION_EXIT_VERSION,
+                workflow["snapshot"]["plan"], decision.decision_id)
+            or not sell.get("broker_order_id")
+            or not decision.quantity == sell.get("quantity") == sell.get("filled_quantity")
+            == sell.get("broker_reported_filled_quantity") == sell.get("detailed_filled_quantity")
+            or gate.status is not MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION
+            or (claim.get("workflow_id"), claim.get("gate_id"), gate.intent_id, gate.plan,
+                gate.account_ref, gate.execution_run_id, gate.spec_id, gate.action)
+            != (workflow["workflow_id"], gate.gate_id, identity, plan, account, run_id, spec_id, "EXIT")
+            or (claim.get("risk_snapshot_id"), claim.get("risk_reconciliation_revision"))
+            != (workflow["snapshot"]["risk_snapshot_id"], workflow["snapshot"]["risk_reconciliation_revision"])
+            or (head.get("version"), head.get("plan_id"), head.get("policy_ref"), head.get("run_id"), head.get("symbol"))
+            != ("mock_plan_position/v1", plan.plan_id, plan.policy_ref, run_id, decision.symbol)
+            or head["quantity"] != 0 or head.get("unreconciled_sell_quantity")
+            or not 0 < head["fill_cursor"] <= risk.execution_event_high_watermark
+            or head["revision"] <= plan.expected_revision):
+        raise RuntimeError("PLANNED_RESUME_TERMINAL_SELL_CHANGED")
+
+
+def _require_planned_zero_fill_resume_root(cursor, p, checkpoint, notice, spec, run_id, risk):
+    from kiwoom_monitor.application.mock_automation_execution import mock_automation_decision_gate_from_dict
+    from kiwoom_monitor.application.mock_automation_risk import (
+        is_planned_zero_fill_reconciliation_review, planned_zero_fill_root_receipt,
+    )
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document
+
+    account = spec.account_scope.account_ref
+    pin = checkpoint.get("leader_position_proof") or {}
+    identity = pin.get("entry_intent_id")
+    if (not is_planned_zero_fill_reconciliation_review(notice) or not identity
+            or (pin.get("account_ref"), pin.get("run_id"), pin.get("spec_id")) != (account, run_id, spec.spec_id)
+            or _plan_document(cursor, p, "execution_leader_position_context", account, identity) != pin):
+        raise RuntimeError("PLANNED_RESUME_ZERO_FILL_SCOPE_CHANGED")
+    row = _execution_intent_row(cursor, identity, p)
+    value = _json_document(row[0]) if row else {}
+    gate_doc = _plan_document(cursor, p, "execution_mock_automation_approved_gates", account, identity) or {}
+    head = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, identity) or {}
+    if (not value or not gate_doc or value.get("mock_plan_approval") != gate_doc.get("gate_id")
+            or (head.get("version"), head.get("plan_id"), head.get("policy_ref"), head.get("run_id"), head.get("symbol"))
+            != ("mock_plan_position/v1", identity, pin["proof_id"], run_id, value.get("symbol"))
+            or head.get("quantity") != 0 or head.get("fill_cursor") != 0 or head.get("unreconciled_sell_quantity")
+            or type(head.get("revision")) is not int or head["revision"] <= 1):
+        raise RuntimeError("PLANNED_RESUME_ZERO_FILL_HEAD_CHANGED")
+    cursor.execute(f"SELECT accepted_sequence,document_json FROM central_execution_events WHERE intent_id={p} "
+                   "ORDER BY accepted_sequence", (identity,))
+    history = [(sequence, _json_document(event)) for sequence, event in cursor.fetchall()]
+    receipt = planned_zero_fill_root_receipt(
+        _record_from_document(value), mock_automation_decision_gate_from_dict(gate_doc), pin,
+        tuple(event for _, event in history), account_ref=account, run_id=run_id, spec_id=spec.spec_id,
+    )
+    terminal_sequence = next(sequence for sequence, event in history if event["event_id"] == receipt["terminal_event_id"])
+    if receipt != notice.get("planned_zero_fill_root") or terminal_sequence > risk.execution_event_high_watermark:
+        raise RuntimeError("PLANNED_RESUME_ZERO_FILL_RECEIPT_CHANGED")
+
+
 def _save_plan_position(cursor, p, account, document, changed_at):
     cursor.execute(
         f"INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
@@ -600,6 +752,7 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
                    'ORDER BY accepted_sequence', (plan.plan_id,))
     original_quantity = current_quantity = fill_cursor = cancel_sequence = unknown_sequence = 0
     expired_entry_cancel = False
+    expiry_fill_quantity = 0
     fill_ids = []
     event, terminal_sequence = {}, 0
     for sequence, event_doc in cursor.fetchall():
@@ -612,7 +765,8 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
             expired_entry_cancel = cancel_document.get('version') == PLANNED_LEADER_EXPIRED_ENTRY_CANCEL_VERSION
             if expired_entry_cancel:
                 cancel = PlannedLeaderExpiredEntryCancelClaim.from_dict(cancel_document, recovery)
-                same_stop = True  # Expiry is independent of the later stop.
+                expiry_fill_quantity = cancel.detailed_quantity_at_cancel
+                same_stop = expiry_fill_quantity == current_quantity  # Existing FILLs at the expiry cut.
             else:
                 cancel = PlannedLeaderCancelClaim.from_dict(cancel_document)
                 same_stop = (cancel.trigger_id, cancel.notice_revision) == (trigger.trigger_id, notice['revision'])
@@ -639,7 +793,8 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
         # An expiry claim cannot arm a stop. The new stop must follow the
         # broker-confirmed terminal root and the Risk must already own its fills.
         terminal_confirmed = (
-            cancel_sequence < fill_cursor <= terminal_sequence <= original_cursor
+            cancel_sequence < terminal_sequence <= original_cursor
+            and 0 < fill_cursor <= terminal_sequence and (expiry_fill_quantity > 0 or cancel_sequence < fill_cursor)
             and confirmed_at < datetime.fromisoformat(trigger.stop_loss['available_at'])
             and event.get('event_type') in ({'BROKER_RECONCILED'} if root_state == 'CANCELLED' else {'FILL', 'BROKER_RECONCILED'})
             and (root_state == 'CANCELLED' or cancel_sequence < unknown_sequence < fill_cursor)
@@ -1021,14 +1176,14 @@ def _require_planned_leader_cancel(cursor, ownership, value, event, p, *, stored
 
 
 def _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, *, stored, now_provider):
-    """Cancel the exact originally approved, unfilled BUY after its admitted wait expires."""
+    """Cancel the verified remainder of the original BUY after its admitted wait expires."""
     from kiwoom_monitor.application.leader_breakout import _id
     from kiwoom_monitor.application.mock_automation_execution import (
         MockAutomationGateStatus, _validate_decision_identity, mock_automation_decision_gate_from_dict,
     )
     from kiwoom_monitor.application.mock_automation_risk import (
         PlannedLeaderExpiredEntryCancelClaim, mock_automation_risk_account_revision,
-        mock_automation_risk_snapshot_from_dict,
+        mock_automation_risk_snapshot_from_dict, validate_planned_leader_current_cut,
     )
     from kiwoom_monitor.application.order_lifecycle import anchored_unfilled_policy
     from kiwoom_monitor.domain.execution_activation import mock_automation_spec_from_dict
@@ -1037,12 +1192,14 @@ def _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, *,
     from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document
 
     claim = PlannedLeaderExpiredEntryCancelClaim.from_dict(ownership["planned_cancel_claim"], ownership.get("plan_recovery"))
+    quantity = claim.detailed_quantity_at_cancel
+    expected_state = "PARTIALLY_FILLED" if quantity else "ACCEPTED"
     if (stored is None or event.get("event_type") != "CANCEL_STARTED" or value["state"] != "CANCEL_PENDING"
             or event.get("intent_id") != value["intent_id"] or ownership.get("control_revision") is None
-            or stored["state"] != "ACCEPTED" or stored["side"] != "BUY" or not stored["broker_order_id"]
+            or stored["state"] != expected_state or stored["side"] != "BUY" or not stored["broker_order_id"]
             or stored["policy_version"] != "leader_execution_adapter/v1" or not stored.get("mock_plan_approval")
-            or stored["intent_id"] != claim.plan.plan_id or stored["fill_ids"]
-            or any(stored[name] != 0 for name in ("filled_quantity", "detailed_filled_quantity", "broker_reported_filled_quantity"))
+            or stored["intent_id"] != claim.plan.plan_id or quantity >= stored["quantity"]
+            or any(stored[name] != quantity for name in ("filled_quantity", "detailed_filled_quantity", "broker_reported_filled_quantity"))
             or (stored.get("plan") or {}).get("plan_id") != claim.plan.plan_id
             or (stored.get("plan") or {}).get("policy_ref") != claim.plan.policy_ref):
         raise RuntimeError("PLANNED_LEADER_EXPIRY_ROOT_CHANGED")
@@ -1082,34 +1239,51 @@ def _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, *,
     broker_account = claim.recovery.account
     orders = [order for order in claim.recovery.orders if order.state not in TERMINAL_ORDER_STATES]
     age = spec.unfilled_execution_policy.max_snapshot_age_seconds
+    holdings = {value["symbol"]: quantity} if quantity else {}
     if ((risk.snapshot_id, risk.reconciliation_revision) != (claim.risk_snapshot_id, claim.risk_reconciliation_revision)
             or (risk.account_ref, risk.execution_run_id, risk.binding_revision, risk.data_path)
             != (account, run_id, spec.binding_revision, spec.data_path)
             or risk.account_revision != mock_automation_risk_account_revision(claim.recovery)
             or (broker_account.account_ref, broker_account.as_of) != (account, risk.account_as_of)
-            or any(broker_account.positions.values()) or risk.owned_position_quantities or risk.pending_sell_quantities
+            or {symbol: held for symbol, held in broker_account.positions.items() if held} != holdings
+            or dict(risk.owned_position_quantities) != holdings or risk.pending_sell_quantities
             or risk.submission_unknown_count or risk.balance_mismatch_count
             or any(not 0 <= (now - at).total_seconds() <= age for at in (risk.account_as_of, risk.observed_at))
             or (head["version"], head["plan_id"], head["policy_ref"], head["revision"], head["run_id"], head["symbol"],
-                head["quantity"], head["fill_cursor"]) != ("mock_plan_position/v1", claim.plan.plan_id, claim.plan.policy_ref,
-                claim.plan.expected_revision, run_id, value["symbol"], 0, 0)
+                head["quantity"]) != ("mock_plan_position/v1", claim.plan.plan_id, claim.plan.policy_ref,
+                claim.plan.expected_revision, run_id, value["symbol"], quantity)
             or head.get("unreconciled_sell_quantity") or len(orders) != 1):
         raise RuntimeError("PLANNED_LEADER_EXPIRY_FLAT_CUT_UNCONFIRMED")
+    if quantity:
+        validate_planned_leader_current_cut(
+            claim.plan, spec=spec, run_id=run_id, symbol=value["symbol"], risk=risk, plan_position=head, now=now,
+        )
     # Risk may be incomplete for a flat first BUY with no fills. This exception
     # can cancel just this mapped order and cannot approve a new order.
     order = orders[0]
     if ((order.account_ref, order.broker_order_id, order.symbol, order.state.value, order.filled_quantity,
-         order.remaining_quantity, order.as_of) != (account, root.broker_order_id, root.intent.symbol, "ACCEPTED",
-         0, root.intent.quantity, root.last_broker_as_of) or order.fills
+         order.remaining_quantity, order.as_of) != (account, root.broker_order_id, root.intent.symbol, expected_state,
+         quantity, root.intent.quantity - quantity, root.last_broker_as_of)
+            or any(fill.execution_id not in root.fill_ids for fill in order.fills)
             or not 0 <= (now - order.as_of).total_seconds() <= age):
         raise RuntimeError("PLANNED_LEADER_EXPIRY_BROKER_ORDER_CHANGED")
     active = _account_active_execution_rows(cursor, "mock", account, 2, p)
     if len(active) != 1 or _json_document(active[0][0]) != stored:
         raise RuntimeError("PLANNED_LEADER_EXPIRY_ACCOUNT_ORDER_CHANGED")
     event_type = "document_json->>'event_type'" if p == "%s" else "json_extract(document_json,'$.event_type')"
-    cursor.execute(f"SELECT 1 FROM central_execution_events WHERE intent_id={p} "
-                   f"AND {event_type} IN ('CANCEL_STARTED','FILL','BROKER_FILL_AGGREGATE') LIMIT 1", (claim.plan.plan_id,))
-    if cursor.fetchone() is not None:
+    cursor.execute(f"SELECT accepted_sequence,document_json FROM central_execution_events WHERE intent_id={p} "
+                   f"AND {event_type} IN ('CANCEL_STARTED','FILL','BROKER_FILL_AGGREGATE') ORDER BY accepted_sequence",
+                   (claim.plan.plan_id,))
+    exact_quantity, fill_cursor, fill_ids = 0, 0, []
+    for sequence, event_document in cursor.fetchall():
+        previous = _json_document(event_document)
+        if previous["event_type"] == "CANCEL_STARTED" or not quantity:
+            raise RuntimeError("PLANNED_LEADER_EXPIRY_ROOT_HISTORY_CHANGED")
+        if previous["event_type"] == "FILL":
+            exact_quantity += previous["quantity"]
+            fill_ids.append(previous["broker_execution_id"])
+            fill_cursor = sequence
+    if (exact_quantity, fill_cursor, tuple(fill_ids)) != (quantity, head["fill_cursor"], root.fill_ids):
         raise RuntimeError("PLANNED_LEADER_EXPIRY_ROOT_HISTORY_CHANGED")
     return {**event, "planned_leader_cancel_claim": claim.to_dict()}
 
@@ -1505,7 +1679,7 @@ class SQLiteExecutionStoreMixin:
         return [_json_document(row[0]) for row in rows]
 
     def save_mock_automation_control(
-        self, value: dict[str, Any], *, expected_revision: int,
+        self, value: dict[str, Any], *, expected_revision: int, resume_owner_token: str | None = None,
     ) -> bool:
         account_ref = str(value.get("account_ref") or "")
         revision = int(value.get("control_revision") or 0)
@@ -1515,14 +1689,21 @@ class SQLiteExecutionStoreMixin:
         changed_at = datetime.fromisoformat(str(value["changed_at"])).timestamp()
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            now_provider = getattr(self, "_execution_wall_now", None) or kst_now
+            if resume_owner_token is not None:
+                run_id = value["execution_run_id"]
+                _require_execution_ownership(connection.cursor(), {"owner_key": f"mock:{account_ref}",
+                    "owner_token": f"{run_id}:{resume_owner_token}", "run_id": run_id},
+                    {"environment": "mock", "account_ref": account_ref}, "?", now_provider=now_provider)
             row = connection.execute(
                 "SELECT document_json FROM central_documents WHERE collection=? AND owner=? "
                 "AND document_key=?",
                 ("execution_mock_automation_control", account_ref, account_ref),
             ).fetchone()
-            current = int(_json_document(row[0]).get("control_revision", 0)) if row else 0
-            if current != expected_revision:
+            current = _json_document(row[0]) if row else {}
+            if int(current.get("control_revision", 0)) != expected_revision:
                 return False
+            _require_planned_resume_control(connection.cursor(), "?", value, current, resume_owner_token, now_provider)
             connection.execute(
                 "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
                 "VALUES(?,?,?,?,?) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "
@@ -1826,7 +2007,7 @@ class PostgresExecutionStoreMixin:
         return [_json_document(row[0]) for row in rows]
 
     def save_mock_automation_control(
-        self, value: dict[str, Any], *, expected_revision: int,
+        self, value: dict[str, Any], *, expected_revision: int, resume_owner_token: str | None = None,
     ) -> bool:
         from .postgres_access import DBWriterContext, open_observed_connection
 
@@ -1840,6 +2021,12 @@ class PostgresExecutionStoreMixin:
             operation="save_mock_automation_control",
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+            now_provider = getattr(self, "_execution_wall_now", None) or kst_now
+            if resume_owner_token is not None:
+                run_id = value["execution_run_id"]
+                _require_execution_ownership(cursor, {"owner_key": f"mock:{account_ref}",
+                    "owner_token": f"{run_id}:{resume_owner_token}", "run_id": run_id},
+                    {"environment": "mock", "account_ref": account_ref}, "%s", now_provider=now_provider)
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (
                 f"mock-automation-control:{account_ref}",
             ))
@@ -1849,9 +2036,10 @@ class PostgresExecutionStoreMixin:
                 ("execution_mock_automation_control", account_ref, account_ref),
             )
             row = cursor.fetchone()
-            current = int(_json_document(row[0]).get("control_revision", 0)) if row else 0
-            if current != expected_revision:
+            current = _json_document(row[0]) if row else {}
+            if int(current.get("control_revision", 0)) != expected_revision:
                 return False
+            _require_planned_resume_control(cursor, "%s", value, current, resume_owner_token, now_provider)
             cursor.execute(
                 "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
                 "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "

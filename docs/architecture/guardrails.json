@@ -2967,6 +2967,20 @@
       "limits": {
         "db|src/kiwoom_monitor/central_server/database_execution.py|_require_planned_leader_expiry_cancel|cursor.execute": 1
       }
+    },
+    {
+      "id": "S12-05-planned-explicit-resume-binding-20261105",
+      "reason": "An explicit restart of a stopped planned mock run needs a verified credential binding and the exact terminal order evidence in the same control transaction.",
+      "connection": "The PostgreSQL control writer takes the existing account lease and control locks and then the existing credential binding advisory key. The zero-fill branch reads the one scoped root event sequence. SQLite uses the current native write transaction.",
+      "validation": "The Supervisor fixture rejects stale Risk, a lost lease, unmatched submission and incomplete review. It restores a committed resume only with the same flat receipt, including an exact terminal zero-fill root when there is no protective SELL.",
+      "evidence": [
+        "tests/unit/test_mock_automation_specification.py",
+        "tests/integration/test_observation_bootstrap_postgres.py"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_planned_resume_control|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_planned_zero_fill_resume_root|cursor.execute": 1
+      }
     }
   ]
 }

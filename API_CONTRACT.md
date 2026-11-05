@@ -1017,6 +1017,8 @@ control만 복원하며 계좌 자격·설정·명세가 맞지 않으면 재시
 
 `execution_mock_automation_specs`는 owner=`mock account_ref`, key=`spec_id`인 비공개 O2-M 운용 명세다. 최종 후보 package/result hash, 저장된 forward profile, 현재 최신 `ka00001` mock binding과 동시 전략/포지션·자금·손실·데이터/장애·후보 교체·중지·복구 한도를 내용 hash로 고정한다. 미정 필드는 `BLOCKED`이며 현재 실행 범위는 단일 전략·단일 포지션·KRX 정규장이다. 문서 저장은 runtime claim, 주문 transport 활성화 또는 주문 전송을 수행하지 않는다.
 
+돌파 `leader_breakout/v1`은 `operating_spec.execution_plan_mode=leader-0b-native-plan/v1`과 명시 `unfilled_execution_policy`를 함께 게시할 수 있다. 두 필드는 새 동결 명세에 묶인다. 기존 명세는 계획 모드 필드를 생략한다. 같은 명세의 계획 매수와 현재 계획 수량의 보호·청산은 기존 계좌 소유자와 모의 실행 승인으로 처리한다. 명시적 재개는 현재 바인딩·lease·Risk와 확인된 종료 상태를 제어 저장과 함께 검사한다. 미확정 상태의 `planned_protection` 조회는 계획 보유·예약·상세 체결·대사 대기 수량을 나눠 반환한다.
+
 `execution_mock_automation_admissions`는 owner=`mock account_ref`, key=`admission_id`다. 명세의 final batch/run/candidate/result가 CR3 연구 원장의 단일 완료 행과 일치하고 최신 SHADOW revision 및 mock binding이 유지될 때만 기존 O1 lease claim 전에 저장한다. spec당 admission은 하나다. `execution_mock_automation_lease_receipts`는 같은 owner 아래 결정적 자동 `execution_run_id`가 account lease를 얻은 결과를 기록하며 `new_orders_enabled=false`만 허용한다. 다른 수동/자동 run이 lease를 보유하면 receipt는 생기지 않는다.
 
 `execution_mock_automation_recovery_decisions`는 owner=`mock account_ref`, key=`decision_id`인 append-only 복구 판정이다. admission/lease/spec 계보, broker account/orders fingerprint, 관측·account 시각, 미체결/포지션/예약자금 수, 주문가능금액, 검증된 당일 손익과 데이터 공백·unknown·재접속·잔고 불일치 값을 기록한다. 종결 주문 이력은 미체결로 세지 않는다. 보유가 있으면서 신규 진입에만 필요한 근거가 미완결이면 `MANAGE_ONLY_ORDERS_DISABLED`로 기록할 수 있고, 대사·scope·잔고가 불명확하면 계속 `BLOCKED`다. 통과 상태도 주문 활성화를 뜻하지 않는다.

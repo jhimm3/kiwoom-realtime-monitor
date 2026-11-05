@@ -219,9 +219,113 @@ class CandidateMonitorTests(unittest.TestCase):
                     self.assertIn(fixture.signal.revision_id, signal[0]["input_revision_refs"])
                     if family != CLOSE_FAMILY:
                         self.assertIn(fixture.listing.evidence_id, signal[0]["input_revision_refs"])
+                        setup = signal[0]["close_ipo_entry_setup"]
+                        self.assertEqual("listing_day", setup["listing_phase"])
+                        self.assertEqual([fixture.listing.evidence_id], setup["listing_refs"])
+                        self.assertEqual(fixture.tuesday.isoformat() if family == IPO_CLOSE_FAMILY else None,
+                                         setup["next_date"])
                 else:
                     reason = "close_or_next_open_evidence_unavailable" if family == CLOSE_FAMILY else "listing_unknown"
                     self.assertEqual(reason, monitor.quality["reason"])
+
+    def test_close_shadow_readback_preserves_original_next_session_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._verify_native_close_shadow_readback(
+                lambda **options: SQLiteQueryStore(root / "close-shadow.sqlite3", **options),
+                lambda: SQLiteQueryStore(root / "old-shape.sqlite3"),
+            )
+
+    def _verify_native_close_shadow_readback(self, open_store, open_legacy_store):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from kiwoom_monitor.application.market_session_schedule import session_window_at
+        from kiwoom_monitor.application.section12_minute_research import CLOSE_FAMILY, MINUTE_SHADOW_VERSION
+        from kiwoom_monitor.central_server.research_read_routes import create_research_read_router
+        from tests.unit.test_close_and_ipo import CloseAndIpoTests
+
+        fixture = CloseAndIpoTests()
+        fixture.setUp()
+        cut = datetime.fromisoformat(fixture.signal.available_at)
+        entry = replace(fixture.entry, schedule_version=session_window_at(cut, venue="KRX").schedule_version)
+        calendar = (replace(fixture.calendar[0], sessions=(entry, fixture.auction)), *fixture.calendar[1:])
+        config = json.dumps({
+            "version": MINUTE_SHADOW_VERSION, "family": CLOSE_FAMILY, "signal_valid_seconds": 30,
+            "symbols": [fixture.symbol], "strategy": {"capital_won": 100_000, "policy": asdict(fixture.close)},
+            "references": {"version": "strategy-reference/v1", "calendar": [asdict(day) for day in calendar],
+                           "listings": []},
+        }, default=lambda value: value.isoformat())
+        with closing(open_store(now_provider=lambda: cut)) as store:
+            store.initialize()
+            monitor = CandidateMonitor.from_json(store, config, poll_seconds=2, universe_max_age_seconds=180,
+                                                 now_provider=lambda: cut)
+            monitor.run_once()
+            for index, frame in enumerate((*fixture.prior, fixture.signal)):
+                start = datetime.fromisoformat(frame.bar_start)
+                available = datetime.fromisoformat(frame.available_at)
+                key = {"trading_date": start.date().isoformat(), "minute": start.strftime("%H:%M"),
+                       "code": fixture.symbol, "market": "KRX"}
+                store.save_minute_bars([{
+                    **key, "open": frame.open, "high": frame.high, "low": frame.low, "close": frame.close,
+                    "volume": frame.volume, "trade_value_million_won": frame.trade_value_million_won,
+                    "updated_at": start.timestamp(), "operation_id": f"write-{index}",
+                }])
+                store.finalize_minute_bars([{
+                    **key, "available_at": available.timestamp(), "capture_quality": "complete",
+                    "finalization_source": "timer", "operation_id": f"finalize-{index}",
+                }])
+            with patch.object(store, "save_shadow_evaluation", wraps=store.save_shadow_evaluation) as writes:
+                self.assertEqual(3, monitor.run_once())
+            receipt, = (call.args for call in writes.call_args_list if call.args[2] is not None)
+            monitor_id, decision, original, expiry = receipt
+            setup = original["close_ipo_entry_setup"]
+            self.assertEqual(calendar[0].revision_id, setup["entry_calendar_ref"])
+            self.assertEqual(calendar[-1].revision_id, setup["next_calendar_ref"])
+            self.assertEqual(fixture.tuesday.isoformat(), setup["next_date"])
+            self.assertEqual(fixture.following.starts_at.isoformat(), setup["next_open_at"])
+            self.assertEqual(3, len(setup["entry_bar_refs"]))
+            self.assertEqual(decision["snapshot_id"], original["snapshot_id"])
+
+            before = store.load_shadow_candidates()
+            store.save_shadow_evaluation(*receipt)
+            self.assertEqual(before, store.load_shadow_candidates())
+            changed = {**original, "close_ipo_entry_setup": {**setup, "next_open_at": cut.isoformat()}}
+            with self.assertRaisesRegex(ValueError, "candidate id already has different immutable content"):
+                store.save_shadow_evaluation(monitor_id, decision, changed, expiry)
+
+        with closing(open_store()) as reopened:
+            reopened.initialize()
+            app = FastAPI()
+            app.include_router(create_research_read_router(
+                reopened, lambda: None, lambda: None, now_provider=lambda: fixture.following.starts_at,
+            ))
+            with TestClient(app) as client:
+                response = client.get("/api/v1/research/candidates")
+            self.assertEqual(200, response.status_code)
+            body = response.json()
+            self.assertEqual("DISABLED", body["quality"]["status"])
+            event, = body["events"]
+            self.assertEqual((original["event_id"], original["snapshot_id"], setup, "EXPIRED"),
+                             (event["event_id"], event["snapshot_id"], event["close_ipo_entry_setup"], event["status"]))
+            self.assertNotIn("plan_id", event)
+            self.assertNotIn("filled_quantity", event)
+
+        with closing(open_legacy_store()) as previous:
+            previous.initialize()
+            old = {key: value for key, value in original.items() if key != "close_ipo_entry_setup"}
+            previous.save_shadow_evaluation(monitor_id, decision, old, expiry)
+            before = previous.load_shadow_candidates()
+            previous.save_shadow_evaluation(*receipt)
+            with self.assertRaisesRegex(ValueError, "candidate id already has different immutable content"):
+                previous.save_shadow_evaluation(
+                    monitor_id, decision, {**original, "signal_reference_price": original["signal_reference_price"] + 1}, expiry,
+                )
+            after = previous.load_shadow_candidates()
+            self.assertEqual(before, after)
+            event, = after["events"]
+            self.assertEqual(old["event_id"], event["event_id"])
+            self.assertNotIn("close_ipo_entry_setup", event)
 
     def test_section12_panic_confirmation_restores_armed_cut_and_rejects_partial_correction(self):
         from kiwoom_monitor.application.section12_minute_research import MINUTE_SHADOW_VERSION, PANIC_FAMILY

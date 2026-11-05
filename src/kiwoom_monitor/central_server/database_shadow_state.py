@@ -18,6 +18,18 @@ def _canonical_document(value: dict[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _same_candidate_document(stored: str, candidate: dict[str, Any], encoded: str) -> bool:
+    if stored == encoded:
+        return True
+    # An existing event already commits to its setup via snapshot_id. A retry
+    # may supply the new projection, while the original row stays immutable.
+    if "close_ipo_entry_setup" in candidate:
+        previous_shape = dict(candidate)
+        del previous_shape["close_ipo_entry_setup"]
+        return stored == _canonical_document(previous_shape)
+    return False
+
+
 def _save_sqlite_shadow_evaluation(
     connection: sqlite3.Connection,
     monitor_id: str,
@@ -50,7 +62,7 @@ def _save_sqlite_shadow_evaluation(
             "SELECT document_json FROM central_shadow_candidate_events WHERE event_id=?",
             (str(candidate["event_id"]),),
         ).fetchone()
-        if existing is None or str(existing[0]) != encoded_candidate:
+        if existing is None or not _same_candidate_document(str(existing[0]), candidate, encoded_candidate):
             raise ValueError("shadow candidate id already has different immutable content")
 
 
@@ -90,7 +102,9 @@ def _save_postgres_shadow_evaluation(
             (str(candidate["event_id"]),),
         )
         existing = cursor.fetchone()
-        if existing is None or _canonical_document(json_mapping(existing[0])) != _canonical_document(candidate):
+        if existing is None or not _same_candidate_document(
+            _canonical_document(json_mapping(existing[0])), candidate, _canonical_document(candidate),
+        ):
             raise ValueError("shadow candidate id already has different immutable content")
 
 

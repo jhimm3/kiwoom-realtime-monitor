@@ -105,7 +105,7 @@ class ForwardEvaluationStore(Protocol):
         lease_receipt_id: str, recovery_decision_id: str | None = None, _reader: Any = None,
     ) -> dict[str, dict[str, Any]]: ...
     def save_mock_automation_control(
-        self, value: dict[str, Any], *, expected_revision: int,
+        self, value: dict[str, Any], *, expected_revision: int, resume_owner_token: str | None = None,
     ) -> bool: ...
 
 
@@ -537,13 +537,14 @@ class ForwardEvaluationRepository:
         return mock_automation_control_from_dict(document) if document else None
 
     def save_mock_automation_control(
-        self, value: MockAutomationControl, *, expected_revision: int,
+        self, value: MockAutomationControl, *, expected_revision: int, resume_owner_token: str | None = None,
     ) -> bool:
         value = mock_automation_control_from_dict(value.to_dict())
         if value.control_revision != expected_revision + 1:
             raise ValueError("mock automation control revision must increase by one")
         return self._store.save_mock_automation_control(
             value.to_dict(), expected_revision=expected_revision,
+            **({"resume_owner_token": resume_owner_token} if resume_owner_token is not None else {}),
         )
 
     def save_mock_automation_recovery_decision(

@@ -59,6 +59,16 @@ class ObservationBootstrapPostgresTests(unittest.TestCase):
         store.initialize()
         verify_native_planned_sell_isolation(self, store, mock_specification_inputs(store))
 
+    def test_close_shadow_readback_preserves_original_next_session_after_postgres_restart(self):
+        from tests.unit.test_candidate_monitor import CandidateMonitorTests
+
+        url = os.environ["KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL"]
+        current = self.enterContext(isolated_observation_schema(url))
+        legacy = self.enterContext(isolated_observation_schema(url))
+        CandidateMonitorTests._verify_native_close_shadow_readback(
+            self, lambda **options: PostgresQueryStore(current, **options), lambda: PostgresQueryStore(legacy),
+        )
+
     def test_daily_query_revision_chain_and_export_roll_back_with_latest_in_postgres(self):
         url = self.enterContext(isolated_observation_schema(os.environ['KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL']))
         first_cut = datetime(2026, 9, 14, 19, 59, tzinfo=timezone(timedelta(hours=9)))
@@ -410,3 +420,52 @@ class PlannedLeaderPartialProtectionPostgresTests(unittest.IsolatedAsyncioTestCa
         from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
 
         await PlannedLeaderPartialProtectionTests.test_stopped_plan_holds_unknown_protective_sell_and_unmapped_report(self)
+
+
+class ApprovedLeaderPlanRunnerPostgresTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from tests.unit.test_mock_automation_specification import ApprovedLeaderPlanRunnerTests
+
+        url = os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", "")
+        if not url:
+            raise unittest.SkipTest("dedicated diagnostic PostgreSQL URL is required")
+        self._native_fixture_store = PostgresQueryStore(self.enterContext(isolated_observation_schema(url)))
+        ApprovedLeaderPlanRunnerTests.setUp(self)
+        self._verify_frozen_plan_runner = ApprovedLeaderPlanRunnerTests._verify_frozen_plan_runner.__get__(self)
+        self._verify_frozen_plan_protection = ApprovedLeaderPlanRunnerTests._verify_frozen_plan_protection.__get__(self)
+        self._verify_flat_plan_review = ApprovedLeaderPlanRunnerTests._verify_flat_plan_review.__get__(self)
+        self._settle_normal_plan_order = ApprovedLeaderPlanRunnerTests._settle_normal_plan_order.__get__(self)
+        self._normal_plan_resume_supervisor = ApprovedLeaderPlanRunnerTests._normal_plan_resume_supervisor.__get__(self)
+        self._recover_unclaimed_normal_plan = ApprovedLeaderPlanRunnerTests._recover_unclaimed_normal_plan.__get__(self)
+
+    async def test_frozen_plan_spec_drives_native_buy_restart_and_scoped_ordinary_exit(self):
+        await self._verify_frozen_plan_runner(unknown=False)
+
+    async def test_frozen_plan_spec_keeps_unknown_buy_reserved_after_restart(self):
+        await self._verify_frozen_plan_runner(unknown=True)
+
+    async def test_supervisor_zero_fill_resume_restores_terminal_root_and_observes_distinct_setup(self):
+        from tests.unit.test_mock_automation_specification import ApprovedLeaderPlanRunnerTests
+
+        await ApprovedLeaderPlanRunnerTests.test_supervisor_zero_fill_resume_restores_terminal_root_and_observes_distinct_setup(self)
+
+    async def test_frozen_plan_runner_expires_mapped_buy_then_uses_fresh_stop_after_late_fill(self):
+        await self._verify_frozen_plan_protection(expired=True)
+
+    async def test_frozen_plan_runner_sticky_stop_cancels_partial_then_protects_late_fill(self):
+        await self._verify_frozen_plan_protection(expired=False)
+
+    async def test_supervisor_planned_resume_commit_ack_loss_restores_only_linked_review(self):
+        await self._verify_frozen_plan_protection(expired=True, resume_ack_lost=True)
+
+    async def test_frozen_runner_partial_expiry_keeps_pre_cancel_fill_for_independent_stop(self):
+        await self._verify_frozen_plan_protection(expired=True, partial_at_expiry=True, late_at_terminal=False)
+
+    async def test_frozen_runner_partial_expiry_keeps_pre_cancel_and_late_detail_for_independent_stop(self):
+        await self._verify_frozen_plan_protection(expired=True, partial_at_expiry=True)
+
+    async def test_frozen_runner_partial_expiry_blocks_aggregate_without_detail(self):
+        await self._verify_frozen_plan_protection(expired=True, partial_at_expiry=True, unresolved_at_expiry=True)
+
+    async def test_frozen_runner_reprepares_unclaimed_protection_after_checkpoint_ack_loss(self):
+        await self._verify_frozen_plan_protection(expired=False, recover_unclaimed=True)

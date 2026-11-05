@@ -94,6 +94,7 @@ def build_mock_automation_publication_documents(
     evaluation_start: datetime, evaluation_end: datetime, frozen_at: datetime,
     criteria: ForwardCriteria, limits: Mapping[str, int],
     unfilled_execution_policy: MockUnfilledExecutionPolicy | None = None,
+    execution_plan_mode: str | None = None,
 ) -> dict[str, Any]:
     """Build the explicit PC-owned READY publication; this performs no I/O."""
     package = candidate_package_from_dict(_mapping(candidate_publication, "package"))
@@ -186,6 +187,7 @@ def build_mock_automation_publication_documents(
         candidate_transition_policy=MOCK_CANDIDATE_TRANSITION_POLICY,
         stop_policy=MOCK_STOP_POLICY, recovery_policy=MOCK_RECOVERY_POLICY,
         unfilled_execution_policy=unfilled_execution_policy,
+        execution_plan_mode=execution_plan_mode,
         **{name: int(limits[name]) for name in MOCK_AUTOMATION_LIMIT_FIELDS},
     )
     return {

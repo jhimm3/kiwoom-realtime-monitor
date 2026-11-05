@@ -731,6 +731,10 @@ class LeaderTradeInputs:
         with self._queue_lock:
             return self._stop_quote
 
+    def stop_quote_generation_is_current(self, quote: LeaderStopQuote) -> bool:
+        with self._queue_lock:
+            return quote.envelope.generation == self._generation
+
     def clear_stop_quote(self, envelope: LeaderTradeEnvelope):
         with self._queue_lock:
             if envelope.generation == self._generation:

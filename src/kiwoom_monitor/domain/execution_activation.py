@@ -15,12 +15,14 @@ from kiwoom_monitor.application.market_session_schedule import (
     research_session_profile_document,
 )
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+from kiwoom_monitor.domain.strategy_contract import LEADER_BREAKOUT_FAMILY_ID
 
 
 MOCK_AUTOMATION_SPEC_VERSION = "mock_automation_operating_spec/v1"
 MOCK_CANDIDATE_TRANSITION_POLICY = "wait_until_flat"
 MOCK_STOP_POLICY = "disable_new_orders_and_reconcile"
 MOCK_RECOVERY_POLICY = "broker_reconcile_before_resume"
+LEADER_NATIVE_PLAN_MODE = "leader-0b-native-plan/v1"
 
 
 class StrategyLifecycleStage(StrEnum):
@@ -231,8 +233,14 @@ class MockAutomationOperatingSpec:
     recovery_policy: str | None = None
     version: str = MOCK_AUTOMATION_SPEC_VERSION
     unfilled_execution_policy: MockUnfilledExecutionPolicy | None = None
+    execution_plan_mode: str | None = None
 
     def __post_init__(self) -> None:
+        if self.execution_plan_mode is not None and (
+            self.execution_plan_mode != LEADER_NATIVE_PLAN_MODE or self.unfilled_execution_policy is None
+            or self.supported_venue != "KRX"
+        ):
+            raise ValueError("leader native plan mode requires the explicit KRX mock unfilled policy")
         if self.unfilled_execution_policy is not None:
             if not isinstance(self.unfilled_execution_policy, MockUnfilledExecutionPolicy):
                 raise ValueError("mock unfilled execution policy must be typed")
@@ -344,6 +352,8 @@ class MockAutomationOperatingSpec:
         }
         if self.unfilled_execution_policy is not None:
             document["unfilled_execution_policy"] = self.unfilled_execution_policy.to_dict()
+        if self.execution_plan_mode is not None:
+            document["execution_plan_mode"] = self.execution_plan_mode
         return document
 
 
@@ -369,6 +379,8 @@ def assess_mock_automation_readiness(
         reasons.append("ACCOUNT_SCOPE_MISMATCH")
     if profile.environment != "mock":
         reasons.append("FORWARD_PROFILE_NOT_MOCK")
+    if spec.execution_plan_mode == LEADER_NATIVE_PLAN_MODE and profile.family_version != LEADER_BREAKOUT_FAMILY_ID:
+        reasons.append("NATIVE_PLAN_MODE_REQUIRES_LEADER_0B_FAMILY")
     if profile.criteria.tbd_fields:
         reasons.extend(f"FORWARD_CRITERIA_TBD:{name}" for name in profile.criteria.tbd_fields)
     if profile.session_profile != spec.session_profile:
@@ -598,6 +610,7 @@ def mock_automation_spec_from_dict(value: Mapping[str, Any]) -> MockAutomationOp
         recovery_policy=_optional_text(value.get("recovery_policy")),
         unfilled_execution_policy=(MockUnfilledExecutionPolicy(**value["unfilled_execution_policy"])
                                    if value.get("unfilled_execution_policy") is not None else None),
+        execution_plan_mode=value.get("execution_plan_mode"),
     )
     expected = str(value.get("spec_id", spec.spec_id))
     if expected != spec.spec_id:

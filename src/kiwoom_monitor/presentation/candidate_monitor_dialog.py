@@ -8,6 +8,7 @@ import math
 import json
 from dataclasses import asdict
 from copy import deepcopy
+from html import escape
 from pathlib import Path
 from datetime import datetime
 from typing import Any
@@ -477,6 +478,9 @@ class CandidateMonitorDialog(QDialog):
         )
         for column, value in enumerate(values):
             self._table.setItem(row, column, QTableWidgetItem(value))
+        details = _close_ipo_entry_details(event.get("close_ipo_entry_setup"))
+        if details:
+            self._table.item(row, len(values) - 1).setToolTip("<qt>" + "<br>".join(map(escape, details)) + "</qt>")
 
     def _show_failure(self, message: str) -> None:
         self._quality.setText(f"NAS 후보 연결 대기 · {message}")
@@ -1524,6 +1528,24 @@ def _ram_label(value):
 def _display_time(value: object) -> str:
     from kiwoom_monitor.infrastructure.time_display import format_kst_time
     return format_kst_time(value, "%m-%d %H:%M:%S")
+
+
+def _close_ipo_entry_details(setup: object) -> list[str]:
+    if not isinstance(setup, dict):
+        return []
+    from kiwoom_monitor.infrastructure.time_display import format_kst_time
+
+    details = []
+    if setup.get("next_open_at"):
+        details.append("다음 거래일 개장 · " + format_kst_time(setup["next_open_at"]))
+    if setup.get("next_calendar_ref"):
+        details.append(f"거래일 판본 · {setup['next_calendar_ref']}")
+    phase = setup.get("listing_phase")
+    if phase in ("listing_day", "after_listing_day"):
+        details.append("상장 단계 · " + ("상장 첫날" if phase == "listing_day" else "상장일 이후"))
+    if setup.get("listing_refs"):
+        details.append("상장 근거 · " + ", ".join(setup["listing_refs"]))
+    return ["최초 후보 근거", *details] if details else []
 
 
 def _quality_status(value: object) -> str:

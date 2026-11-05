@@ -376,6 +376,35 @@ class MockAutomationDialogControlTests(unittest.TestCase):
         self.assertNotIn("보호 매도", self.dialog._runtime.text())
         self.assertEqual("", self.dialog._runtime.toolTip())
 
+    def test_leader_publication_requires_explicit_policy_file_for_native_plan_mode(self):
+        from kiwoom_monitor.domain.execution_activation import LEADER_NATIVE_PLAN_MODE, MockUnfilledExecutionPolicy
+        from kiwoom_monitor.domain.strategy_contract import LEADER_BREAKOUT_FAMILY_ID
+        from kiwoom_monitor.presentation.mock_automation_dialog import MockAutomationPublicationDialog
+
+        policy = MockUnfilledExecutionPolicy(
+            maximum_reprices=0, maximum_adverse_slippage_bps=0, protective_slippage_bps=0,
+            maximum_management_seconds=30, max_snapshot_age_seconds=10, minimum_net_advantage_won=0,
+            uncertainty_multiplier=1, minimum_paired_samples=2, reprice_horizon_seconds=10,
+        )
+        candidate = {"package": {"candidate_spec": {"family": LEADER_BREAKOUT_FAMILY_ID}}}
+        dialog = MockAutomationPublicationDialog(candidate, {}, "profile", ({"event_id": "shadow"},), self.dialog)
+        self.addCleanup(dialog.deleteLater)
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "kiwoom_monitor.presentation.mock_automation_dialog.build_mock_automation_publication_documents",
+        ) as build:
+            dialog.publication_values()
+            self.assertIsNone(build.call_args.kwargs["execution_plan_mode"])
+            self.assertIsNone(build.call_args.kwargs["unfilled_execution_policy"])
+            path = Path(directory) / "explicit-policy.json"
+            dialog._plan_policy_path.setText(str(path))
+            with self.assertRaisesRegex(ValueError, "계획형 모의 정책"):
+                dialog.publication_values()
+            self.assertEqual(1, build.call_count)
+            path.write_text(json.dumps(policy.to_dict()), encoding="utf-8")
+            dialog.publication_values()
+            self.assertEqual(LEADER_NATIVE_PLAN_MODE, build.call_args.kwargs["execution_plan_mode"])
+            self.assertEqual(policy, build.call_args.kwargs["unfilled_execution_policy"])
+
     def test_publication_review_waits_for_thread_finish_and_posts_exact_fresh_selection(self):
         import sys
         import threading

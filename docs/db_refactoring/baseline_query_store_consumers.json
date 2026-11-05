@@ -2424,6 +2424,17 @@
     ],
     [
       "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._read_leader_plan_root",
+      "self._store",
+      "load_document",
+      "direct_call",
+      "self._store.load_document",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
       "MockAutomationInputProgress.bootstrap",
       "store",
       "load_observation_bootstrap",
@@ -2432,6 +2443,28 @@
       "",
       "",
       "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._read_zero_fill_plan_receipt",
+      "self._repository",
+      "mock_automation_read_scope",
+      "direct_call",
+      "self._repository.mock_automation_read_scope",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._restored_planned_resume_matches",
+      "self._repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "self._repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
     ],
     [
       "src/kiwoom_monitor/central_server/mock_automation_episode.py",
@@ -6224,7 +6257,7 @@
       "save_market_data_metadata": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='observation_key', annotation=Name(id='str', ctx=Load())), arg(arg='observation', annotation=Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "save_market_profile_settings": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load()))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "save_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
-      "save_mock_automation_control": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load()))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "save_mock_automation_control": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load())), arg(arg='resume_owner_token', annotation=BinOp(left=Name(id='str', ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None, Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "save_news_ai_results": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='documents', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())), arg(arg='revisions', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())), arg(arg='usage_documents', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='object', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "save_news_body_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='str', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "save_news_event_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='str', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -6481,7 +6514,7 @@
       "save_market_data_metadata": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='observation_key', annotation=Name(id='str', ctx=Load())), arg(arg='observation', annotation=Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "save_market_profile_settings": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load()))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "save_minute_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
-      "save_mock_automation_control": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load()))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "save_mock_automation_control": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load())), arg(arg='resume_owner_token', annotation=BinOp(left=Name(id='str', ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None, Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "save_news_ai_results": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='documents', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())), arg(arg='revisions', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())), arg(arg='usage_documents', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='object', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "save_news_body_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='str', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "save_news_event_revision": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='str', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",

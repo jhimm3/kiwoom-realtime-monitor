@@ -32,7 +32,7 @@ from kiwoom_monitor.application.breakout_strategy import (
 from kiwoom_monitor.application.breakout_theme_research import (
     BREAKOUT_PRIOR_BARS, evaluate_breakout_theme,
 )
-from kiwoom_monitor.application.close_and_ipo import evaluate_close_and_ipo
+from kiwoom_monitor.application.close_and_ipo import ClosePolicy, IpoBreakoutPolicy, evaluate_close_and_ipo
 from kiwoom_monitor.application.panic_rebound import PanicSetup, evaluate_panic_rebound
 from kiwoom_monitor.application.leader_breakout import (
     LeaderBreakoutPolicy, evaluate_leader_breakout_trade, _id,
@@ -730,6 +730,8 @@ class CandidateMonitor:
                                  observation_key=bar.observation_key,
                                  input_cutoff=evaluation.snapshot.input_cutoff,
                                  input_revision_refs=list(evaluation.snapshot.input_revision_refs))
+                if isinstance(self._minute_shadow.strategy.policy, (ClosePolicy, IpoBreakoutPolicy)):
+                    candidate["close_ipo_entry_setup"] = evaluation.snapshot.feature_values[0]["setup"]
         if expires_at is None:
             expires_at = evaluation.state.candidate_expires_at if candidate is not None else ""
         self._store.save_shadow_evaluation(

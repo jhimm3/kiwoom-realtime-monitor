@@ -1992,6 +1992,547 @@ class PlannedLeaderNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], self.transport.calls)
 
 
+class ApprovedLeaderPlanRunnerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from kiwoom_monitor.domain.execution_activation import LEADER_NATIVE_PLAN_MODE
+
+        self.unfilled_execution_policy = MockUnfilledReplacementDispatchTests.unfilled_execution_policy
+        build = mock_specification_inputs
+
+        def frozen_plan_spec(*args, **kwargs):
+            config = kwargs["leader_config"]
+            kwargs["leader_config"] = replace(config, execution_contract=replace(config.execution_contract, quantity=3))
+            inputs = build(*args, **kwargs)
+            inputs.spec = replace(inputs.spec, execution_plan_mode=LEADER_NATIVE_PLAN_MODE)
+            return inputs
+
+        with patch(f"{__name__}.mock_specification_inputs", side_effect=frozen_plan_spec):
+            PlannedLeaderNativeTests.setUp(self)
+
+    async def test_frozen_plan_spec_drives_native_buy_restart_and_scoped_ordinary_exit(self):
+        await self._verify_frozen_plan_runner(unknown=False)
+
+    async def test_frozen_plan_spec_keeps_unknown_buy_reserved_after_restart(self):
+        await self._verify_frozen_plan_runner(unknown=True)
+
+    async def test_supervisor_zero_fill_resume_restores_terminal_root_and_observes_distinct_setup(self):
+        from kiwoom_monitor.application.leader_breakout import LeaderBreakoutPolicy
+        from kiwoom_monitor.central_server.execution_runtime import ManualMockOrderGateway
+
+        await self.runner.close()
+        case = self
+
+        class Reader:
+            orders = ()
+            reserved = 0
+
+            async def read(self):
+                return MockAccountRecovery(
+                    AccountSnapshot(ACCOUNT_REF, case.cash, self.reserved, {}, case.clock), self.orders,
+                )
+
+            async def read_trade_cost_pages(self, *_args):
+                return ()
+
+        reader = Reader()
+        monitor = MockAccountMonitor(
+            reader, self.runtime, self.execution, now_provider=lambda: self.clock,
+            automation_risk_repository=self.repository, automation_binding_revision=self.spec.binding_revision,
+            automation_account_scope=self.spec.account_scope,
+        )
+        gateway = ManualMockOrderGateway(self.runtime, self.execution, monitor.refresh_account,
+                                         automation_execution_cut=lambda: monitor.latest_automation_execution_cut)
+        self.addAsyncCleanup(monitor.close)
+        self.addAsyncCleanup(gateway.close)
+        self.bundle.monitor, self.bundle.gateway = monitor, gateway
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
+                                       leader_context_source=lambda: self.live)
+        self.addAsyncCleanup(self.runner.close)
+        await self.deliver(990)
+        await self.deliver(1001)
+        root = self.execution.load(self.runner.episode.status["pending_intent_id"])
+        first_setup = self.runner.episode._episode_position.state.emitted_candidate_keys
+        self.assertEqual(1, len(first_setup))
+        source = self.store.load_document("execution_leader_decisions", ACCOUNT_REF, root.intent.decision_id)["document"]
+        self.clock = min(root.intent.expires_at, datetime.fromisoformat(source["snapshot"]["feature_values"][0]["value"]["valid_until"]))
+        order = BrokerOrderSnapshot(root.broker_order_id, ACCOUNT_REF, root.intent.symbol, OrderState.ACCEPTED,
+                                    0, root.intent.quantity, self.clock)
+        reader.orders, reader.reserved = (order,), root.intent.quantity * root.intent.limit_price
+        with patch.object(self.transport, "cancel", side_effect=SubmissionUnknown("fixture expiry cancel ACK lost")) as cancel:
+            await self.runner.episode.advance_once()
+            cancel.assert_called_once_with(root.intent, root.broker_order_id, 0)
+        self.assertEqual("RECONCILE_REQUIRED", self.runner.episode._protection_snapshot()["risk_trigger"]["disposition"])
+        emergency_stop_mock_automation(self.repository, self.runtime, account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+                                       stopped_at=self.clock, reason="operator stops to review zero fill")
+        stopped = self.repository.load_mock_automation_control(ACCOUNT_REF)
+        supervisor, request = self._normal_plan_resume_supervisor(stopped, existing=self.runner)
+        self.clock += timedelta(seconds=1)
+        terminal = replace(order, state=OrderState.CANCELLED, remaining_quantity=0, as_of=self.clock)
+        reader.orders, reader.reserved = (replace(terminal, broker_order_id="unmatched-cancel-report"),), 0
+        with self.assertRaisesRegex(ValueError, "mock_protection_resolution_native_flat_unverified"):
+            await supervisor.resume(**request)
+        self.assertEqual(stopped, self.repository.load_mock_automation_control(ACCOUNT_REF))
+        self.assertEqual(OrderState.CANCEL_PENDING, self.execution.load(root.intent.intent_id).state)
+
+        self.clock += timedelta(seconds=1)
+        reader.orders = (replace(terminal, as_of=self.clock),)
+        await supervisor.resume(**request)
+        control = self.repository.load_mock_automation_control(ACCOUNT_REF)
+        resolved = supervisor._runners[ACCOUNT_REF].episode._protection_snapshot()
+        self.assertEqual(("RUNNING", "RESOLVED_FLAT", control.planned_review_resume_id),
+                         (control.desired_state.value, resolved["state"], resolved["planned_review_resume_id"]))
+        self.assertNotIn("planned_leader_protection_exit", resolved)
+        history = self.execution.events(root.intent.intent_id)
+        receipt = resolved["planned_zero_fill_root"]
+        self.assertEqual((root.intent.intent_id, root.broker_order_id), (receipt["intent_id"], receipt["broker_order_id"]))
+        self.assertEqual(1, sum(event["event_type"] == "CANCEL_STARTED" for event in history))
+        self.assertFalse(any(event["event_type"] in {"FILL", "BROKER_FILL_AGGREGATE"} for event in history))
+        self.assertEqual("BROKER_RECONCILED", next(event["event_type"] for event in history
+                                                 if event["event_id"] == receipt["terminal_event_id"]))
+        self.assertEqual(((), True), self.runtime.load_account_active_intents())
+
+        await supervisor.close()
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
+                                       leader_context_source=lambda: self.live)
+        self.addAsyncCleanup(self.runner.close)
+        self.assertEqual(resolved, self.runner.episode._protection_snapshot())
+        policy = LeaderBreakoutPolicy.from_dict(self.live["policy"])
+        context = replace(policy.contexts[0], evidence_ref="fixture-independent-setup-after-terminal",
+                          available_at=self.clock.isoformat())
+        self.live = {"revision": 2, "policy": replace(policy, contexts=(context,)).to_dict()}
+        self.store.upsert_documents("server_operational_settings", [{"owner": "global", "key": "current",
+            "document": {"revision": 2, "shadow_candidate_config": self.live["policy"]}}])
+        await self.deliver(990, source="actual-0B-fixture:2")
+        await self.deliver(1001, source="actual-0B-fixture:2")
+        next_setup = self.runner.episode._strategy_inputs._observations[root.intent.symbol].episode_id
+        self.assertTrue(next_setup)
+        self.assertNotIn(next_setup, first_setup)
+        self.assertIn("reentry_policy_unconfigured", self.runner.episode.status["reason"])
+        self.assertEqual(first_setup, self.runner.episode._episode_position.state.emitted_candidate_keys)
+        self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
+
+    async def test_frozen_plan_runner_expires_mapped_buy_then_uses_fresh_stop_after_late_fill(self):
+        await self._verify_frozen_plan_protection(expired=True)
+
+    async def test_supervisor_planned_resume_commit_ack_loss_restores_only_linked_review(self):
+        await self._verify_frozen_plan_protection(expired=True, resume_ack_lost=True)
+
+    async def test_frozen_plan_runner_sticky_stop_cancels_partial_then_protects_late_fill(self):
+        await self._verify_frozen_plan_protection(expired=False)
+
+    async def test_frozen_runner_partial_expiry_keeps_pre_cancel_fill_for_independent_stop(self):
+        await self._verify_frozen_plan_protection(expired=True, partial_at_expiry=True, late_at_terminal=False)
+
+    async def test_frozen_runner_partial_expiry_keeps_pre_cancel_and_late_detail_for_independent_stop(self):
+        await self._verify_frozen_plan_protection(expired=True, partial_at_expiry=True)
+
+    async def test_frozen_runner_partial_expiry_blocks_aggregate_without_detail(self):
+        await self._verify_frozen_plan_protection(expired=True, partial_at_expiry=True, unresolved_at_expiry=True)
+
+    async def test_frozen_runner_reprepares_unclaimed_protection_after_checkpoint_ack_loss(self):
+        await self._verify_frozen_plan_protection(expired=False, recover_unclaimed=True)
+
+    async def _verify_frozen_plan_protection(self, *, expired, resume_ack_lost=False,
+                                             partial_at_expiry=False, late_at_terminal=True, unresolved_at_expiry=False,
+                                             recover_unclaimed=False):
+        from kiwoom_monitor.central_server.execution_runtime import ManualMockOrderGateway
+
+        await self.runner.close()
+        case = self
+
+        class Reader:
+            orders = ()
+            reserved = 0
+            cost_pages = ()
+
+            async def read(self):
+                return MockAccountRecovery(
+                    AccountSnapshot(ACCOUNT_REF, case.cash, self.reserved, dict(case.positions), case.clock), self.orders,
+                )
+
+            async def read_trade_cost_pages(self, *_args):
+                return self.cost_pages
+
+        reader = Reader()
+        monitor = MockAccountMonitor(
+            reader, self.runtime, self.execution, now_provider=lambda: self.clock,
+            automation_risk_repository=self.repository, automation_binding_revision=self.spec.binding_revision,
+            automation_account_scope=self.spec.account_scope,
+        )
+        gateway = ManualMockOrderGateway(self.runtime, self.execution, monitor.refresh_account,
+                                         automation_execution_cut=lambda: monitor.latest_automation_execution_cut)
+        self.addAsyncCleanup(monitor.close)
+        self.addAsyncCleanup(gateway.close)
+        self.bundle.monitor, self.bundle.gateway = monitor, gateway
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
+                                       leader_context_source=lambda: self.live)
+        self.addAsyncCleanup(self.runner.close)
+
+        await self.deliver(990)
+        await self.deliver(1001)
+        buy = self.execution.load(self.runner.episode.status["pending_intent_id"])
+        source = self.store.load_document("execution_leader_decisions", ACCOUNT_REF, buy.intent.decision_id)["document"]
+        valid_until = datetime.fromisoformat(source["snapshot"]["feature_values"][0]["value"]["valid_until"])
+        deadline = min(buy.intent.expires_at, valid_until)
+        self.clock = deadline - timedelta(seconds=1) if partial_at_expiry else deadline
+        reader.orders = (BrokerOrderSnapshot(buy.broker_order_id, ACCOUNT_REF, buy.intent.symbol, OrderState.ACCEPTED,
+                                            0, buy.intent.quantity, self.clock),)
+        reader.reserved = buy.intent.quantity * buy.intent.limit_price
+        if not expired or partial_at_expiry:
+            first_fill = () if unresolved_at_expiry else (BrokerFill("normal-runner-first-buy", 1, 1001, self.clock),)
+            reader.orders = (replace(reader.orders[0], state=OrderState.PARTIALLY_FILLED, filled_quantity=1,
+                                     remaining_quantity=2, fills=first_fill),)
+            self.positions[buy.intent.symbol] = 1
+            self.cash -= 1001
+            reader.reserved -= buy.intent.limit_price
+            await monitor.refresh_recovery()
+        with patch.object(self.transport, "cancel", side_effect=SubmissionUnknown("fixture lost planned cancel ACK")) as cancel:
+            if partial_at_expiry:
+                await self.runner.episode.advance_once()
+                cancel.assert_not_called()
+                self.assertEqual(OrderState.PARTIALLY_FILLED, self.execution.load(buy.intent.intent_id).state)
+                self.clock = deadline
+            if expired:
+                await self.runner.episode.advance_once()
+            else:
+                await self.deliver(940)
+            await self.runner.episode.advance_once()
+            if unresolved_at_expiry:
+                cancel.assert_not_called()
+                self.assertFalse(self.repository.load_latest_mock_automation_risk(ACCOUNT_REF).reconciliation_complete)
+                partial = self.execution.load(buy.intent.intent_id)
+                self.assertEqual((OrderState.PARTIALLY_FILLED, 1, 0),
+                                 (partial.state, partial.filled_quantity, partial.detailed_filled_quantity))
+                self.assertNotIn("CANCEL_STARTED", [event["event_type"] for event in self.execution.events(buy.intent.intent_id)])
+                return
+            cancel.assert_called_once_with(buy.intent, buy.broker_order_id, 0)
+        pending = self.execution.load(buy.intent.intent_id)
+        self.assertEqual(OrderState.CANCEL_PENDING, pending.state)
+        claim = self.execution.events(buy.intent.intent_id)[-2]["planned_leader_cancel_claim"]
+        notice = self.runner.episode._protection_snapshot() or {}
+        if expired:
+            self.assertEqual("planned-leader-expired-entry-cancel/v1", claim["version"])
+            self.assertEqual(1 if partial_at_expiry else 0, claim.get("detailed_quantity_at_cancel", 0))
+            self.assertNotIn("planned_leader_stop", notice)
+        else:
+            self.assertEqual(notice["planned_leader_stop"]["trigger_id"], claim["trigger_id"])
+
+        self.clock += timedelta(seconds=1)
+        if expired and not partial_at_expiry:
+            terminal, total, late = OrderState.FILLED, buy.intent.quantity, buy.intent.quantity
+        else:
+            terminal, late = OrderState.CANCELLED, int(late_at_terminal)
+            total = 1 + late
+        fills = (BrokerFill("normal-runner-late-buy", late, 1001, self.clock),) if late else ()
+        reader.orders = (replace(reader.orders[0], state=terminal, filled_quantity=total,
+                                 remaining_quantity=0, as_of=self.clock,
+                                 fills=fills),)
+        reader.reserved = 0
+        self.cash -= late * 1001
+        self.positions[buy.intent.symbol] = total
+        await monitor.refresh_recovery()
+        self.assertEqual(terminal, self.execution.load(buy.intent.intent_id).state)
+        if expired:
+            self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
+            await self.deliver(940)
+        stop = self.runner.episode._protection_snapshot()["planned_leader_stop"]
+        self.assertEqual((buy.intent.plan.plan_id, 940), (stop["plan_id"], stop["stop_loss"]["price_won"]))
+        self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
+        await self.deliver(990)
+        await monitor.refresh_recovery()
+        if recover_unclaimed:
+            await self._recover_unclaimed_normal_plan(monitor, stop)
+        else:
+            await self.deliver(991)
+        self.assertEqual(["BUY", "SELL"], [call[1] for call in self.transport.calls], self.runner.episode.status)
+        active = self.runtime.load_active_intents()
+        self.assertEqual(1, len(active))
+        self.assertEqual((buy.intent.plan.plan_id, total, 992 if recover_unclaimed else 990),
+                         (active[0].intent.plan.plan_id, active[0].intent.quantity, active[0].intent.limit_price))
+        self.assertIsNone(self.runner.episode._unfilled_registration)
+        await self.runner.episode.advance_once()
+        self.assertEqual(["BUY", "SELL"], [call[1] for call in self.transport.calls])
+        if expired and not partial_at_expiry:
+            await self._verify_flat_plan_review(reader, monitor, buy, active[0], resume_ack_lost=resume_ack_lost)
+
+    async def _recover_unclaimed_normal_plan(self, monitor, stop):
+        from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
+
+        upsert = self.store.upsert_documents
+
+        def lose_ack(collection, rows, **kwargs):
+            result = upsert(collection, rows, **kwargs)
+            if (collection == "execution_mock_automation_runner_current"
+                    and "planned_leader_protection_exit" in rows[0]["document"].get("protection_review", {})):
+                raise OSError("lost prepared protection ACK")
+            return result
+
+        with patch.object(self.store, "upsert_documents", side_effect=lose_ack):
+            with self.assertRaisesRegex(OSError, "lost prepared protection ACK"):
+                await self.deliver(991)
+        first = self.runner.episode._protection_snapshot()["planned_leader_protection_exit"]
+        identity = mock_automation_intent_id(self.spec.spec_id, first["decision"]["decision_id"])
+        self.assertIsNone(self.execution.load(identity))
+        self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
+        await self.runner.close()
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
+                                       leader_context_source=lambda: self.live)
+        self.addAsyncCleanup(self.runner.close)
+        await self.runner.episode.advance_once()
+        self.assertEqual("PREPARED_NO_INTENT", self.runner.episode.status["planned_protection"]["state"])
+        await self.deliver(992)
+        await monitor.refresh_recovery()
+        await self.deliver(993)
+        final = self.runner.episode._protection_snapshot()
+        self.assertEqual(stop, final["planned_leader_stop"])
+        self.assertNotEqual(first["workflow_id"], final["planned_leader_protection_exit"]["workflow_id"])
+        self.assertIsNone(self.execution.load(identity))
+
+    async def _verify_flat_plan_review(self, reader, monitor, buy, sell, *, resume_ack_lost=False):
+        from kiwoom_monitor.application.mock_automation_execution import resume_mock_automation
+
+        emergency_stop_mock_automation(self.repository, self.runtime, account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+                                       stopped_at=self.clock, reason="operator stops after planned protection")
+        self.clock += timedelta(seconds=1)
+        quantity = sell.intent.quantity
+        reader.orders = (*reader.orders, BrokerOrderSnapshot(
+            sell.broker_order_id, ACCOUNT_REF, sell.intent.symbol, OrderState.FILLED, quantity, 0, self.clock,
+            (BrokerFill("normal-runner-protection-sell", quantity, 990, self.clock),),
+        ))
+        self.positions.clear()
+        self.cash += quantity * 990
+        day = self.clock.strftime("%Y%m%d")
+        reader.cost_pages = ({"trst_ovrl_trde_prps_array": [
+            {"cntr_dt": day, "trde_dt": day, "stk_cd": buy.intent.symbol, "io_tp_nm": "매수", "trde_amt": quantity * 1001},
+            {"cntr_dt": day, "trde_dt": day, "stk_cd": sell.intent.symbol, "io_tp_nm": "매도", "trde_amt": quantity * 990},
+        ]},)
+        recovery = await monitor.refresh_recovery()
+        risk = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
+        self.assertEqual((True, (), -11 * quantity),
+                         (risk.reconciliation_complete, risk.owned_position_quantities, risk.daily_net_pnl_won))
+        record_mock_automation_recovery_from_risk(self.repository, self.runtime, recovery, risk,
+                                                 account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id)
+        await self.runner.close()
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
+                                       leader_context_source=lambda: self.live)
+        self.addAsyncCleanup(self.runner.close)
+        await self.runner.episode.advance_once()
+        self.assertEqual(("STOPPED", "FILLED", 0), (self.runner.episode.status["state"],
+                         self.runner.episode.status["planned_protection"]["state"],
+                         self.runner.episode.status["planned_protection"]["plan_quantity"]))
+        notice = self.runner.episode._protection_snapshot()
+        resolve = dict(expected_revision=notice["revision"], recovery=recovery, risk=risk)
+        with self.assertRaisesRegex(ValueError, "planned_protection_resolution_requires_explicit_resume"):
+            self.runner.episode.resolve_protection_review(**resolve)
+        with self.assertRaisesRegex(RuntimeError, "PLANNED_RESUME_REVIEW_CHANGED"):
+            resume_mock_automation(self.repository, self.runtime, account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+                                   resumed_at=self.clock, reason="no acknowledged review")
+        stopped = self.repository.load_mock_automation_control(ACCOUNT_REF)
+        supervisor, request = self._normal_plan_resume_supervisor(stopped, existing=self.runner)
+        upsert = self.store.upsert_documents
+
+        def lose_review_ack(collection, rows, **kwargs):
+            result = upsert(collection, rows, **kwargs)
+            if (collection == "execution_mock_automation_runner_current"
+                    and rows[0]["document"].get("protection_review", {}).get("state") == "RESOLVED_FLAT"):
+                raise OSError("fixture lost review acknowledgement")
+            return result
+
+        with patch.object(self.store, "upsert_documents", side_effect=lose_review_ack):
+            with self.assertRaisesRegex(OSError, "lost review acknowledgement"):
+                await supervisor.resume(**request)
+        self.assertEqual(stopped, self.repository.load_mock_automation_control(ACCOUNT_REF))
+        self.assertIsNone(supervisor.status(ACCOUNT_REF, credential_profile_id=self.spec.credential_profile_id)["runner"])
+        save_control = self.store.save_mock_automation_control
+
+        def advance_risk_before_control(*args, **kwargs):
+            from kiwoom_monitor.application.mock_automation_risk import _sha256, mock_automation_risk_snapshot_from_dict
+
+            body = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF).to_dict()
+            body.pop("snapshot_id")
+            body["reconciliation_revision"] += 1
+            self.repository.save_mock_automation_risk_snapshot(mock_automation_risk_snapshot_from_dict(
+                {**body, "snapshot_id": _sha256(body)},
+            ))
+            monitor._reconciliation_revision = body["reconciliation_revision"]
+            return save_control(*args, **kwargs)
+
+        with patch.object(self.store, "save_mock_automation_control", side_effect=advance_risk_before_control):
+            with self.assertRaisesRegex(RuntimeError, "PLANNED_RESUME_NATIVE_FLAT_CHANGED"):
+                await supervisor.resume(**request)
+        self.assertEqual(stopped, self.repository.load_mock_automation_control(ACCOUNT_REF))
+        with patch.object(self.store, "save_mock_automation_control", side_effect=lambda *args, **kwargs:
+                          save_control(*args, **{**kwargs, "resume_owner_token": "lost-owner"})):
+            with self.assertRaisesRegex(RuntimeError, "EXECUTION_OWNERSHIP_LOST"):
+                await supervisor.resume(**request)
+        self.assertEqual(stopped, self.repository.load_mock_automation_control(ACCOUNT_REF))
+        if resume_ack_lost:
+            def lose_control_ack(*args, **kwargs):
+                saved = save_control(*args, **kwargs)
+                self.assertTrue(saved)
+                raise OSError("fixture lost control acknowledgement")
+
+            with patch.object(self.store, "save_mock_automation_control", side_effect=lose_control_ack):
+                with self.assertRaisesRegex(OSError, "lost control acknowledgement"):
+                    await supervisor.resume(**request)
+            self.runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
+                                           leader_context_source=lambda: self.live)
+            self.addAsyncCleanup(self.runner.close)
+        else:
+            await supervisor.resume(**request)
+            self.runner = supervisor._runners[ACCOUNT_REF]
+        control = self.repository.load_mock_automation_control(ACCOUNT_REF)
+        resolved = self.runner.episode._protection_snapshot()
+        self.assertEqual("RESOLVED_FLAT", resolved["state"])
+        self.assertEqual(("RUNNING", stopped.control_revision + 1, resolved["planned_review_resume_id"]),
+                         (control.desired_state.value, control.control_revision, control.planned_review_resume_id))
+        self.assertEqual(notice["planned_leader_protection_exit"], resolved["planned_leader_protection_exit"])
+        self.assertEqual(["BUY", "SELL"], [call[1] for call in self.transport.calls])
+
+    def _normal_plan_resume_supervisor(self, control, *, existing=None):
+        from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
+        from kiwoom_monitor.central_server.mock_runtime import (
+            MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION, MockAccountRuntimeMode, MockAutomationRuntimeContext,
+        )
+
+        bundle = self.bundle
+        spec = self.spec
+        admission = self.repository.load_mock_automation_admission_for_spec(ACCOUNT_REF, spec.spec_id)
+        bundle.credential_profile_id = spec.credential_profile_id
+        bundle.runtime_mode = MockAccountRuntimeMode.AUTOMATIC
+        bundle.automation_context = MockAutomationRuntimeContext(
+            MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION, ACCOUNT_REF, self.run_id, spec.spec_id,
+            admission.admission_id, control.control_revision, 3,
+        )
+
+        def refresh(updated):
+            bundle.automation_context = replace(bundle.automation_context, control_revision=updated.control_revision)
+
+        bundle.refresh_automation_control = refresh
+
+        class Owner:
+            def bundle(self, credential_profile_id):
+                return bundle if credential_profile_id == spec.credential_profile_id else None
+
+            async def require_execution_settings(self, credential_profile_id, *, expected_settings_revision, credential_revision):
+                assert (credential_profile_id, expected_settings_revision, credential_revision) == (spec.credential_profile_id, 2, 3)
+
+        supervisor = MockAutomationSupervisor(self.store, Owner(), now_provider=lambda: self.clock,
+                                               leader_context_source=lambda: self.live)
+        self.addAsyncCleanup(supervisor.close)
+        if existing is not None:
+            supervisor._runners[ACCOUNT_REF] = existing
+        return supervisor, dict(credential_profile_id=spec.credential_profile_id, account_ref=ACCOUNT_REF,
+                                spec_id=spec.spec_id, expected_control_revision=control.control_revision,
+                                expected_settings_revision=2, credential_revision=3, reason="explicit existing resume")
+
+    async def _verify_frozen_plan_runner(self, *, unknown):
+        from kiwoom_monitor.domain.execution_activation import LEADER_NATIVE_PLAN_MODE, mock_automation_spec_from_dict
+
+        self.assertEqual(self.spec, mock_automation_spec_from_dict(self.spec.to_dict()))
+        legacy = replace(self.spec, execution_plan_mode=None)
+        self.assertNotIn("execution_plan_mode", legacy.to_dict())
+        self.assertNotEqual(legacy.spec_id, self.spec.spec_id)
+        self.assertEqual(LEADER_NATIVE_PLAN_MODE, self.repository.load_mock_automation_spec(ACCOUNT_REF, self.spec.spec_id).execution_plan_mode)
+        await self.deliver(990)
+        if unknown:
+            submit = self.transport.submit
+
+            def lose_ack(intent):
+                submit(intent)
+                raise SubmissionUnknown("fixture lost planned entry ACK")
+
+            with patch.object(self.transport, "submit", side_effect=lose_ack):
+                await self.deliver(1001)
+        else:
+            await self.deliver(1001)
+        self.assertEqual(["BUY"], [call[1] for call in self.transport.calls], self.runner.episode.status)
+        buy = self.execution.load(self.runner.episode.status["pending_intent_id"])
+        self.assertEqual(OrderState.SUBMISSION_UNKNOWN if unknown else OrderState.ACCEPTED, buy.state)
+        self.assertIsInstance(buy.intent, PlannedOrderIntent)
+        self.assertEqual((buy.intent.intent_id, 0), (buy.intent.plan.plan_id, buy.intent.plan.expected_revision))
+        gate = self.repository.load_mock_automation_approved_gate(ACCOUNT_REF, buy.intent.intent_id)
+        receipt = self.repository.load_mock_automation_dispatch_receipt(ACCOUNT_REF, buy.intent.intent_id)
+        self.assertEqual((buy.intent.plan, gate.gate_id, buy.state.value), (gate.plan, receipt.gate_id, receipt.order_state))
+        self.assertIsNone(self.runner.episode._unfilled_registration)
+
+        await self.runner.close()
+        self.assertTrue(self.runtime.stop())
+        self.execution = ExecutionRepository(self.store)
+        self.runtime = ExecutionRuntime(
+            OrderLifecycle(self.execution, self.transport, now_provider=lambda: self.clock),
+            self.execution, account_ref=ACCOUNT_REF, run_id=self.run_id,
+            owner_token="frozen-native-leader-plan-restart", now_provider=lambda: self.clock,
+        )
+        self.addCleanup(self.runtime.stop)
+        admit_mock_automation(
+            self.repository, self.repository, self.runtime, account_ref=ACCOUNT_REF,
+            spec_id=self.spec.spec_id, requested_at=self.clock,
+        )
+        self.bundle.repository, self.bundle.runtime = self.execution, self.runtime
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
+                                       leader_context_source=lambda: self.live)
+        self.addAsyncCleanup(self.runner.close)
+        await self.deliver(1002)
+        self.assertEqual(("WAITING_ORDER", buy.state.value, buy.intent.intent_id),
+                         tuple(self.runner.episode.status[key] for key in ("state", "reason", "pending_intent_id")))
+        self.assertEqual(receipt, self.repository.load_mock_automation_dispatch_receipt(ACCOUNT_REF, buy.intent.intent_id))
+        self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
+        head = self.execution.load_plan_position(ACCOUNT_REF, self.run_id, buy.intent.symbol, buy.intent.plan)
+        self.assertEqual((1, 0), (head.plan.expected_revision, head.quantity))
+        if unknown:
+            from kiwoom_monitor.application.mock_automation_execution import resume_mock_automation
+
+            self.assertEqual((buy,), self.runtime.load_active_intents())
+            self.assertFalse(buy.broker_order_id)
+            emergency_stop_mock_automation(self.repository, self.runtime, account_ref=ACCOUNT_REF,
+                                           spec_id=self.spec.spec_id, stopped_at=self.clock, reason="operator stopped unknown BUY")
+            self.clock += timedelta(seconds=1)
+            recovery = await self._refresh_recovery()
+            risk = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF)
+            record_mock_automation_recovery_from_risk(self.repository, self.runtime, recovery, risk,
+                                                     account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id)
+            with self.assertRaisesRegex(RuntimeError, "latest broker reconciliation does not permit resume"):
+                resume_mock_automation(self.repository, self.runtime, account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+                                       resumed_at=self.clock, reason="operator tries to resume")
+            self.assertEqual("STOPPED", self.repository.load_mock_automation_control(ACCOUNT_REF).desired_state.value)
+            supervisor, request = self._normal_plan_resume_supervisor(
+                self.repository.load_mock_automation_control(ACCOUNT_REF), existing=self.runner,
+            )
+            with self.assertRaisesRegex(RuntimeError, "latest broker reconciliation does not permit resume"):
+                await supervisor.resume(**request)
+            self.assertEqual("STOPPED", self.repository.load_mock_automation_control(ACCOUNT_REF).desired_state.value)
+            self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
+            return
+        self._settle_normal_plan_order(buy, 1001)
+        self.live = None  # Candidate source loss cannot erase the pinned position.
+        await self.deliver(975)
+        self.assertEqual(["BUY", "SELL"], [call[1] for call in self.transport.calls], self.runner.episode.status)
+        sell = self.execution.load(self.runner.episode.status["pending_intent_id"])
+        self.assertEqual(replace(buy.intent.plan, expected_revision=2), sell.intent.plan)
+        self.assertIsNone(self.runner.episode._unfilled_registration)
+        self._settle_normal_plan_order(sell, 975)
+        await self.runner.episode.advance_once()
+        self.assertEqual(0, self.execution.load_plan_position(ACCOUNT_REF, self.run_id, buy.intent.symbol, buy.intent.plan).quantity)
+
+    def _settle_normal_plan_order(self, record, price):
+        self.clock += timedelta(seconds=1)
+        quantity, symbol = record.intent.quantity, record.intent.symbol
+        settled = self.runtime.reconcile_by_broker_order(BrokerOrderSnapshot(
+            record.broker_order_id, ACCOUNT_REF, symbol, OrderState.FILLED, quantity, 0, self.clock,
+            (BrokerFill(f"normal-{record.intent.side.value}-fill", quantity, price, self.clock),),
+        ))
+        self.assertEqual(OrderState.FILLED, settled.state)
+        gross = quantity * price
+        bought = record.intent.side.value == "BUY"
+        self.positions = {symbol: quantity} if bought else {}
+        self.cash += -gross if bought else gross
+        self.costs.append(DailyTradeCost(
+            self.clock.date(), self.clock.date(), symbol, "매수" if bought else "매도", gross, gross, 0, 0, 0,
+            origin_scope=self.spec.account_scope,
+        ))
+
+
 class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.unfilled_execution_policy = MockUnfilledReplacementDispatchTests.unfilled_execution_policy

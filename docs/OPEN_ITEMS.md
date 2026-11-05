@@ -2,7 +2,7 @@
 
 **AR의 실제 전환 잔여·차단·재개 조건**은 [정본 0절](architecture/app-target-20261023.md#0-현재-기준과-진행-현황)을 확인한다. 이 문서는 기능별 후속과 사용 제한을 찾는 곳이다.
 
-**12절 개발 잔여와 재개 조건**은 [승인 로드맵의 12.12 대조](architecture/section12-development-roadmap-20261105.md#s12-protection-readback-and-micro)에서 관리한다. 격리 개발, 과거 자료 실증, 실제 운영 인계를 각각 판정한다.
+**12절 개발 잔여와 재개 조건**은 [승인 로드맵의 12.12 대조](architecture/section12-development-roadmap-20261105.md#s12-acceptance-remaining)에서 관리한다. 격리 개발, 과거 자료 실증, 실제 운영 인계를 각각 판정한다.
 
 **네 운용군 설계의 후속(2026-10-30 r003 반영):** [12.13 연구→AR 리팩토링 계약](architecture/app-target-20261023.md#mimosa-research-refactor-contract)·[12.10 전환 순서](architecture/app-target-20261023.md#1210-기존-ar와의-전환-순서)·[12.11 미정 정책](architecture/app-target-20261023.md#1211-미정-매매운용-정책)·[12.12 관련 검증](architecture/app-target-20261023.md#1212-구현-시-확인할-대표-연결과-이번-반영의-검증-범위)을 단일 상세로 사용한다.186개 보고서 통합 연구와 전략/백테스트 명세 작성은 완료했지만 관측식/예외의 검증·계좌 배분/병행 정책·계획별 수량·종가 익일 복구·연구/실행/화면의 실제 연결은 미완료다. 공통 입력·목적별 상태·분모·계좌 사실·입력 가용시점을 해당 AR 변경에 반영하고 일봉DD와 장중PANIC을 구분한다. 새 미결 ID나 R3/AR 완료를 만들지 않았으며 실제 작업 순서·재개/실행 제한은 정본0절을 따른다.
 

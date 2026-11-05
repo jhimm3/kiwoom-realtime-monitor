@@ -4,11 +4,13 @@ from kiwoom_monitor.domain.time_basis import kst_now
 from kiwoom_monitor.infrastructure.time_display import format_kst_time
 
 from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QSettings, QThread, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
+    QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
@@ -17,7 +19,8 @@ from kiwoom_monitor.application.mock_automation_specification import (
     build_mock_automation_publication_documents,
     matching_shadow_events,
 )
-from kiwoom_monitor.domain.execution_activation import ForwardCriteria
+from kiwoom_monitor.domain.execution_activation import ForwardCriteria, LEADER_NATIVE_PLAN_MODE, MockUnfilledExecutionPolicy
+from kiwoom_monitor.domain.strategy_contract import LEADER_BREAKOUT_FAMILY_ID
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
 from kiwoom_monitor.infrastructure.central_credentials_client import CentralCredentialsClient
 from kiwoom_monitor.presentation.mock_automation_candidate_dialog import MockAutomationCandidateDialog
@@ -287,6 +290,19 @@ class MockAutomationPublicationDialog(QDialog):
             )
         top = QFormLayout()
         top.addRow("Shadow 증거", self._shadow)
+        self._plan_policy_path = None
+        package = candidate.get("package")
+        candidate_spec = package.get("candidate_spec") if isinstance(package, dict) else None
+        if isinstance(candidate_spec, dict) and candidate_spec.get("family") == LEADER_BREAKOUT_FAMILY_ID:
+            self._plan_policy_path = QLineEdit()
+            self._plan_policy_path.setPlaceholderText("계획형 0B 모의운용을 선택할 때 지정")
+            self._plan_policy_path.setClearButtonEnabled(True)
+            browse = QPushButton("정책 파일 선택")
+            browse.clicked.connect(self._choose_plan_policy)
+            policy_row = QHBoxLayout()
+            policy_row.addWidget(self._plan_policy_path)
+            policy_row.addWidget(browse)
+            top.addRow("계획형 모의 정책", policy_row)
         self._start_delay = QSpinBox(); self._start_delay.setRange(1, 10_080); self._start_delay.setValue(5); self._start_delay.setSuffix(" 분 후")
         self._evaluation_days = QSpinBox(); self._evaluation_days.setRange(1, 365); self._evaluation_days.setValue(7); self._evaluation_days.setSuffix(" 일")
         top.addRow("평가 시작", self._start_delay)
@@ -303,6 +319,11 @@ class MockAutomationPublicationDialog(QDialog):
         layout.addWidget(buttons)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(content)
         outer = QVBoxLayout(self); outer.addWidget(scroll)
+
+    def _choose_plan_policy(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "계획형 0B 모의 정책", "", "JSON (*.json)")
+        if path:
+            self._plan_policy_path.setText(path)
 
     @staticmethod
     def _input_group(title, definitions, target):
@@ -328,11 +349,20 @@ class MockAutomationPublicationDialog(QDialog):
         event = self._shadow.currentData()
         if not isinstance(event, dict):
             raise ValueError("일치하는 Shadow 증거를 선택하세요.")
+        policy = None
+        policy_path = self._plan_policy_path.text().strip() if self._plan_policy_path is not None else ""
+        if policy_path:
+            try:
+                policy = MockUnfilledExecutionPolicy(**json.loads(Path(policy_path).read_text(encoding="utf-8")))
+            except (OSError, TypeError, ValueError) as error:
+                raise ValueError(f"계획형 모의 정책을 읽을 수 없습니다. {error}") from error
         return build_mock_automation_publication_documents(
             candidate_publication=self._candidate, binding=self._binding,
             credential_profile_id=self._profile_id, shadow_event=event,
             evaluation_start=evaluation_start, evaluation_end=evaluation_end,
             frozen_at=frozen_at, criteria=criteria, limits=limits,
+            unfilled_execution_policy=policy,
+            execution_plan_mode=LEADER_NATIVE_PLAN_MODE if policy is not None else None,
         )
 
 
@@ -655,6 +685,8 @@ class MockAutomationDialog(QDialog):
                 continue
             spec = row["spec"]
             label = f"{spec.get('strategy_ref', '')} · {row.get('readiness', 'BLOCKED')}"
+            if spec.get("execution_plan_mode") == LEADER_NATIVE_PLAN_MODE:
+                label += " · 계획형 0B 모의"
             self._spec.addItem(label, spec.get("spec_id", ""))
         index = self._spec.findData(selected_spec_id)
         self._spec.setCurrentIndex(index if index >= 0 else 0)

@@ -11,7 +11,7 @@ from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.application.trade_cost_service import DailyTradeCost
-from kiwoom_monitor.domain.order_contract import OrderPlanRef, TERMINAL_ORDER_STATES
+from kiwoom_monitor.domain.order_contract import OrderPlanRef, OrderSide, OrderState, PlannedOrderIntent, TERMINAL_ORDER_STATES
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
 from kiwoom_monitor.infrastructure.persistence.execution_repository import (
     AccountExecutionEvent,
@@ -124,6 +124,7 @@ class PlannedLeaderExpiredEntryCancelClaim:
     risk_snapshot_id: str
     risk_reconciliation_revision: int
     recovery: MockAccountRecovery
+    detailed_quantity_at_cancel: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.plan, OrderPlanRef) or not isinstance(self.recovery, MockAccountRecovery):
@@ -131,11 +132,15 @@ class PlannedLeaderExpiredEntryCancelClaim:
         _require_sha256(self.risk_snapshot_id, "expired planned entry current Risk")
         if type(self.risk_reconciliation_revision) is not int or self.risk_reconciliation_revision < 1:
             raise ValueError("expired planned entry requires a positive Risk revision")
+        if type(self.detailed_quantity_at_cancel) is not int or self.detailed_quantity_at_cancel < 0:
+            raise ValueError("expired planned entry requires confirmed detailed quantity")
 
     def to_dict(self) -> dict[str, Any]:
         return {"version": PLANNED_LEADER_EXPIRED_ENTRY_CANCEL_VERSION, "plan": asdict(self.plan),
                 "risk_snapshot_id": self.risk_snapshot_id,
-                "risk_reconciliation_revision": self.risk_reconciliation_revision}
+                "risk_reconciliation_revision": self.risk_reconciliation_revision,
+                **({"detailed_quantity_at_cancel": self.detailed_quantity_at_cancel}
+                   if self.detailed_quantity_at_cancel else {})}
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any], recovery: MockAccountRecovery) -> PlannedLeaderExpiredEntryCancelClaim:
@@ -332,6 +337,60 @@ def read_planned_leader_protection_checkpoint(workflow, notice, spec, run_id):
             or type(decision.signal_reference_price) is not int or decision.signal_reference_price <= 0):
         raise ValueError("invalid_planned_leader_protection_checkpoint")
     return plan, decision
+
+
+def planned_review_resume_id(notice) -> str:
+    from .mock_automation_session_clock import content_id
+
+    return content_id("planned_protection_resume", {
+        **{key: notice[key] for key in ("account_ref", "spec_id", "execution_run_id", "revision",
+                                      "resolved_risk_snapshot_id", "resolved_risk_revision",
+                                      "resume_from_control_revision")},
+        **({"workflow_id": notice["planned_leader_protection_exit"]["workflow_id"]}
+           if "planned_leader_protection_exit" in notice else {"zero_fill_root": notice["planned_zero_fill_root"]}),
+    })
+
+
+def is_planned_zero_fill_reconciliation_review(notice) -> bool:
+    trigger = notice.get("risk_trigger") or {}
+    return (trigger.get("disposition") == "RECONCILE_REQUIRED" and "stop_loss" not in trigger
+            and not any(key in notice for key in (
+                "planned_leader_stop", "leader_stop_observation", "planned_leader_protection_exit",
+            )))
+
+
+def planned_zero_fill_root_receipt(root, gate, pin, events, *, account_ref, run_id, spec_id):
+    """Read an immutable zero-fill cancellation receipt. It cannot authorize a SELL."""
+    if root is None or not isinstance(root.intent, PlannedOrderIntent) or gate is None:
+        raise ValueError("planned_resume_zero_fill_root_unconfirmed")
+    intent = root.intent
+    if ((intent.account_ref, intent.run_id, intent.environment, intent.side, intent.policy_version,
+         intent.intent_id, intent.plan.plan_id, intent.plan.policy_ref)
+            != (account_ref, run_id, "mock", OrderSide.BUY, "leader_execution_adapter/v1",
+                pin["entry_intent_id"], pin["entry_intent_id"], pin["proof_id"])
+            or root.state is not OrderState.CANCELLED or not root.broker_order_id or root.last_broker_as_of is None
+            or root.filled_quantity or root.detailed_filled_quantity or root.broker_reported_filled_quantity or root.fill_ids
+            or gate.status.value != "APPROVED_FOR_SINGLE_SUBMISSION"
+            or (gate.account_ref, gate.execution_run_id, gate.spec_id, gate.intent_id, gate.strategy_decision_id,
+                gate.action, gate.plan) != (account_ref, run_id, spec_id, intent.intent_id, intent.decision_id, "ENTER", intent.plan)):
+        raise ValueError("planned_resume_zero_fill_root_unconfirmed")
+    cancel = [(index, event) for index, event in enumerate(events) if event["event_type"] == "CANCEL_STARTED"]
+    if len(cancel) != 1 or any(event["event_type"] in {"FILL", "BROKER_FILL_AGGREGATE"} for event in events):
+        raise ValueError("planned_resume_zero_fill_history_unconfirmed")
+    index, started = cancel[0]
+    claim = started.get("planned_leader_cancel_claim") or {}
+    plan = claim.get("plan") or {}
+    terminal = next((event for event in events[index + 1:] if event["event_type"] == "BROKER_RECONCILED"
+                     and event["state"] == "CANCELLED" and event["broker_order_id"] == root.broker_order_id), None)
+    if (claim.get("version") != PLANNED_LEADER_EXPIRED_ENTRY_CANCEL_VERSION
+            or claim.get("detailed_quantity_at_cancel", 0) != 0 or started["state"] != "CANCEL_PENDING"
+            or (plan.get("plan_id"), plan.get("policy_ref"), plan.get("expected_revision"))
+            != (intent.plan.plan_id, intent.plan.policy_ref, intent.plan.expected_revision + 1)
+            or terminal is None or datetime.fromisoformat(terminal["broker_as_of"]) > root.last_broker_as_of):
+        raise ValueError("planned_resume_zero_fill_cancel_unconfirmed")
+    return {"intent_id": intent.intent_id, "plan_id": intent.plan.plan_id, "policy_ref": intent.plan.policy_ref,
+            "approved_gate_id": gate.gate_id, "broker_order_id": root.broker_order_id,
+            "cancel_event_id": started["event_id"], "terminal_event_id": terminal["event_id"]}
 
 
 def gross_price_stop_reached(price, entry, stop_loss_bps):

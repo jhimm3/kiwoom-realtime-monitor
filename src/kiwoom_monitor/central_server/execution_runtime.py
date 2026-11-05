@@ -549,9 +549,10 @@ class ManualMockOrderGateway:
                 if (not isinstance(current.intent, PlannedOrderIntent) or current.intent.intent_id != plan.plan_id
                         or (plan.plan_id, plan.policy_ref) != (current.intent.plan.plan_id, current.intent.plan.policy_ref)):
                     raise ValueError("planned stop cancellation root changed")
-                state = OrderState.ACCEPTED if expired_entry_plan is not None else OrderState.PARTIALLY_FILLED
+                allowed_states = ({OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
+                                  if expired_entry_plan is not None else {OrderState.PARTIALLY_FILLED})
                 if (not already_claimed and current.state not in TERMINAL_ORDER_STATES
-                        and (current.state is not state or self._automation_execution_cut is None)):
+                        and (current.state not in allowed_states or self._automation_execution_cut is None)):
                     raise ValueError("planned cancellation requires a refreshed owner cut")
             if (current.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
                     and (cancel_retry_claim is not None or not already_claimed)):
@@ -574,6 +575,7 @@ class ManualMockOrderGateway:
 
                     return PlannedLeaderExpiredEntryCancelClaim(
                         plan, risk.snapshot_id, risk.reconciliation_revision, cut["recovery"],
+                        detailed_quantity_at_cancel=record.detailed_filled_quantity,
                     )
             return await asyncio.to_thread(
                 self._runtime.cancel_automation_intent, expected,

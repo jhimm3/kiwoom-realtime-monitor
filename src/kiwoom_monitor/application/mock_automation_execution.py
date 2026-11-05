@@ -29,7 +29,7 @@ from kiwoom_monitor.application.mock_automation_risk import (
     MockAutomationRiskSnapshot,
     VERIFIED_DAILY_PNL_SOURCE,
 )
-from kiwoom_monitor.domain.execution_activation import ForwardEvaluationSpec, MockAutomationOperatingSpec
+from kiwoom_monitor.domain.execution_activation import LEADER_NATIVE_PLAN_MODE, ForwardEvaluationSpec, MockAutomationOperatingSpec
 from kiwoom_monitor.domain.order_contract import (
     TERMINAL_ORDER_STATES,
     AccountSnapshot,
@@ -394,7 +394,7 @@ class MockAutomationExecutionRepository(Protocol):
     ) -> MockAutomationStopRevision | None: ...
     def load_mock_automation_control(self, account_ref: str, *, _reader: Any = None) -> MockAutomationControl | None: ...
     def save_mock_automation_control(
-        self, value: MockAutomationControl, *, expected_revision: int,
+        self, value: MockAutomationControl, *, expected_revision: int, resume_owner_token: str | None = None,
     ) -> bool: ...
     def load_latest_mock_automation_risk(
         self, account_ref: str, *, _reader: Any = None,
@@ -404,6 +404,7 @@ class MockAutomationExecutionRepository(Protocol):
 class ClosedGateMockRuntime(Protocol):
     account_ref: str
     run_id: str
+    owner_token: str
 
     def heartbeat(self) -> None: ...
     def server_now(self) -> datetime: ...
@@ -1352,6 +1353,7 @@ def resume_mock_automation(
     spec_id: str,
     resumed_at: datetime,
     reason: str,
+    planned_review_resume_id: str | None = None,
 ) -> MockAutomationControl:
     """Resume a stopped run only after a newer broker reconciliation was recorded."""
     _require_aware(resumed_at, "resumed_at")
@@ -1360,6 +1362,9 @@ def resume_mock_automation(
     spec = repository.load_mock_automation_spec(account_ref, spec_id)
     if spec is None:
         raise ValueError("mock automation operating spec is not stored")
+    planned_mode = getattr(spec, "execution_plan_mode", None) == LEADER_NATIVE_PLAN_MODE
+    if planned_review_resume_id is not None and not planned_mode:
+        raise ValueError("planned review resume requires the selected native plan spec")
     admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id)
     if admission is None:
         raise ValueError("mock automation admission is missing")
@@ -1398,9 +1403,11 @@ def resume_mock_automation(
         execution_run_id=admission.execution_run_id,
         changed_at=resumed_at,
         reason=reason.strip(),
+        planned_review_resume_id=planned_review_resume_id,
     )
     if not repository.save_mock_automation_control(
         resumed, expected_revision=control.control_revision,
+        **({"resume_owner_token": runtime.owner_token} if planned_mode else {}),
     ):
         raise RuntimeError("mock automation control changed before resume")
     return resumed

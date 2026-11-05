@@ -47,6 +47,43 @@ class CandidateAlertTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_candidate_policy_tooltip_reads_original_close_and_ipo_setup(self) -> None:
+        close = _event("close", 1) | {
+            "strategy_id": "close_betting", "strategy_variant": "CLOSE",
+            "close_ipo_entry_setup": {
+                "next_open_at": "2026-09-15T01:00:00+00:00", "next_calendar_ref": "krx-next-r1",
+                "listing_phase": None, "listing_refs": [],
+            },
+        }
+        ipo = _event("ipo", 2) | {
+            "strategy_id": "ipo_breakout", "strategy_variant": "IPO_BREAKOUT",
+            "close_ipo_entry_setup": {
+                "next_open_at": None, "next_calendar_ref": None,
+                "listing_phase": "after_listing_day", "listing_refs": ["exchange<listing-r1>"],
+            },
+        }
+        legacy = _event("legacy", 3) | {"strategy_id": "close_betting", "strategy_variant": "CLOSE"}
+        with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()):
+            dialog = CandidateMonitorDialog(FakeClient())
+            try:
+                dialog._apply_page({"initial_sync": True, "events": [close, ipo, legacy]})
+                close_cell, ipo_cell, legacy_cell = (dialog._table.item(row, 6) for row in range(3))
+                self.assertEqual(close_cell.text(), legacy_cell.text())
+                self.assertIn("2026-09-15 10:00:00 KST", close_cell.toolTip())
+                self.assertIn("krx-next-r1", close_cell.toolTip())
+                self.assertIn("상장일 이후", ipo_cell.toolTip())
+                self.assertIn("exchange&lt;listing-r1&gt;", ipo_cell.toolTip())
+                self.assertNotIn("다음 거래일", ipo_cell.toolTip())
+                self.assertEqual("", legacy_cell.toolTip())
+
+                tooltip = close_cell.toolTip()
+                dialog._apply_page({"status_only": True, "events": [close | {"status": "EXPIRED"}]})
+                self.assertEqual("EXPIRED", dialog._table.item(0, 5).text())
+                self.assertEqual(tooltip, dialog._table.item(0, 6).toolTip())
+            finally:
+                dialog.stop()
+                dialog.deleteLater()
+
     def test_initial_sync_is_silent_and_duplicate_transition_does_not_alert(self) -> None:
         settings = MemorySettings()
         with patch(
