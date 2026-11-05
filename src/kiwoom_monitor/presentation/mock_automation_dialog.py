@@ -321,8 +321,8 @@ class MockAutomationPublicationDialog(QDialog):
                 top.addRow(label, field)
             self._close_management = QComboBox()
             self._close_management.addItem("중지 후 관리 방식을 선택하세요", None)
-            self._close_management.addItem("신규 주문 중지·대사만 유지 (v1)", "close-mock-execution-policy/v1")
-            self._close_management.addItem("신규 진입 중지·원래 계획의 취소·청산 유지 (v2)", "close-mock-execution-policy/v2")
+            self._close_management.addItem("신규 주문 중지·대사만 유지", "close-mock-execution-policy/v3")
+            self._close_management.addItem("신규 진입 중지·원래 계획의 취소·청산 유지", "close-mock-execution-policy/v4")
             top.addRow(kind + " 중지 후 관리", self._close_management)
         self._plan_policy_path = None
         package = candidate.get("package")
@@ -395,7 +395,9 @@ class MockAutomationPublicationDialog(QDialog):
                 entry_price_basis="acknowledged_0B_bounded_by_signal/v1",
                 entry_remainder_policy="cancel_at_entry_deadline/v1",
                 exit_price_basis="acknowledged_0B_bounded_slippage/v1", version=version,
-                stopped_management="continue_original_plan/v1" if version.endswith("/v2") else None,
+                stopped_management="continue_original_plan/v1" if version in {'close-mock-execution-policy/v2', 'close-mock-execution-policy/v4'} else None,
+                accepted_order_management='reassess_then_amend_price/v1' if version in {
+                    'close-mock-execution-policy/v3', 'close-mock-execution-policy/v4'} else None,
             )
         policy_path = self._plan_policy_path.text().strip() if self._plan_policy_path is not None else ""
         if policy_path:
@@ -755,6 +757,8 @@ class MockAutomationDialog(QDialog):
                     if isinstance(item, dict) and isinstance(item.get('package'), dict)
                     and item['package'].get('package_hash') == spec.get('candidate_package_hash')), None)
                 label += " · " + (_ipo_research_label(candidate) or '종가베팅') + " 모의 · " + management
+                if close_policy.get('accepted_order_management') == 'reassess_then_amend_price/v1':
+                    label += " · 현재 조건 재판단·정정 우선"
             self._spec.addItem(label, spec.get("spec_id", ""))
         index = self._spec.findData(selected_spec_id)
         self._spec.setCurrentIndex(index if index >= 0 else 0)

@@ -7,10 +7,13 @@ from kiwoom_monitor.application.close_and_ipo import matches_close_shadow
 from kiwoom_monitor.application.close_mock_execution import (
     build_close_exit_evidence, dispatch_close_entry, dispatch_close_exit,
     frozen_close_candidate, prepare_close_entry_deadline_claim,
+    close_current_shadow_matches, prepare_close_order_management_claim,
 )
 from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
 from kiwoom_monitor.application.mock_automation_recovery import record_mock_automation_recovery_from_risk
-from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES, OrderState
+from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES, OrderSide, OrderState
+from kiwoom_monitor.domain.execution_activation import allows_stopped_close_management
+from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_legs
 from .observation_frame_recovery import drain_thread_call
 
 
@@ -103,6 +106,61 @@ class ClosePlanManagement:
             recovery, risk, account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id)
         return recovery, risk
 
+    def _management_input(self, record, control, quote, enabled, notice):
+        cut = self._bundle.monitor.latest_automation_execution_cut
+        risk = cut['risk'] if cut is not None else None
+        material_risk = ((risk.daily_net_pnl_won, risk.owned_position_quantities, risk.pending_sell_quantities,
+            risk.reconciliation_complete, risk.submission_unknown_count, risk.balance_mismatch_count, risk.reconnect_count)
+            if risk is not None else None)
+        return (record.state, record.filled_quantity, tuple((leg.broker_order_id, leg.limit_price, leg.remaining_quantity, leg.state)
+                for leg in execution_broker_legs(record)), control.control_revision, enabled,
+            quote.get('price_won') if quote is not None else None,
+            quote.get('input_ref') if quote is not None and record.amendment is not None
+                and record.amendment.status == 'REJECTED' else None,
+            notice.get('revision') if notice is not None else None, material_risk,
+            self._now() >= min(datetime.fromisoformat(self._plans[record.intent.plan.plan_id]['event']['expires_at']),
+                              datetime.fromisoformat(self._plans[record.intent.plan.plan_id]['event']['close_ipo_entry_setup']['entry_deadline'])))
+
+    async def _manage_current_order(self, record, context, control, notice):
+        terms = self._spec.close_execution_policy
+        if terms.accepted_order_management != 'reassess_then_amend_price/v1':
+            return False
+        if control.desired_state.value != 'RUNNING' and not allows_stopped_close_management(self._spec):
+            self.status = {'state': 'STOPPED', 'reason': 'original_plan_management_disabled', 'orders_enabled': False}
+            return True
+        if record.state is OrderState.SUBMISSION_UNKNOWN:
+            self._bundle.monitor.request_automation_execution_recovery()
+            self.status = {'state': 'WAITING_ORDER', 'reason': record.state.value,
+                           'pending_intent_id': record.intent.intent_id, 'orders_enabled': False}
+            return True
+        if record.state is OrderState.CANCEL_PENDING:
+            self._bundle.monitor.request_automation_execution_recovery()
+        settings = await drain_thread_call(self._store.load_document, 'server_operational_settings', 'global', 'current')
+        enabled = (record.intent.side is OrderSide.BUY and control.desired_state.value == 'RUNNING' and not control.entry_resume_required
+                   and close_current_shadow_matches(self._spec, context['event'], settings['document'] if settings else None))
+        quote = self._price(record.intent.symbol) if self._price is not None else None
+        token = self._management_input(record, control, quote, enabled, notice)
+        if context.get('management_input') == token:
+            return True
+        outcome = {}
+        def prepare(current, cut):
+            current_quote = self._price(current.intent.symbol) if self._price is not None else None
+            claim = prepare_close_order_management_claim(self._repository, self._bundle.runtime, self._bundle.repository,
+                self._spec, current, parameters=self._parameters, event=context['event'], quote=current_quote,
+                recovery=cut['recovery'], risk=cut['risk'], entry_enabled=enabled, protection_notice=notice)
+            if claim is not None:
+                outcome.update(claim.assessment)
+            return claim
+        updated = await self._bundle.gateway.manage_close_order(record, spec_id=self._spec.spec_id,
+            control_revision=control.control_revision, prepare_management=prepare)
+        if outcome.get('action') in {'AMEND', 'CANCEL'}:
+            context.pop('management_input', None)  # Observe the command result/any unmoved physical remainder first.
+        else:
+            context['management_input'] = self._management_input(updated, control, quote, enabled, notice)
+        self.status = {'state': 'WAITING_ORDER', 'reason': outcome.get('reason', updated.state.value),
+                       'pending_intent_id': updated.intent.intent_id, 'orders_enabled': False}
+        return True
+
     async def _manage(self, plan_id, context, control, protection_notice):
         execution = self._bundle.repository
         root, head = await drain_thread_call(self._read_plan, context)
@@ -110,6 +168,8 @@ class ClosePlanManagement:
         if root.state is OrderState.QUEUED and now >= root.intent.expires_at:
             await drain_thread_call(self._bundle.runtime.cancel, root.intent.intent_id)
         elif root.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}:
+            if await self._manage_current_order(root, context, control, protection_notice):
+                return
             deadline = datetime.fromisoformat(event['close_ipo_entry_setup']['entry_deadline'])
             if now >= deadline or protection_notice is not None:
                 def claim(record, cut):
@@ -120,12 +180,15 @@ class ClosePlanManagement:
                 root = await self._bundle.gateway.cancel_automation_intent(root, spec_id=self._spec.spec_id,
                     control_revision=control.control_revision, prepare_plan_cancel=claim)
         elif root.state in TERMINAL_ORDER_STATES:
+            active = await drain_thread_call(execution.active_intents, 'mock', self._bundle.account_ref, self._bundle.run_id)
+            pending = [row for row in active if getattr(row.intent, 'plan', None) is not None and row.intent.plan.plan_id == plan_id]
+            if pending:
+                if await self._manage_current_order(pending[0], context, control, None):
+                    return
+                self.status = {'state': 'WAITING_ORDER', 'reason': 'close_exit_reconciliation', 'orders_enabled': False}
+                return
             if not head.quantity:
                 del self._plans[plan_id]
-                return
-            active = await drain_thread_call(execution.active_intents, 'mock', self._bundle.account_ref, self._bundle.run_id)
-            if any(getattr(row.intent, 'plan', None) is not None and row.intent.plan.plan_id == plan_id for row in active):
-                self.status = {'state': 'WAITING_ORDER', 'reason': 'close_exit_reconciliation', 'orders_enabled': False}
                 return
             quote = self._price(root.intent.symbol) if self._price is not None else None
             if quote is None:
@@ -165,6 +228,9 @@ class ClosePlanManagement:
                 'reason': ';'.join(gate.reasons) if gate.reasons else 'close_exit_submitted', 'orders_enabled': False,
                 'pending_intent_id': sell.intent.intent_id if sell is not None else ''}
             return
+        elif root.state in {OrderState.CANCEL_PENDING, OrderState.SUBMISSION_UNKNOWN}:
+            if await self._manage_current_order(root, context, control, protection_notice):
+                return
         self.status = {'state': 'WAITING_ORDER', 'reason': root.state.value,
                        'pending_intent_id': root.intent.intent_id, 'orders_enabled': False}
 

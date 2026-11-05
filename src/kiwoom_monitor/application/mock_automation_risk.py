@@ -16,6 +16,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRe
 from kiwoom_monitor.infrastructure.persistence.execution_repository import (
     AccountExecutionEvent,
     ExecutionRecord,
+    execution_broker_legs, execution_remaining_quantity,
 )
 
 
@@ -885,14 +886,12 @@ def build_mock_automation_risk_snapshot(
     pending_sells: dict[str, int] = {}
     for record in active_intents:
         if record.intent.run_id == execution_run_id and record.intent.side.value == "SELL":
-            pending_sells[record.intent.symbol] = pending_sells.get(record.intent.symbol, 0) + max(
-                0, record.intent.quantity - record.filled_quantity,
-            )
+            pending_sells[record.intent.symbol] = pending_sells.get(record.intent.symbol, 0) + execution_remaining_quantity(record)
     missing_reasons = tuple(dict.fromkeys(missing_costs))
     reconciliation_complete = not unresolved_aggregate and not unmatched_sell and balance_matches
     # Zero is evidence only after a complete account recovery and an empty confirmed ledger.
     known = not missing_reasons and reconciliation_complete
-    if not exact_fills and (broker_positions or open_orders):
+    if not exact_fills and (broker_positions or (open_orders and not _confirmed_zero_fill_orders(recovery, active_intents))):
         known = False
         reconciliation_complete = False
     daily_pnl = round(realized) if known else None
@@ -983,21 +982,23 @@ def mock_automation_risk_snapshot_from_dict(value: Mapping[str, Any]) -> MockAut
 
 
 def _exact_fills(events: Sequence[AccountExecutionEvent]) -> tuple[AccountExecutionEvent, ...]:
-    found: dict[str, AccountExecutionEvent] = {}
+    found = {}
     for event in events:
         if event.event_type != "FILL" or not event.broker_execution_id or event.quantity <= 0 or event.price <= 0:
             continue
-        previous = found.get(event.broker_execution_id)
+        key = (event.account_ref, event.environment, event.occurred_at.astimezone(KST).date(),
+               event.broker_order_id, event.broker_execution_id)
+        previous = found.get(key)
         if previous is not None and previous != event:
             raise ValueError("broker execution id has conflicting account events")
-        found[event.broker_execution_id] = event
+        found[key] = event
     return tuple(found.values())
 
 
 def _has_unresolved_aggregate(events: Sequence[AccountExecutionEvent]) -> bool:
-    by_intent: dict[str, list[AccountExecutionEvent]] = {}
+    by_intent = {}
     for event in events:
-        by_intent.setdefault(event.intent_id, []).append(event)
+        by_intent.setdefault((event.intent_id, event.broker_order_id), []).append(event)
     for values in by_intent.values():
         unresolved = 0
         seen_fills: set[str] = set()
@@ -1010,6 +1011,28 @@ def _has_unresolved_aggregate(events: Sequence[AccountExecutionEvent]) -> bool:
         if unresolved:
             return True
     return False
+
+
+def _confirmed_zero_fill_orders(recovery, active_intents):
+    """Known, accepted native BUY reservations are not missing position/FILL evidence."""
+    expected = {}
+    for record in active_intents:
+        if (record.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED, OrderState.CANCEL_PENDING}
+                or record.intent.side is not OrderSide.BUY or record.filled_quantity
+                or record.detailed_filled_quantity or record.broker_reported_filled_quantity
+                or record.amendment is not None and record.amendment.reconciliation_pending):
+            return False
+        for leg in execution_broker_legs(record):
+            if leg.state not in TERMINAL_ORDER_STATES and leg.remaining_quantity:
+                if leg.broker_order_id in expected:
+                    return False
+                expected[leg.broker_order_id] = (record.intent.symbol, leg.remaining_quantity)
+    working = [order for order in recovery.orders if order.state not in TERMINAL_ORDER_STATES]
+    actual = {order.broker_order_id: (order.symbol, order.remaining_quantity) for order in working}
+    return bool(expected) and len(actual) == len(working) and actual == expected and all(
+        order.account_ref == recovery.account.account_ref and order.filled_quantity == 0
+        and order.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED, OrderState.CANCEL_PENDING}
+        for order in working)
 
 
 def _run_positions(events: Sequence[AccountExecutionEvent], run_id: str) -> dict[str, int]:

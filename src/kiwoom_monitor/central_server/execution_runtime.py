@@ -331,6 +331,36 @@ class ExecutionRuntime:
             self._require_active(record.intent)
             return self._lifecycle.cancel(intent_id, quantity)
 
+    def manage_close_order(self, expected, *, spec_id, control_revision, build_claim):
+        """One current-condition claim on the existing owned order, never a replacement entry."""
+        with self._operation_lock:
+            self._require_active(expected.intent)
+            if self._new_orders_enabled:
+                raise RuntimeError('MOCK_AUTOMATION_REQUIRES_CLOSED_ORDER_GATE')
+            record = self._repository.load(expected.intent.intent_id)
+            if record is None or record.intent != expected.intent:
+                raise ValueError('CLOSE_CURRENT_ORDER_ORIGIN_CHANGED')
+            if record.state in TERMINAL_ORDER_STATES or record.state is OrderState.SUBMISSION_UNKNOWN:
+                return record
+            claim = build_claim(record)
+            if claim is None or claim.assessment['action'] == 'WAIT':
+                return record
+            assessment = claim.to_dict()
+            purpose = 'amendment_claim' if assessment['action'] == 'AMEND' else 'planned_cancel_claim'
+            self._repository.bind_automation_control(spec_id=spec_id, control_revision=control_revision,
+                plan_recovery=claim.recovery, **{purpose: assessment})
+            try:
+                with self._observe_operation():
+                    if assessment['action'] == 'AMEND':
+                        return self._lifecycle.amend(record.intent.intent_id, assessment['quantity'], assessment['limit_price'],
+                            broker_order_id=assessment['broker_order_id'], assessment=assessment,
+                            after_amendment_claim=self._repository.clear_automation_control)
+                    return self._lifecycle.cancel(record.intent.intent_id, broker_order_id=assessment['broker_order_id'],
+                        after_cancel_claim=self._repository.clear_automation_control)
+            finally:
+                self._repository.clear_automation_control()
+                self._new_orders_enabled = False
+
     def cancel_automation_intent(
         self, expected: ExecutionRecord, *, spec_id: str, control_revision: int,
         before_cancel_claim: Callable[[], None] | None = None,
@@ -542,6 +572,30 @@ class ManualMockOrderGateway:
 
     async def cancel(self, intent_id: str, quantity: int = 0) -> ExecutionRecord:
         return await self._command(lambda: self._cancel(intent_id, quantity))
+
+    async def manage_close_order(self, expected, *, spec_id, control_revision, prepare_management):
+        return await self._command(lambda: self._manage_close_order(expected, spec_id, control_revision, prepare_management))
+
+    async def _manage_close_order(self, expected, spec_id, control_revision, prepare_management):
+        async with self._command_lock:
+            account = await self._account_refresh()
+            cut = self._automation_execution_cut() if self._automation_execution_cut is not None else None
+            def build_claim(record):
+                observation = cut.get('observation') if cut is not None else None
+                risk = cut.get('risk') if cut is not None else None
+                if (observation is None or risk is None or observation.account != account
+                        or observation.risk_snapshot != risk or risk.account_as_of != account.as_of
+                        or observation.unmapped_broker_order_ids or observation.open_orders != (record,)):
+                    raise ValueError('CLOSE current-order requires a refreshed owner cut')
+                claim = prepare_management(record, cut)
+                if not observation.reconciliation_complete or not observation.open_orders_complete:
+                    if (claim is None or claim.assessment['action'] != 'CANCEL'
+                            or set(observation.reasons) != {'unconfirmed_or_cancel_pending_order'}
+                            or record.state is not OrderState.CANCEL_PENDING):
+                        raise ValueError('CLOSE current-order requires a refreshed owner cut')
+                return claim
+            return await asyncio.to_thread(self._runtime.manage_close_order, expected, spec_id=spec_id,
+                                            control_revision=control_revision, build_claim=build_claim)
 
     async def cancel_automation_intent(
         self, expected: ExecutionRecord, *, spec_id: str, control_revision: int,

@@ -35,11 +35,14 @@ class CloseMockExecutionPolicy:
     exit_price_basis: str
     version: str = "close-mock-execution-policy/v1"
     stopped_management: str | None = None
+    accepted_order_management: str | None = None
 
     def __post_init__(self) -> None:
-        if (self.version not in {"close-mock-execution-policy/v1", 'close-mock-execution-policy/v2'}
-                or self.stopped_management != (None if self.version == 'close-mock-execution-policy/v1'
-                                               else 'continue_original_plan/v1')
+        if (self.version not in {f"close-mock-execution-policy/v{number}" for number in (1, 2, 3, 4)}
+                or self.stopped_management != ('continue_original_plan/v1' if self.version in {
+                    'close-mock-execution-policy/v2', 'close-mock-execution-policy/v4'} else None)
+                or self.accepted_order_management != ('reassess_then_amend_price/v1' if self.version in {
+                    'close-mock-execution-policy/v3', 'close-mock-execution-policy/v4'} else None)
                 or self.entry_price_basis != "acknowledged_0B_bounded_by_signal/v1"
                 or self.entry_remainder_policy != "cancel_at_entry_deadline/v1"
                 or self.exit_price_basis != "acknowledged_0B_bounded_slippage/v1"):
@@ -53,6 +56,8 @@ class CloseMockExecutionPolicy:
         value = asdict(self)
         if self.stopped_management is None:
             value.pop('stopped_management')
+        if self.accepted_order_management is None:
+            value.pop('accepted_order_management')
         return value
 
 

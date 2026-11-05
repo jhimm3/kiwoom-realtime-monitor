@@ -5160,6 +5160,17 @@
       "",
       "",
       "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/close_plan_management.py",
+      "ClosePlanManagement._manage_current_order",
+      "self._store",
+      "load_document",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
     ]
   ],
   "forwarding_identities": [
@@ -6639,5 +6650,29 @@
       "accept_selected_order_evidence": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='packet', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_sha256', annotation=Name(id='str', ctx=Load())), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='run_id', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "load_close_gap_observations": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='closing_start', annotation=Name(id='datetime', ctx=Load())), arg(arg='closing_end', annotation=Name(id='datetime', ctx=Load())), arg(arg='next_open', annotation=Name(id='datetime', ctx=Load())), arg(arg='as_of', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     }
-  }
+  },
+  "incremental_reviews": [
+    {
+      "id": "S12-05-current-order-management-shadow-read-20261106",
+      "added": [
+        [
+          "src/kiwoom_monitor/central_server/close_plan_management.py",
+          "ClosePlanManagement._manage_current_order",
+          "self._store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ]
+      ],
+      "removed": [],
+      "reason": "One existing management poll reads current Shadow configuration through the existing native store; this read is required to reassess the current BUY thesis. No new store method, worker, tick callback, backend or writer. Both fake-broker native DB tests change the actual stored configuration and assert cancellation/native rejection.",
+      "evidence": [
+        "tests/unit/test_close_order_management.py",
+        "tests/integration/test_close_order_management_postgres.py"
+      ]
+    }
+  ]
 }

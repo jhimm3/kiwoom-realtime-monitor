@@ -288,6 +288,7 @@
       "tests.unit.test_mock_automation_session_clock",
       "tests.unit.test_mock_automation_specification",
       "tests.unit.test_close_mock_execution",
+      "tests.unit.test_close_order_management",
       "tests.unit.test_ipo_mock_execution",
       "tests.unit.test_order_amendment",
       "tests.unit.test_mock_automation_supervisor",

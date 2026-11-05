@@ -401,6 +401,15 @@ async def verify_amendment_monitor(case, factory=None):
 
 
 class OrderAmendmentTests(unittest.TestCase):
+    def test_advancing_clock_persists_the_exact_amendment_start_instant(self):
+        _, _, repository, transport, _, _, intent = amendment_fixture(self)
+        ticks = iter(NOW + timedelta(microseconds=index) for index in range(100))
+        lifecycle = OrderLifecycle(repository, transport, now_provider=lambda: next(ticks))
+        result = lifecycle.amend(intent.intent_id, 3, 70_100)
+        started = next(row for row in repository.events(intent.intent_id) if row['event_type'] == 'AMENDMENT_STARTED')
+        self.assertEqual(result.amendment.started_at.isoformat(), started['received_at'])
+        self.assertEqual([('broker-1', 3, 70_100)], transport.amend_calls)
+
     def test_conflicting_excess_fill_stays_durable_and_unresolved_without_weakening_quantity_cap(self):
         verify_recovered_amendment(self, overfill=True)
 

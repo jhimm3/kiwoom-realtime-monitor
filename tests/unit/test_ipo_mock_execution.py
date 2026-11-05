@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 
-def prepare_ipo_execution(case, store, family, phase, *, runner=False):
+def prepare_ipo_execution(case, store, family, phase, *, runner=False, close_terms=None):
     from tests.unit import test_mock_automation_specification as fixtures
     from tests.unit.test_close_and_ipo import CloseAndIpoTests
     from kiwoom_monitor.application.market_session_schedule import KST, session_window_at
@@ -73,7 +73,7 @@ def prepare_ipo_execution(case, store, family, phase, *, runner=False):
     repository = inputs.repository
     repository.publish_mock_automation_candidate(package, eligibility, receipt, credential_profile_id=fixtures.PROFILE_ID,
                                                  expected_binding_revision=inputs.binding['binding_revision'])
-    terms = CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1',
+    terms = close_terms or CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1',
         'cancel_at_entry_deadline/v1', 'acknowledged_0B_bounded_slippage/v1')
     documents = fixtures.build_mock_automation_publication_documents(
         candidate_publication={'package': package.to_dict(), 'eligibility_policy': eligibility.to_dict(),

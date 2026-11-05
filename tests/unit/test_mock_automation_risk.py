@@ -17,9 +17,10 @@ from kiwoom_monitor.domain.order_contract import (
     AccountEnvironment,
     AccountScope,
     AccountSnapshot,
+    BrokerOrderSnapshot, OrderSide, OrderState,
 )
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
-from kiwoom_monitor.infrastructure.persistence.execution_repository import AccountExecutionEvent
+from kiwoom_monitor.infrastructure.persistence.execution_repository import AccountExecutionEvent, ExecutionBrokerLeg, ExecutionRecord
 from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository
 
 
@@ -133,6 +134,59 @@ class MockAutomationRiskTests(unittest.TestCase):
                 self.assertEqual((("068270", 500),), snapshot.owned_entry_prices)
                 self.assertIsNone(snapshot.daily_net_pnl_won)
                 self.assertFalse(snapshot.reconciliation_complete)
+
+    def test_fill_identity_is_scoped_to_physical_order_but_conflicting_same_order_is_rejected(self):
+        now = datetime(2026, 9, 21, 1, tzinfo=UTC)
+        first = event(1, 'shared', 'BUY', 1, 100, now)
+        second = replace(event(2, 'shared', 'BUY', 2, 110, now), intent_id=first.intent_id)
+        snapshot = self.snapshot((first, second), (cost(now.date(), '매수', 320, 0),),
+                                 positions={'005930': 3}, observed=now)
+        self.assertTrue(snapshot.reconciliation_complete)
+        self.assertEqual((('005930', 3),), snapshot.owned_position_quantities)
+        with self.assertRaisesRegex(ValueError, 'conflicting'):
+            self.snapshot((first, replace(second, broker_order_id=first.broker_order_id)), (),
+                          positions={'005930': 3}, observed=now)
+
+    def test_child_detail_cannot_settle_original_order_aggregate_debt(self):
+        now = datetime(2026, 9, 21, 1, tzinfo=UTC)
+        aggregate = event(1, '', 'BUY', 2, 0, now, kind='BROKER_FILL_AGGREGATE')
+        detail = replace(event(2, 'shared', 'BUY', 2, 100, now), intent_id=aggregate.intent_id)
+        for physical, complete in ((detail.broker_order_id, False), (aggregate.broker_order_id, True)):
+            with self.subTest(physical=physical):
+                snapshot = self.snapshot((aggregate, replace(detail, broker_order_id=physical)),
+                    (cost(now.date(), '매수', 200, 0),), positions={'005930': 2}, observed=now)
+                self.assertEqual(complete, snapshot.reconciliation_complete)
+
+    def test_zero_fill_known_buy_is_confirmed_while_unknown_duplicate_and_unowned_orders_are_not(self):
+        from tests.unit.test_order_lifecycle import _intent
+        now = datetime(2026, 9, 21, 1, tzinfo=UTC)
+        intent = replace(_intent(), account_ref=ACCOUNT, run_id='run-a', quantity=2, limit_price=100)
+        record = ExecutionRecord(intent, OrderState.ACCEPTED, 'accepted-buy', 0, (), None, now)
+        order = BrokerOrderSnapshot('accepted-buy', ACCOUNT, intent.symbol, OrderState.ACCEPTED, 0, 2, now)
+        for orders, records, expected in (((order,), (record,), True), ((order,), (), False),
+                ((replace(order, state=OrderState.SUBMISSION_UNKNOWN),), (record,), False),
+                ((order, order), (record,), False), ((replace(order, remaining_quantity=1),), (record,), False)):
+            with self.subTest(orders=orders, mapped=bool(records)):
+                recovery = MockAccountRecovery(AccountSnapshot(ACCOUNT, 1_000, 200, {}, now), orders)
+                risk = build_mock_automation_risk_snapshot(recovery, (), (), records,
+                    execution_run_id='run-a', binding_revision=3, reconciliation_revision=1,
+                    observed_at=now, broker_query_started_at=now, broker_query_completed_at=now)
+                self.assertEqual(expected, risk.reconciliation_complete)
+                self.assertEqual(0 if expected else None, risk.daily_net_pnl_won)
+
+    def test_pending_sells_use_only_active_physical_remainders(self):
+        from tests.unit.test_order_lifecycle import _intent
+        now = datetime(2026, 9, 21, 1, tzinfo=UTC)
+        intent = replace(_intent(), account_ref=ACCOUNT, run_id='run-a', side=OrderSide.SELL, quantity=6)
+        # The cancelled original still records its immutable allocation of six.
+        original = ExecutionBrokerLeg('original', '', 6, 100, OrderState.CANCELLED, transferred_quantity=3)
+        child = ExecutionBrokerLeg('child', 'original', 3, 99, OrderState.ACCEPTED)
+        record = ExecutionRecord(intent, OrderState.ACCEPTED, 'original', 0, (), None, now, broker_legs=(original, child))
+        recovery = MockAccountRecovery(AccountSnapshot(ACCOUNT, 1_000, 0, {'005930': 6}, now), ())
+        risk = build_mock_automation_risk_snapshot(recovery, (event(1, 'buy', 'BUY', 6, 100, now),),
+            (cost(now.date(), '매수', 600, 0),), (record,), execution_run_id='run-a', binding_revision=3,
+            reconciliation_revision=1, observed_at=now, broker_query_started_at=now, broker_query_completed_at=now)
+        self.assertEqual((('005930', 3),), risk.pending_sell_quantities)
 
     def test_kst_date_rollover_and_repository_current_revision(self):
         before = datetime(2026, 9, 20, 14, 59, tzinfo=UTC)

@@ -83,6 +83,7 @@ class ExecutionAmendment:
     reported_broker_order_id: str = ""
     accepted_quantity: int = 0
     observed_fills: tuple[str, ...] = ()
+    assessment: dict[str, Any] | None = None
 
     @property
     def unresolved(self) -> bool:
@@ -121,6 +122,25 @@ def broker_legs_state(legs, requested, amendment=None):
     if filled >= requested:
         return OrderState.FILLED
     return OrderState.CANCELLED
+
+
+def execution_broker_legs(record):
+    if record.broker_legs:
+        return record.broker_legs
+    if not record.broker_order_id or record.intent.limit_price is None:
+        return ()
+    return (ExecutionBrokerLeg(record.broker_order_id, "", record.intent.quantity, record.intent.limit_price, record.state,
+        detailed_filled_quantity=record.detailed_filled_quantity,
+        broker_reported_filled_quantity=record.broker_reported_filled_quantity,
+        fill_ids=record.fill_ids, last_broker_as_of=record.last_broker_as_of),)
+
+
+def execution_remaining_quantity(record):
+    if record.state in TERMINAL_ORDER_STATES:
+        return 0
+    if record.broker_legs:
+        return sum(leg.remaining_quantity for leg in record.broker_legs if leg.state not in TERMINAL_ORDER_STATES)
+    return max(0, record.intent.quantity - record.filled_quantity)
 
 
 def broker_fill_key(broker_order_id: str, execution_id: str) -> str:
@@ -268,7 +288,8 @@ class ExecutionRepository:
                                 replacement_claim: dict | None = None, protection_claim: dict | None = None,
                                 cancel_retry_claim: dict | None = None,
                                 planned_cancel_claim: dict | None = None,
-                                plan_recovery: MockAccountRecovery | None = None) -> None:
+                                plan_recovery: MockAccountRecovery | None = None,
+                                amendment_claim: dict | None = None) -> None:
         if self._ownership is None:
             raise RuntimeError("EXECUTION_REPOSITORY_OWNER_REQUIRED")
         if not spec_id.strip() or type(control_revision) is not int or control_revision <= 0:
@@ -290,12 +311,16 @@ class ExecutionRepository:
         if planned_cancel_claim is not None:
             requires_recovery = planned_cancel_claim.get("version") in {
                 "planned-leader-expired-entry-cancel/v1", "close-entry-deadline-cancel/v1",
-                'close-entry-protective-cancel/v1',
+                'close-entry-protective-cancel/v1', 'close-current-order-management/v1',
             }
             if (any(value is not None for value in (replacement_claim, protection_claim, cancel_retry_claim))
                     or (plan_recovery is not None) != requires_recovery):
                 raise ValueError("execution_claim_purposes_conflict")
             self._automation_control["planned_cancel_claim"] = dict(planned_cancel_claim)
+        if amendment_claim is not None:
+            if any(value is not None for value in (replacement_claim, protection_claim, cancel_retry_claim, planned_cancel_claim)) or plan_recovery is None:
+                raise ValueError("execution_claim_purposes_conflict")
+            self._automation_control["amendment_claim"] = dict(amendment_claim)
         if plan_recovery is not None:
             self._automation_control["plan_recovery"] = plan_recovery
 
@@ -542,8 +567,12 @@ def broker_leg_document(leg: ExecutionBrokerLeg) -> dict[str, Any]:
 
 
 def amendment_document(value: ExecutionAmendment | None) -> dict[str, Any] | None:
-    return {**asdict(value), "observed_fills": list(value.observed_fills),
-            "started_at": value.started_at.isoformat()} if value is not None else None
+    if value is None:
+        return None
+    document = {**asdict(value), "observed_fills": list(value.observed_fills), "started_at": value.started_at.isoformat()}
+    if value.assessment is None:
+        document.pop("assessment")
+    return document
 
 
 def broker_leg_from_document(value: Mapping[str, Any]) -> ExecutionBrokerLeg:
@@ -557,7 +586,7 @@ def amendment_from_document(value: Mapping[str, Any] | None) -> ExecutionAmendme
         "started_at": datetime.fromisoformat(value["started_at"])}) if value else None
 
 
-def validate_broker_ledger_event(stored, document, event, *, recovery=None, now=None) -> None:
+def validate_broker_ledger_event(stored, document, event, *, recovery=None, now=None, authorized_assessment=None) -> None:
     """Validate the physical-order transition again inside the native writer's CAS."""
     before, after = _record_from_document(stored), _record_from_document(document)
     if (before.intent != after.intent or before.broker_order_id != after.broker_order_id
@@ -580,12 +609,10 @@ def validate_broker_ledger_event(stored, document, event, *, recovery=None, now=
     kind = event["event_type"]
     command = after.amendment
     if kind == "AMENDMENT_STARTED":
-        if "plan" in stored or before.intent.run_id.startswith("mock_auto_run_"):
-            # Automatic amendment is enabled only with its current-condition native
-            # admission, not by reusing a former new-order approval.
+        if ("plan" in stored or before.intent.run_id.startswith("mock_auto_run_")) and authorized_assessment is None:
             raise RuntimeError("PLANNED_AMENDMENT_ASSESSMENT_REQUIRED")
         expected = ExecutionAmendment(event["broker_order_id"], event["quantity"], event["price"],
-                                      datetime.fromisoformat(event["received_at"]))
+                                      datetime.fromisoformat(event["received_at"]), assessment=authorized_assessment)
         initial = before.broker_legs or (ExecutionBrokerLeg(
             before.broker_order_id, "", before.intent.quantity, before.intent.limit_price, before.state,
             detailed_filled_quantity=before.detailed_filled_quantity,

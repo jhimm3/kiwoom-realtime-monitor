@@ -371,6 +371,7 @@ class MockAutomationDialogControlTests(unittest.TestCase):
                 self.assertEqual(candidate, build.call_args.kwargs['candidate_publication'])
                 self.assertEqual(CLOSE_NATIVE_PLAN_MODE, build.call_args.kwargs['execution_plan_mode'])
                 self.assertEqual('continue_original_plan/v1', build.call_args.kwargs['close_execution_policy'].stopped_management)
+                self.assertEqual('reassess_then_amend_price/v1', build.call_args.kwargs['close_execution_policy'].accepted_order_management)
                 self.assertIsNone(build.call_args.kwargs['unfilled_execution_policy'])
 
     def test_close_ready_review_requires_explicit_prices_and_stopped_management(self):
@@ -389,8 +390,8 @@ class MockAutomationDialogControlTests(unittest.TestCase):
             dialog._close_inputs['protective_slippage_bps'].setText('200')
             with self.assertRaisesRegex(ValueError, '명시하세요'):
                 dialog.publication_values()
-            for version in ('v1', 'v2'):
-                dialog._close_management.setCurrentIndex(1 if version == 'v1' else 2)
+            for version in ('v3', 'v4'):
+                dialog._close_management.setCurrentIndex(1 if version == 'v3' else 2)
                 dialog.publication_values()
                 args = build.call_args.kwargs
                 self.assertEqual(CLOSE_NATIVE_PLAN_MODE, args['execution_plan_mode'])
@@ -398,7 +399,8 @@ class MockAutomationDialogControlTests(unittest.TestCase):
                 policy = args['close_execution_policy']
                 self.assertEqual((100, 200, 'close-mock-execution-policy/' + version),
                     (policy.maximum_adverse_slippage_bps, policy.protective_slippage_bps, policy.version))
-                self.assertEqual(None if version == 'v1' else 'continue_original_plan/v1', policy.stopped_management)
+                self.assertEqual(None if version == 'v3' else 'continue_original_plan/v1', policy.stopped_management)
+                self.assertEqual('reassess_then_amend_price/v1', policy.accepted_order_management)
             dialog._close_inputs['protective_slippage_bps'].setText('10000')
             with self.assertRaisesRegex(ValueError, 'basis points'):
                 dialog.publication_values()

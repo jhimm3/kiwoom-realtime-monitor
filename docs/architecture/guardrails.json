@@ -3145,6 +3145,24 @@
         "tests/unit/test_mock_account_monitor.py"
       ],
       "limits": {}
+    },
+    {
+      "id": "S12-05-current-order-native-assessment-20261106",
+      "reason": "Complete approved S12-05 current-condition reassessment before amendment of an existing accepted CLOSE/IPO order.",
+      "requirement": "Reassess current strategy/account/Risk/context, prefer one amendment when valid, cancel a lost BUY thesis, preserve original protective SELL trigger/owned quantity. Never reuse stale new-entry approval, resend UNKNOWN, fabricate fills, weaken native ownership or touch operations.",
+      "connection": "New explicit v3/v4 publication -> same spec/READY -> existing ClosePlanManagement/Episode -> existing Gateway command/drain and refreshed monitor cut -> Runtime operation lock -> original native ownership/control/approval/current Risk/head/current Shadow transaction -> durable AMENDMENT_STARTED -> one transport call. Existing per-leg recovery/late FILL feeds account Risk/plan/journal. v1/v2 wire and behavior remain historical; no new worker/schema/library/authority.",
+      "oracle": "Independent fake broker physical book transfers actual partial quantity3, retains original1, and publishes exact parent/side/price/cash/remainder. Real monitor/Gateway/native SQLite and PostgreSQL validate amendment after original transmission expiry but within original strategy signal validity; current Shadow loss and original IPO breakout loss cancel. A context change after prepare is rejected before any mutation event/transport. Lost ACK recovers with one mutation. BUY1+3 and protective SELL4 preserve same raw ID across physical orders and one original plan; actual journal retains three facts across reopen/retry. Original trigger bound and STOP/v4 remain effective. Repeated unchanged assessments add zero broker reads. Existing assertions, costs, limits, time gates and CI profiles are preserved.",
+      "overlap": "Reuse prior physical-order, Risk/FIFO, native SQL/lease/control, Gateway/drain, CLOSE/IPO READY/runner/protection and journal tests. Add only current-management six cases on each DB, four specific Risk regressions and one advancing-clock regression. UI expectations change only for explicit new publication v3/v4; old v1/v2 identity checks remain. No whole local regression or hosted CI is run.",
+      "limits": {
+        "boundary|kiwoom_monitor.application.close_mock_execution|kiwoom_monitor.infrastructure.persistence.execution_repository": 1
+      },
+      "evidence": [
+        "tests/unit/test_close_order_management.py",
+        "tests/integration/test_close_order_management_postgres.py",
+        "tests/unit/test_mock_automation_risk.py"
+      ],
+      "boundary_reason": "Reuse existing immutable ExecutionRecord/physical-leg facts through execution_broker_legs; no second order model, relay, I/O inside pure assessment, or new state owner. Native writer uses same pure assessment and already-read control facts. One bounded current Shadow read is in existing management poll, not per0B. Native command evidence reads are required only for an actual proposed change; no runtime SQL1 baseline is changed.",
+      "validation": "Independent fake broker physical book transfers actual partial quantity3, retains original1, and publishes exact parent/side/price/cash/remainder. Real monitor/Gateway/native SQLite and PostgreSQL validate amendment after original transmission expiry but within original strategy signal validity; current Shadow loss and original IPO breakout loss cancel. A context change after prepare is rejected before any mutation event/transport. Lost ACK recovers with one mutation. BUY1+3 and protective SELL4 preserve same raw ID across physical orders and one original plan; actual journal retains three facts across reopen/retry. Original trigger bound and STOP/v4 remain effective. Repeated unchanged assessments add zero broker reads. Existing assertions, costs, limits, time gates and CI profiles are preserved."
     }
   ]
 }

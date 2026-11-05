@@ -4,7 +4,7 @@
 
 전체 단계와 완료 기준은 이 문서 한 곳에서 관리한다. **S12-01 → S12-02 → S12-03 → S12-04 → S12-05** 순서로 통합한다. 각 단계는 실행할 코드, 직접 관련 검사, 검증 기록과 로컬 커밋을 남긴다. [정본 12절](app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [기능별 계약](r3-ownership.md) · [남은 작업](../OPEN_ITEMS.md) · [저장소 전체 로드맵](../../FUTURE_DEVELOPMENT_ROADMAP.md).
 
-**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·7·9,4/11 개발 수락. **현재 조건 재판단 + 접수 미체결 정정 우선**의 공통 실행 연결을 계속한다. 원/새 주문별 원장에 이어 응답 유실의 계좌 대사·조기00 내구 관측/재시작 재반영과 물리 주문별 계좌 관측을 Windows224/실제PG13건으로 대조했다. 다음은 현재 조건·Risk의 native 정정 승인과 기존 Gateway/Episode, 각 전략의 보호·일지/전송 증거 소비자 연결이다. 이전 진입 승인으로 자동 정정을 허용하지 않으며 대표7개·DD/MICRO·운영 제외와 완료 기준은 유지한다. [정정 복구 근거](#s12-amendment-recovery) · [항목4 수락](#s12-acceptance-ipo-four) · [대표 잔여](#s12-acceptance-remaining).
+**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·7·9,4/11 개발 수락. **현재 조건 재판단 + 접수 미체결 정정 우선**을 종가베팅·신규주의 명시 새 v3/v4 정책에서 기존 Gateway/관리/native 승인·원/새 체결 Risk·원계획 일지까지 연결했다. Windows254/실제PG20건을 대조했다. 구형 v1/v2는 보존한다. 다음은 다른 전략의 현재 조건/행동·보호와 선별 전송 증거 소비자, 대표7개·DD/MICRO의 기존 잔여다. 완료 기준과 운영 제외는 유지한다. [현재 정정 연결](#s12-close-current-order-management) · [대표 잔여](#s12-acceptance-remaining).
 
 ## 1. 착수 기준과 선행 작업
 
@@ -623,3 +623,21 @@ source `e444f09ef7d25476f0e1581c7e2c6900a825159478e2582bfb3d27219378a070`의 **W
 이 수락은 복구/계좌 관측의 개발 근거이며 자동 정정·현재 조건/Risk 승인·각 전략의 보호/일지/실제 운영 수락은 아니다. 원번호가 결손인00은 이 번호만으로 plan 귀속하지 않고 계좌 대사로 확인된 사실만 사용한다. 다음은 실제 현재 조건 재판단→native 승인→기존 Gateway/Episode와 physical 예약·보호/전송 증거 소비자다. 전체4/5·대표4/11과 운영 제외/원래 완료 기준은 유지한다.
 
 현재 단계의 첫 정규 source `bda53781`도224/13PASS였지만 별도 부분 취소 terminal 실험이 보유1/활성 주문0을 불일치로 표시했다. 원인은 미사용 할당량과 취소 후 실제 미체결을 같은 값으로 비교한 소비자였다. 해당 비교에서 terminal 물리 주문의 broker 미체결0을 사용하고 기존 partial-transfer/cancel 공유 unit/PG 시나리오에 보유1·미체결0·관측 완료를 추가했다. 원래 cap·취소/늦은 FILL·queue deadline과 기존 assertion은 유지한다. 최종 source의224/13 및 증분 대조로 재검증했다. [최초 정규](../../tmp/s12-04-shadow/s12-05-amend-recovery/evidence.json) · [부분 취소 재현](../../tmp/s12-05-amend-recovery/cancelled-terminal-probe-failed.json) · [같은 입력 보완](../../tmp/s12-05-amend-recovery/cancelled-terminal-probe-passed.json).
+
+<a id="s12-close-current-order-management"></a>
+
+### S12-05 종가베팅·신규주 현재 조건 재판단과 native 정정 — 2026-11-06
+
+기존 명시 게시의 새 v3/v4 정책은 **현재 조건 재판단 후 정정 우선**이다. v3은 중지 뒤 대사만, v4는 명시한 원계획 관리를 유지한다. 구형 v1/v2 저장 표현·hash·권한은 변경하지 않으며 자동 승격하지 않는다. Qt 게시와 저장 명세 표시에 새 선택을 연결했다. 게시만으로 주문하지 않는다.
+
+기존 ClosePlanManagement/Episode의 승인된 종가베팅·신규주 두 방식은 현재 Shadow/제어, 현재 0B, 현재 계좌·Risk·실제 물리 잔량과 원래 셋업/허용 가격을 다시 판단한다. 현재 유효하면 기존 Gateway의 명령·종료 소유와 Runtime 잠금 안에서 한 물리 잔량을 정정한다. 매수 조건 해제·원래 신호 만료·신규주 돌파 상실·예산/위험 조건 미충족은 잔량 취소다. 이미 전송한 주문의 최초 전송 TTL을 새 진입 허가로 재사용하지 않으며, 원래 신호 유효기간 안의 관리와 구분한다. 청산은 최초 고정 보호 근거·가격 허용 범위와 현재 계획의 실제 보유 잔량을 사용하고 가격 기준을 새로 옮기지 않는다. UNKNOWN은 기존 계좌 대사만 요청하며 정정·취소·새 주문을 재전송하지 않는다.
+
+실제 native 주문 트랜잭션은 기존 owner/lease/control, 최초 승인/셋업/청산 근거, 최신 Risk·계획 head·현재 Shadow와 같은 assessment를 재검증한다. 준비 뒤 설정이 바뀌면 변경 사건/전송 전에 거절한다. AMENDMENT_STARTED의 내구 저장 뒤 한 번만 전송하며, 시간 공급이 진행해도 명령 시작과 사건 수신 시각은 같은 캡처를 쓴다. Risk의 상세 체결은 계좌/환경/일자/물리 주문/체결번호로 구분하고 aggregate debt는 물리 주문별로 대조한다. 실제로 접수·대사한 미체결 매수는 체결 없음의 0 근거가 될 수 있지만 미귀속/미확정/중복·잔량 불일치는 계속 미확인이다. 매도 예약은 취소된 옛 배분이 아닌 현재 활성 물리 잔량이다. 새 worker·권한 owner·schema·라이브러리는 없다. 현재 Shadow 조회1곳은 기존 제한 주기 관리에 추가했고 매 틱 DB 경로를 만들지 않았다. 같은 material 입력의 재평가는 계좌 TR을 추가하지 않는다.
+
+source `ad312cf921683fe1a48eaffd745ca8f6dbc06e8962b7715a0f6070c22334b05b`의 **Windows254건/13모듈 + 실제 격리 PostgreSQL20건**이 통과했다. 신규17건은 두 DB의 현재 관리 각6건, Risk4건, 실제 진행 시계1건이다. 독립 가짜 브로커는 정정3/원주문1, 원래 전송 만료 뒤의 관리, 원주문 늦은 체결, 같은 raw ID의 원1+새3/청산4, 응답 유실 후1회 복구, 중지/v4 보호, 실제 설정 변조의 native 거절과 신규주 두 방식×두 상장 단계를 대조한다. 해당3개 실제 FILL은 별도 일지 DB의 재개/재전달에서 원계획으로 한 번씩 남는다. 반복한 같은 입력2회는 추가 계좌 읽기0이다. 기존 CLOSE/IPO 공개 Runner·READY/화면·원장/계좌/FIFO·Gateway/drain·SQL1/권한 검사는 유지했다. 성능의 벽시간 개선율이나 실증 수익은 주장하지 않는다. 구조1328·위반0, QueryStore125/135/130·검토390·미기록delta0, 증분7280정의/287기록·기존미결49를 보존했다. worker13/TEMP와 PG DB/port/private 정리를 확인했다. [Windows](../../tmp/s12-04-shadow/s12-05-current-management/evidence.json) · [PG](../../tmp/s12-03-pg-baseline/s12-05-current-management/postgres-run.json) · [증분](../../tmp/s12-05-current-management/review-verified-final.json) · [정리](../../tmp/s12-05-current-management/cleanup.json).
+
+첫 probe의 property 호출·계좌 cut 참조와 native 직전 사건 assertion 위치는 새 연결/검사에서 수정했고, 가짜 조회 시계는 각 후속 조회의 실제 순서를 표현하도록1ms씩 진행시켰다. 제품의 strict-newer cut·기존 assertion/제한은 완화하지 않았다. 첫4건 실패와 다음4건 결과, 관련32건 통과는 최종254/19와 구분해 보존한다. [최초](../../tmp/s12-05-current-management/probe.json) · [다음](../../tmp/s12-05-current-management/probe-v2.json) · [관련](../../tmp/s12-05-current-management/probe-v3.json).
+
+이 수락은 종가베팅·신규주의 명시 새 정책에 대한 공통 실행 연결이며 모든 전략의 자동 정정이나 실제 운영 수락이 아니다. 남은 범위는 기존 대표1·2·5·6·8·10·11, DD/MICRO, 다른 전략의 현재 조건/행동 정책과 선별 전송 증거 소비자다. 전체4/5·대표3/4/7/9의4/11과 원래 완료 기준을 유지한다. 운영 주문·NAS 변경/배포·T0/권한 인계·push는 수행하지 않았다.
+
+기존 게시 화면 공용 fixture의 PostgreSQL final 게시 소비자1건을 별도 동일 소스로 실행해 통과했다. 앞선19건과 합쳐20건이며 반복 실행은 아니다. [추가 게시 연결](../../tmp/s12-03-pg-baseline/s12-05-current-management-publication/postgres-run.json).

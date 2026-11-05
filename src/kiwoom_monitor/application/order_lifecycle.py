@@ -30,7 +30,7 @@ from kiwoom_monitor.domain.order_contract import (
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import AmendmentResponseUnknown, SubmissionRejected, SubmissionUnknown
 from kiwoom_monitor.infrastructure.persistence.execution_repository import (
     ExecutionAmendment, ExecutionBrokerLeg, ExecutionRecord, ExecutionRepository, amendment_from_recovery,
-    broker_fill_key, broker_legs_state,
+    broker_fill_key, broker_legs_state, execution_broker_legs,
 )
 
 
@@ -814,7 +814,8 @@ class OrderLifecycle:
         if record.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED} or not record.broker_order_id:
             raise ValueError("order must be reconciled and accepted before cancellation")
         transport = self._required_transport()
-        record = self._apply(record, "CANCEL_STARTED", OrderState.CANCEL_PENDING)
+        record = self._apply(record, "CANCEL_STARTED", OrderState.CANCEL_PENDING,
+            **({"event_broker_order_id": broker_order_id} if broker_order_id is not None else {}))
         if after_cancel_claim is not None:
             after_cancel_claim()  # Durable claim precedes transport; later STOP must not block reconciliation.
         try:
@@ -829,6 +830,7 @@ class OrderLifecycle:
     def amend(
         self, intent_id: str, quantity: int, limit_price: int, *, broker_order_id: str | None = None,
         after_amendment_claim: Callable[[], None] | None = None,
+        assessment: dict | None = None,
     ) -> ExecutionRecord:
         """Claim once before transport. Strategy/current-Risk admission belongs to the caller/native owner."""
         record = self._required(intent_id)
@@ -838,12 +840,7 @@ class OrderLifecycle:
             raise ValueError("order must be reconciled and accepted before amendment")
         if record.intent.order_type is not OrderType.LIMIT or record.intent.venue != "KRX":
             raise ValueError("amendment requires an accepted KRX limit order")
-        legs = record.broker_legs or (ExecutionBrokerLeg(
-            record.broker_order_id, "", record.intent.quantity, record.intent.limit_price, record.state,
-            detailed_filled_quantity=record.detailed_filled_quantity,
-            broker_reported_filled_quantity=record.broker_reported_filled_quantity,
-            fill_ids=record.fill_ids, last_broker_as_of=record.last_broker_as_of,
-        ),)
+        legs = execution_broker_legs(record)
         active = [leg for leg in legs if leg.state not in TERMINAL_ORDER_STATES and leg.remaining_quantity]
         selected = [leg for leg in active if leg.broker_order_id == broker_order_id] if broker_order_id else active
         if len(selected) != 1 or not selected[0].broker_order_id:
@@ -853,7 +850,8 @@ class OrderLifecycle:
                 or type(limit_price) is not int or limit_price <= 0):
             raise ValueError("amendment requires positive price and known remaining quantity")
         transport = self._required_transport()
-        command = ExecutionAmendment(leg.broker_order_id, quantity, limit_price, self._now())
+        command = ExecutionAmendment(leg.broker_order_id, quantity, limit_price, self._now(),
+            assessment=json.loads(json.dumps(assessment, allow_nan=False)) if assessment is not None else None)
         record = self._apply(record, "AMENDMENT_STARTED", OrderState.SUBMISSION_UNKNOWN, broker_legs=legs,
             amendment=command, event_broker_order_id=leg.broker_order_id, quantity=quantity, price=limit_price)
         if record.amendment != command or record.amendment.status != "PENDING":
@@ -1176,7 +1174,7 @@ class OrderLifecycle:
         self, record: ExecutionRecord, event_type: str, state: OrderState, *,
         _connection: Any = None, **values: object,
     ) -> ExecutionRecord:
-        received_at = self._now()
+        received_at = values['amendment'].started_at if event_type == 'AMENDMENT_STARTED' else self._now()
         occurred_at = values.pop("occurred_at", received_at)
         event_broker_order_id = values.pop("event_broker_order_id", None)
         if record.broker_legs or values.get("broker_legs"):

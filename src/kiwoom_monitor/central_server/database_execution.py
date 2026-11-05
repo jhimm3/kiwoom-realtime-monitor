@@ -20,7 +20,7 @@ PLAN_POSITION_COLLECTION = "execution_mock_plan_positions"
 
 def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
                                  value: dict[str, Any], p: str, *, now_provider=None,
-                                 new_intent_claim=False, submission_claim=False):
+                                 new_intent_claim=False, submission_claim=False, amendment_claim=False, control_facts=None):
     if ownership is None:
         if "plan" in value:
             raise RuntimeError("PLANNED_EXECUTION_OWNER_REQUIRED")
@@ -43,7 +43,7 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
             kst_now() if now_provider is None else now_provider()):
         raise RuntimeError("EXECUTION_OWNERSHIP_LOST")
     control_revision = ownership.get("control_revision")
-    entry_claim = (new_intent_claim or submission_claim) and value.get("side") == "BUY"
+    entry_claim = (new_intent_claim or submission_claim or amendment_claim) and value.get("side") == "BUY"
     if control_revision is not None or (entry_claim and ownership["run_id"].startswith("mock_auto_run_")):
         cursor.execute(
             "SELECT document_json FROM central_documents WHERE collection=" + p
@@ -57,12 +57,15 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
         )
         control_row = cursor.fetchone()
         control = _json_document(control_row[0]) if control_row else {}
+        if control_facts is not None:
+            control_facts.update(control)
         stopped_close_management = False
         if (control.get('desired_state') == 'STOPPED' and value.get('plan') is not None
                 and value.get('policy_version') == 'close_execution_adapter/v1'
                 and (value.get('side') == 'SELL'
                      or (ownership.get('planned_cancel_claim') or {}).get('version') in {
-                         'close-entry-deadline-cancel/v1', 'close-entry-protective-cancel/v1'})):
+                         'close-entry-deadline-cancel/v1', 'close-entry-protective-cancel/v1',
+                         'close-current-order-management/v1'})):
             from kiwoom_monitor.domain.execution_activation import allows_stopped_close_management, mock_automation_spec_from_dict
 
             spec_doc = _plan_document(cursor, p, 'execution_mock_automation_specs', value['account_ref'],
@@ -484,7 +487,7 @@ def _validate_plan_event(stored, intent, event):
     return True
 
 
-def _validate_broker_ledger_write(cursor, p, stored, intent, event, ownership, now_provider):
+def _validate_broker_ledger_write(cursor, p, stored, intent, event, ownership, now_provider, control_facts):
     if not intent.get("broker_legs"):
         return stored
     from kiwoom_monitor.infrastructure.persistence.execution_repository import validate_broker_ledger_event
@@ -496,10 +499,74 @@ def _validate_broker_ledger_write(cursor, p, stored, intent, event, ownership, n
         if row is None:
             raise KeyError(f"unknown execution intent: {intent['intent_id']}")
         stored = _json_document(row[0])
-    validate_broker_ledger_event(stored, intent, event,
+    authorized = None
+    if event['event_type'] == 'AMENDMENT_STARTED' and (ownership or {}).get('amendment_claim') is not None:
+        authorized = _require_close_order_management_claim(cursor, p, stored, intent, event, ownership,
+                                                            now_provider, control_facts)
+    validate_broker_ledger_event(stored, intent, event, authorized_assessment=authorized,
         recovery=(ownership or {}).get("amendment_recovery"),
         now=(kst_now() if now_provider is None else now_provider()) if event["event_type"] == "AMENDMENT_RECOVERED" else None)
     return stored
+
+
+def _require_close_order_management_claim(cursor, p, stored, value, event, ownership, now_provider, control):
+    from kiwoom_monitor.application.close_mock_execution import (
+        CLOSE_EXIT_COLLECTION, CLOSE_ORDER_MANAGEMENT_VERSION, assess_close_order_management,
+        close_current_shadow_matches, close_exit_key,
+    )
+    from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
+    from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
+    from kiwoom_monitor.domain.order_contract import OrderPlanRef
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, plan_position_from_document
+
+    claim = (ownership or {}).get('amendment_claim' if event['event_type'] == 'AMENDMENT_STARTED' else 'planned_cancel_claim')
+    recovery = (ownership or {}).get('plan_recovery')
+    if (stored is None or not stored.get('plan') or not stored.get('mock_plan_approval')
+            or not isinstance(claim, dict) or claim.get('version') != CLOSE_ORDER_MANAGEMENT_VERSION
+            or recovery is None or not control or ownership.get('control_revision') is None):
+        raise RuntimeError('CLOSE_CURRENT_ORDER_CLAIM_REQUIRED')
+    account = value['account_ref']
+    spec, package, entry, candidate = _close_native_documents(cursor, p, account, ownership['active_spec_id'], stored['plan']['plan_id'])
+    approval = _plan_document(cursor, p, 'execution_mock_automation_approved_gates', account, stored['intent_id'])
+    risk_doc = _plan_document(cursor, p, 'execution_mock_automation_current_risk', account, account)
+    head_doc = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, stored['plan']['plan_id'])
+    if (approval is None or approval['gate_id'] != stored['mock_plan_approval']
+            or approval['spec_id'] != spec.spec_id or approval.get('plan') != stored['plan']
+            or risk_doc is None or head_doc is None):
+        raise RuntimeError('CLOSE_CURRENT_ORDER_ORIGINAL_APPROVAL_CHANGED')
+    active = [_json_document(row[0]) for row in _account_active_execution_rows(cursor, 'mock', account, 2, p)]
+    if len(active) != 1 or active[0]['intent_id'] != stored['intent_id']:
+        raise RuntimeError('CLOSE_CURRENT_ORDER_ACCOUNT_COVERAGE_CHANGED')
+    record = _record_from_document(stored)
+    plan = OrderPlanRef(**claim['plan'])
+    head = plan_position_from_document(head_doc, stored['run_id'], stored['symbol'], plan)
+    if head.plan != plan:
+        raise RuntimeError('CLOSE_CURRENT_ORDER_PLAN_REVISION_CHANGED')
+    settings = _plan_document(cursor, p, 'server_operational_settings', 'global', 'current') if stored['side'] == 'BUY' else None
+    enabled = (stored['side'] == 'BUY' and control.get('desired_state') == 'RUNNING'
+               and not control.get('entry_resume_required', False) and close_current_shadow_matches(spec, candidate, settings))
+    root_id = mock_automation_intent_id(spec.spec_id, entry['decision']['decision_id'])
+    root = record
+    if stored['side'] == 'SELL':
+        row = _execution_intent_row(cursor, root_id, p)
+        root = _record_from_document(_json_document(row[0])) if row else None
+    notice = claim.get('protection_notice')
+    risk = mock_automation_risk_snapshot_from_dict(risk_doc)
+    assessed = assess_close_order_management(spec, run_id=stored['run_id'], parameters=package.candidate_spec['parameters'],
+        event=candidate, entry_evidence=entry, record=record, head=head,
+        order_events=[_json_document(row[0]) for row in _execution_event_rows(cursor, stored['intent_id'], p)],
+        recovery=recovery, risk=risk, quote=claim['quote'], decided_at=datetime.fromisoformat(claim['decided_at']),
+        now=kst_now() if now_provider is None else now_provider(), entry_enabled=enabled, root=root,
+        exit_evidence=(_plan_document(cursor, p, CLOSE_EXIT_COLLECTION, account, close_exit_key(record.intent.plan))
+                       if stored['side'] == 'SELL' else None), protection_notice=notice,
+        root_fill_events=[_json_document(row[0]) for row in _execution_event_rows(cursor, root_id, p)] if notice is not None else (),
+        stop_risk=_close_native_stop_risk(cursor, p, account, spec, notice, root_id) if notice is not None else None)
+    expected_action = 'AMEND' if event['event_type'] == 'AMENDMENT_STARTED' else 'CANCEL'
+    if (assessed != claim or claim['action'] != expected_action
+            or event['broker_order_id'] != claim['broker_order_id']
+            or (expected_action == 'AMEND' and (event['quantity'], event['price']) != (claim['quantity'], claim['limit_price']))):
+        raise RuntimeError('CLOSE_CURRENT_ORDER_ASSESSMENT_CHANGED')
+    return assessed
 
 
 def _broker_order_lookup_sql(p):
@@ -1510,9 +1577,13 @@ def _require_close_deadline_cancel(cursor, ownership, value, event, p, *, stored
     return {**event, "close_entry_cancel_claim": claim.to_dict()}
 
 
-def _require_mock_cancel_retry(cursor, ownership, value, event, p, *, now_provider=None, stored=None):
+def _require_mock_cancel_retry(cursor, ownership, value, event, p, *, now_provider=None, stored=None, control_facts=None):
     """Fence a protective retry in the same native CANCEL_STARTED transaction."""
     if ownership is not None and ownership.get("planned_cancel_claim") is not None:
+        if ownership['planned_cancel_claim'].get('version') == 'close-current-order-management/v1':
+            claim = _require_close_order_management_claim(cursor, p, stored, value, event, ownership,
+                                                          now_provider, control_facts)
+            return {**event, 'close_order_management_claim': claim}
         if ownership["planned_cancel_claim"].get("version") in {"close-entry-deadline-cancel/v1", 'close-entry-protective-cancel/v1'}:
             return _require_close_deadline_cancel(cursor, ownership, value, event, p, stored=stored,
                                                   now_provider=now_provider)
@@ -1773,11 +1844,13 @@ class SQLiteExecutionStoreMixin:
         event_document = _event_document(event)
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            control_facts = {}
             stored = _require_execution_ownership(connection.cursor(), ownership, intent, "?",
                                          now_provider=getattr(self, '_execution_wall_now', None),
-                                         submission_claim=event.get("event_type") == "SUBMISSION_STARTED")
+                                         submission_claim=event.get("event_type") == "SUBMISSION_STARTED",
+                                         amendment_claim=event.get('event_type') == 'AMENDMENT_STARTED', control_facts=control_facts)
             stored = _validate_broker_ledger_write(connection.cursor(), "?", stored, intent, event, ownership,
-                                                  getattr(self, '_execution_wall_now', None))
+                                                  getattr(self, '_execution_wall_now', None), control_facts)
             if "plan" in intent and not _validate_plan_event(stored, intent, event):
                 return False
             if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":
@@ -1786,7 +1859,8 @@ class SQLiteExecutionStoreMixin:
                 if stored is None or stored.get("mock_plan_approval") != approval:
                     raise RuntimeError("PLANNED_EXECUTION_APPROVAL_CHANGED")
             event = _require_mock_cancel_retry(connection.cursor(), ownership, intent, event, '?',
-                                              now_provider=getattr(self, '_execution_wall_now', None), stored=stored)
+                                              now_provider=getattr(self, '_execution_wall_now', None), stored=stored,
+                                              control_facts=control_facts)
             event_document = _event_document(event)
             if connection.execute(
                 "SELECT 1 FROM central_execution_events WHERE event_id=?", (str(event["event_id"]),),
@@ -2063,11 +2137,13 @@ class PostgresExecutionStoreMixin:
         transaction = (open_observed_connection(self._connect, writer) if _connection is None
                        else observe_existing_transaction(_connection, writer, require_idle=True))
         with transaction as connection, connection.cursor() as cursor:
+            control_facts = {}
             stored = _require_execution_ownership(cursor, ownership, intent, "%s",
                                          now_provider=getattr(self, '_execution_wall_now', None),
-                                         submission_claim=event.get("event_type") == "SUBMISSION_STARTED")
+                                         submission_claim=event.get("event_type") == "SUBMISSION_STARTED",
+                                         amendment_claim=event.get('event_type') == 'AMENDMENT_STARTED', control_facts=control_facts)
             stored = _validate_broker_ledger_write(cursor, "%s", stored, intent, event, ownership,
-                                                  getattr(self, '_execution_wall_now', None))
+                                                  getattr(self, '_execution_wall_now', None), control_facts)
             if "plan" in intent and not _validate_plan_event(stored, intent, event):
                 return False
             if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":
@@ -2076,7 +2152,8 @@ class PostgresExecutionStoreMixin:
                 if stored is None or stored.get("mock_plan_approval") != approval:
                     raise RuntimeError("PLANNED_EXECUTION_APPROVAL_CHANGED")
             event = _require_mock_cancel_retry(cursor, ownership, intent, event, '%s',
-                                              now_provider=getattr(self, '_execution_wall_now', None), stored=stored)
+                                              now_provider=getattr(self, '_execution_wall_now', None), stored=stored,
+                                              control_facts=control_facts)
             changes_plan = "plan" in intent and _plan_event_changes_position(event)
             cursor.execute(
                 "INSERT INTO central_execution_events("
