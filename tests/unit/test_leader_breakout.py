@@ -94,13 +94,15 @@ class LeaderTradeInputsTests(unittest.TestCase):
         inputs.offer(payload, AT, source="source:1", approved=True)
         payload["current_price"] = 1010
         self.assertEqual("0B_source_generation_changed", inputs.take_discontinuity())
-        queued, received, source = inputs.take()
+        envelope = inputs.take()
+        queued, received, source = envelope.payload, envelope.received_at, envelope.source
         self.assertEqual(990, queued["current_price"])
         inputs.evaluate_trade(execution_config(), queued, received_at=received, source=source,
             decision_time=AT, position_open=False, position_context=None)
         inputs.offer(trade(1010), AT, source="source:2", approved=True)
         self.assertEqual("0B_source_generation_changed", inputs.take_discontinuity())
-        queued, received, source = inputs.take()
+        envelope = inputs.take()
+        queued, received, source = envelope.payload, envelope.received_at, envelope.source
         raw, _ = inputs.evaluate_trade(execution_config(), queued, received_at=received, source=source,
             decision_time=AT, position_open=False, position_context=None)
         expected, _ = evaluate_leader_breakout_trade(policy(), queued, received_at=received,
@@ -122,7 +124,7 @@ class LeaderTradeInputsTests(unittest.TestCase):
         tomorrow = AT + timedelta(days=1)
         inputs.offer(trade(1010, at=tomorrow), tomorrow, source="source:1", approved=True)
         self.assertEqual("0B_source_generation_changed", inputs.take_discontinuity())
-        self.assertEqual(tomorrow, inputs.take()[1])
+        self.assertEqual(tomorrow, inputs.take().received_at)
         self.assertIsNone(inputs.take())
 
     def test_current_entry_rules_mismatch_rejected_and_open_position_uses_admitted_rules(self):
@@ -138,16 +140,21 @@ class LeaderTradeInputsTests(unittest.TestCase):
         inputs = LeaderTradeInputs()
         config = execution_config()
         context = config.contexts[0]
-        quote = inputs.capture_stop_quote(config, trade(940), received_at=AT, source="source:1",
-            decision_time=AT, position_context=context)
-        self.assertEqual("HARD_EXIT", quote["status"])
+        envelope = inputs.offer(trade(940), AT, source="source:1", approved=True)
+        quote = inputs.capture_stop_quote(config, envelope, decision_time=AT, position_context=context)
+        self.assertEqual("HARD_EXIT", quote.raw["status"])
+        self.assertEqual({"payload": trade(940), "received_at": AT.isoformat(), "source": "source:1",
+                          "approved": True, "decided_at": AT.isoformat()}, quote.observation())
         self.assertIs(quote, inputs.latest_stop_quote)
-        self.assertIsNone(inputs.capture_stop_quote(config, trade(930), received_at=AT, source="source:1",
-            decision_time=AT, position_context=context))
+        duplicate = inputs.offer(trade(930), AT, source="source:1", approved=True)
+        self.assertIsNone(inputs.capture_stop_quote(config, duplicate, decision_time=AT, position_context=context))
         self.assertIs(quote, inputs.latest_stop_quote)
         inputs.reset("withdrawn")
         self.assertIsNone(inputs.latest_stop_quote)
         self.assertEqual("withdrawn", inputs.take_discontinuity())
+        inputs.offer(trade(990), AT, source="source:1", approved=True)
+        self.assertIsNone(inputs.capture_stop_quote(config, envelope, decision_time=AT, position_context=context))
+        self.assertIsNone(inputs.latest_stop_quote)
 
     def test_symbol_budget_is_bounded_without_native_or_clock_dependencies(self):
         inputs = LeaderTradeInputs()
@@ -709,11 +716,11 @@ class LeaderBreakoutNativeProtectionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.runner.close(); await self.monitor.close(); await self.bundle.gateway.close()
 
-    def hard_tick(self):
+    def hard_tick(self, price=940):
         from kiwoom_monitor.application.market_session_schedule import KST
         self.clock += timedelta(milliseconds=20)
         self.collector._publish_parsed({"trnm":"REAL", "data":[{"type":"0B", "item":"005930",
-            "values":{"10":"940", "14":"100", "15":"1", "20":self.clock.astimezone(KST).strftime("%H%M%S")}}]})
+            "values":{"10":str(price), "14":"100", "15":"1", "20":self.clock.astimezone(KST).strftime("%H%M%S")}}]})
 
     async def test_absolute_native_stop_submits_once_and_unknown_ack_survives_restart(self):
         from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner
@@ -721,9 +728,30 @@ class LeaderBreakoutNativeProtectionTests(unittest.IsolatedAsyncioTestCase):
         await self.deliver(990); await self.deliver(1001)
         self._fill_pending("BUY", 1001)
         await self.runner.episode.advance_once(); await self.monitor.refresh_recovery()
+        cut = self.monitor.latest_automation_risk_cut
+        episode = self.runner.episode
+        episode._stop_loss_cut = None
         self.hard_tick()
-        notice = self.runner.episode._protection_snapshot()
+        self.assertIsNone(episode._protection_snapshot())
+        record = episode._record_protection_review
+
+        def reset_before_selection(**kwargs):
+            episode._strategy_inputs.reset("source_withdrawn_during_stop")
+            return record(**kwargs)
+
+        with patch.object(episode, "_record_protection_review", side_effect=reset_before_selection):
+            episode.observe_native_risk(cut)
+        self.assertIsNone(episode._protection_snapshot())
+        episode._stop_loss_cut = None  # Deliver the acknowledged Risk after a fresh approved quote.
+        self.hard_tick()
+        self.assertIsNone(episode._protection_snapshot())
+        episode.observe_native_risk(cut)
+        notice = episode._protection_snapshot()
         self.assertEqual("leader_absolute_stop/v1", notice["risk_trigger"]["stop_loss"]["version"])
+        observation = notice["leader_stop_observation"]
+        self.assertEqual(940, observation["payload"]["current_price"])
+        self.hard_tick(990)
+        self.assertEqual(observation, self.runner.episode._protection_snapshot()["leader_stop_observation"])
         await self.monitor.refresh_recovery()
         submit = self.transport.submit
         def unknown(intent):
@@ -735,8 +763,15 @@ class LeaderBreakoutNativeProtectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["BUY","SELL"], [c[1] for c in self.transport.calls], self.runner.episode.status)
         self.assertEqual("PROTECTIVE_EXIT", self.runner.episode._unfilled_registration["purpose"])
         await self.runner.close()
+        checkpoint = self.store.load_document("execution_mock_automation_runner_current", self.bundle.account_ref, "current")
+        self.assertEqual(observation, checkpoint["document"]["protection_review"]["leader_stop_observation"])
         self.runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda:self.clock,
             leader_context_source=lambda:None, price_source=self.collector.automation_price_observation)
+        self.assertEqual(observation, self.runner.episode._protection_snapshot()["leader_stop_observation"])
+        tampered = deepcopy(checkpoint["document"])
+        tampered["protection_review"]["leader_stop_observation"]["payload"]["current_price"] = 930
+        with self.assertRaisesRegex(ValueError, "leader_stop_observation_does_not_reproduce"):
+            self.runner.episode._restore_or_bootstrap(tampered)
         for _ in range(3):
             self.hard_tick(); await self.runner.episode.advance_once()
         self.assertEqual(2, len(self.transport.calls))

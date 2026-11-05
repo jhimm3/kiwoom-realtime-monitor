@@ -80,6 +80,61 @@
       "reviewed_store_binding"
     ],
     [
+      "src/kiwoom_monitor/central_server/research_read_routes.py",
+      "create_research_read_router.research_daily_decline_setup",
+      "store",
+      "load_observation_revisions",
+      "callable_argument",
+      "asyncio.to_thread",
+      "POST",
+      "/api/v1/research/daily-decline-setup",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/research_read_routes.py",
+      "create_research_read_router.research_micro_inputs",
+      "store",
+      "load_document",
+      "callable_argument",
+      "asyncio.to_thread",
+      "GET",
+      "/api/v1/research/micro-inputs",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/research_read_routes.py",
+      "create_research_read_router.research_micro_inputs",
+      "store",
+      "load_market_event_history",
+      "callable_argument",
+      "asyncio.to_thread",
+      "GET",
+      "/api/v1/research/micro-inputs",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/infrastructure/persistence/execution_repository.py",
+      "ExecutionRepository.load_plan_position",
+      "self._store",
+      "load_document",
+      "direct_call",
+      "self._store.load_document",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/infrastructure/persistence/execution_repository.py",
+      "ExecutionRepository.load_protective_execution",
+      "self._store",
+      "load_execution_intent",
+      "direct_call",
+      "self._store.load_execution_intent",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
       "src/kiwoom_monitor/application/mock_automation_admission.py",
       "admit_mock_automation",
       "repository",
@@ -1049,7 +1104,7 @@
     ],
     [
       "src/kiwoom_monitor/central_server/candidate_monitor.py",
-      "CandidateMonitor._consume",
+      "CandidateMonitor._save_evaluation",
       "self._store",
       "save_shadow_evaluation",
       "direct_call",
@@ -4173,7 +4228,7 @@
     ],
     [
       "src/kiwoom_monitor/infrastructure/persistence/execution_repository.py",
-      "ExecutionRepository.create",
+      "ExecutionRepository.claim",
       "self._store",
       "create_execution_intent",
       "direct_call",
@@ -4712,7 +4767,7 @@
     ],
     [
       "src/kiwoom_monitor/research_run.py",
-      "execute_rank_comparison",
+      "_save_research_pair",
       "repository",
       "load_execution_events",
       "direct_call",
@@ -4723,7 +4778,7 @@
     ],
     [
       "src/kiwoom_monitor/research_run.py",
-      "execute_rank_comparison",
+      "_save_research_pair",
       "repository",
       "load_execution_events",
       "direct_call",
@@ -6457,7 +6512,8 @@
       "load_news_body_job_receipt": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner', annotation=Name(id='str', ctx=Load())), arg(arg='key', annotation=Name(id='str', ctx=Load())), arg(arg='attempts', annotation=Name(id='int', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "save_news_body_revision_receipt": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "mock_automation_read_scope": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [\"Name(id='contextmanager', ctx=Load())\"], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
-      "publish_mock_automation_current_risk": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected', annotation=BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+      "publish_mock_automation_current_risk": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected', annotation=BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "accept_selected_order_evidence": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='packet', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_sha256', annotation=Name(id='str', ctx=Load())), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='run_id', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     }
   }
 }

@@ -1,13 +1,14 @@
 """Research read HTTP contracts; the app retains storage and monitor ownership."""
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_now, as_kst
+from kiwoom_monitor.domain.time_basis import kst_now, as_kst, aware_iso_kst
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Callable, Awaitable
-from datetime import datetime, timezone
-from typing import Any, Protocol, TYPE_CHECKING
+from datetime import date, datetime, timezone
+from typing import Any, Literal, Protocol, TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from .async_lifetime import await_native_call
@@ -19,6 +20,7 @@ from kiwoom_monitor.domain.research_contract import (
 
 if TYPE_CHECKING:
     from .candidate_monitor import CandidateMonitor
+    from .realtime_collector import CentralRealtimeCollector
 
 
 class ResearchReadStore(Protocol):
@@ -36,11 +38,34 @@ class ResearchReadStore(Protocol):
 
     def load_document(self, collection: str, owner: str, key: str) -> dict[str, Any] | None: ...
 
+    def load_market_event_history(self, kind: str, *, code: str = "", limit: int = 100) -> list[dict[str, Any]]: ...
+    def load_observation_revisions(self, kind: str, subject: str, limit: int) -> list[dict[str, Any]]: ...
+
+
+def _confirmed_krx_day(receipt: dict[str, Any] | None, cut: datetime) -> date | None:
+    """Use an observed native 0s receipt only for its own visible KST day."""
+    if receipt is None:
+        return None
+    day = cut.date()
+    document, updated_at = receipt.get("document"), receipt.get("updated_at")
+    if (not isinstance(document, dict) or document.get("trading_date") != day.isoformat()
+            or document.get("source") != "kiwoom_websocket_0s"
+            or document.get("status_code") not in ("0", "2", "3", "4", "8", "9", "a", "b", "c", "d")
+            or type(updated_at) not in (int, float)):
+        return None
+    try:
+        observed = aware_iso_kst(document["observed_at"])
+        available = datetime.fromtimestamp(updated_at, timezone.utc)
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError, OSError):
+        return None
+    return day if observed.date() == day and observed <= available <= cut else None
+
 
 def create_research_read_router(
     store: ResearchReadStore, authorize: Callable[..., None],
     get_candidate_monitor: Callable[[], CandidateMonitor | None],
     *, get_market_theme_shadow_runtime: Callable[[], Any] = lambda: None,
+    get_realtime_collector: Callable[[], CentralRealtimeCollector | None] = lambda: None,
     input_authorize: Callable[..., None] | None = None,
     result_authorize: Callable[..., str] | None = None,
     check_stock_thesis_sources: Callable[[int, int], Awaitable[dict[str, Any]]] | None = None,
@@ -49,6 +74,82 @@ def create_research_read_router(
     """Read the app-owned current monitor after the DB await, including runtime replacement."""
     router = APIRouter()
     now_kst = (lambda: as_kst(now_provider())) if now_provider else kst_now
+
+    @router.get("/api/v1/research/micro-inputs", dependencies=[Depends(authorize)])
+    async def research_micro_inputs(
+        symbol: str = Query(pattern=r"^[A-Za-z0-9]{6}$"), venue: Literal["KRX", "NXT"] = Query(),
+        variant: str = Query(min_length=1, max_length=32),
+        lookback_seconds: int = Query(default=20, ge=1, le=60),
+        vi_limit: int = Query(default=100, ge=1, le=1000),
+    ) -> dict[str, object]:
+        from kiwoom_monitor.application.micro_execution_evidence import MICRO_VARIANTS, assess_micro_shadow_inputs
+
+        if variant not in MICRO_VARIANTS:
+            raise HTTPException(status_code=422, detail="unsupported MICRO Shadow variant")
+        day_receipt, vi_history = None, ()
+        if venue == "KRX" and variant != "BOOK_SCALP":
+            day_receipt = await asyncio.to_thread(
+                store.load_document, "krx_trading_day_observations", now_kst().date().isoformat(), "latest",
+            )
+            if _confirmed_krx_day(day_receipt, now_kst()) is not None:
+                vi_history = await asyncio.to_thread(store.load_market_event_history, "vi", code=symbol, limit=vi_limit)
+
+        # Take the one current RAM cut after native reads so their visibility
+        # is established even if a document writer sampled its clock before COMMIT.
+        collector = get_realtime_collector()
+        snapshot = collector.ram_observation_snapshot((symbol,), seconds=lookback_seconds) if collector is not None else None
+        cut = aware_iso_kst(snapshot["decision_time"]) if snapshot is not None else now_kst()
+        trading_date = _confirmed_krx_day(day_receipt, cut)
+        result = assess_micro_shadow_inputs(
+            symbol=symbol, venue=venue, variant=variant, decision_at=cut, trading_date=trading_date,
+            trade_snapshot=snapshot, vi_history=vi_history,
+        )
+        return {**result, "order_authorized": False}
+
+    @router.post("/api/v1/research/daily-decline-setup", dependencies=[Depends(authorize)])
+    async def research_daily_decline_setup(
+        request: Request, evidence_sha256: str = Query(pattern=r"^[0-9a-f]{64}$"),
+    ) -> dict[str, object]:
+        from kiwoom_monitor.application.daily_decline import (
+            decode_daily_decline_setup_inputs, evaluate_daily_decline_shadow,
+        )
+
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 256 * 1024:
+                raise HTTPException(status_code=413, detail="DD setup evidence exceeds 256 KiB")
+            body.extend(chunk)
+        if hashlib.sha256(body).hexdigest() != evidence_sha256:
+            raise HTTPException(status_code=422, detail="DD setup evidence SHA256 does not match")
+        try:
+            document = json.loads(body)
+            required = {"version", "policy", "symbol", "venue", "signal_day", "strategy_references", "basis", "benchmark"}
+            if (not isinstance(document, dict) or not required <= document.keys()
+                    or document.keys() - required - {"catalyst"} or document["version"] != "dd-shadow-setup-evidence/v1"
+                    or not isinstance(document["policy"], dict)):
+                raise ValueError("invalid DD Shadow setup evidence")
+            inputs = decode_daily_decline_setup_inputs(document, document["policy"])
+        except (UnicodeError, ValueError, RecursionError) as error:
+            raise HTTPException(status_code=422, detail="invalid DD Shadow setup evidence") from error
+
+        symbol, venue = inputs["symbol"], inputs["venue"]
+        revision_limit = 5000
+        observations = await asyncio.to_thread(store.load_observation_revisions, "daily_bar", f"{symbol}:{venue}", revision_limit)
+        cut = now_kst()
+        native = [row for row in observations if (row.get("source_id"), row.get("origin")) == ("kiwoom-ka10081", "query")]
+        try:
+            decision = evaluate_daily_decline_shadow(native, cut=cut, **inputs)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="invalid DD Shadow setup evidence") from error
+        return {
+            "version": "dd-shadow-setup-result/v1", "execution_scope": "native_setup_assessment",
+            "symbol": symbol, "venue": venue, "signal_day": inputs["signal_day"].isoformat(),
+            "cut": cut.isoformat(), "evidence_sha256": evidence_sha256,
+            "reference_authority": "caller_supplied", "setup": decision.to_document(),
+            "native_revision_count": len(native), "other_revision_count": len(observations) - len(native),
+            "revision_read_limit_reached": len(observations) == revision_limit,
+            "candidate": None, "order_authorized": False,
+        }
 
     if result_authorize is not None:
         @router.post("/api/v1/research/reported-results")

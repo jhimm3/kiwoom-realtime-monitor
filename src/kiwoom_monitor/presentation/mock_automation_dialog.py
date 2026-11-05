@@ -599,6 +599,7 @@ class MockAutomationDialog(QDialog):
     def _failed(self, _operation: str, message: str) -> None:
         self._context["status"] = {"status_query_error": message or "상태 미확인"}
         self._runtime.setText("상태를 확인할 수 없습니다. 새로 확인 후 제어할 수 있습니다.")
+        self._runtime.setToolTip("")
         self._apply_button_state()
         self._message.setText(f"NAS 자동운용 요청 실패 · {message}")
 
@@ -616,6 +617,7 @@ class MockAutomationDialog(QDialog):
         ), self._context.get("selected_profile"))
 
     def _apply_context(self) -> None:
+        self._runtime.setToolTip("")
         selected = self._context.get("selected_profile")
         profiles = self._context.get("profiles", ())
         selected_profile_id = str(selected.get("profile_id", "")) if isinstance(selected, dict) else ""
@@ -701,10 +703,32 @@ class MockAutomationDialog(QDialog):
                     )
                 if latency.get("future_or_invalid_bar_time_count"):
                     latency_text += " · 분봉 시각 확인 필요"
+            protection_text = ""
+            protection = runner.get("planned_protection") if isinstance(runner, dict) else None
+            if isinstance(protection, dict):
+                state = protection["state"] if isinstance(protection.get("state"), str) else ""
+                label = {
+                    "WAIT_NATIVE_READBACK": "원장 확인 대기",
+                    "PREPARED_NO_INTENT": "보호 준비",
+                    "SUBMISSION_UNKNOWN": "보호 매도 접수 미확인",
+                    "ACCEPTED": "보호 매도 접수",
+                    "PARTIALLY_FILLED": "보호 매도 일부 체결",
+                    "FILLED": "보호 매도 체결 완료",
+                }.get(state, f"보호 매도 {state}" if state else "보호 매도 상태 미확인")
+                quantities = " · ".join(f"{text} {value}주" for field, text in (
+                    ("plan_quantity", "계획 보유"), ("reserved_quantity", "주문 예약"),
+                    ("detailed_filled_quantity", "상세 체결"),
+                    ("unreconciled_sell_quantity", "체결 대사 대기"),
+                ) if type(value := protection.get(field)) is int and value >= 0)
+                protection_text = " · " + " · ".join(value for value in (label, quantities) if value)
+                self._runtime.setToolTip("\n".join(f"{text} {value}" for field, text in (
+                    ("plan_id", "계획 ID"), ("plan_revision", "계획 판본"), ("intent_id", "보호 주문 의도 ID"),
+                ) if (value := protection.get(field)) is not None))
             self._runtime.setText(
                 f"모드 {status.get('runtime_mode') or '수동'} · 제어 {desired} · runner {runner_state}"
                 + (f" · 복원 오류 {error}" if error else "")
                 + latency_text
+                + protection_text
             )
         else:
             self._runtime.setText("상태를 확인할 수 없습니다.")

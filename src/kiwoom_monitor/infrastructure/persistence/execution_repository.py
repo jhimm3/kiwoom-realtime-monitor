@@ -27,6 +27,7 @@ class ExecutionStore(Protocol):
     def create_execution_intent(self, value: dict[str, Any], *, ownership: dict[str, Any] | None = None) -> bool: ...
     def append_execution_event(self, intent: dict[str, Any], event: dict[str, Any], *, ownership: dict[str, Any] | None = None) -> bool: ...
     def load_execution_intent(self, intent_id: str, *, _reader: Any = None) -> dict[str, Any] | None: ...
+    def load_document(self, collection: str, owner: str, key: str, *, _reader: Any = None) -> dict[str, Any] | None: ...
     def load_active_execution_intents(
         self, environment: str, account_ref: str, run_id: str, *, _reader: Any = None,
     ) -> list[dict[str, Any]]: ...
@@ -58,6 +59,15 @@ class ExecutionRecord:
     updated_at: datetime
     detailed_filled_quantity: int = 0
     broker_reported_filled_quantity: int = 0
+
+
+@dataclass(frozen=True)
+class ExecutionPlanPosition:
+    plan: OrderPlanRef
+    symbol: str
+    quantity: int
+    fill_cursor: int
+    unreconciled_sell_quantity: int
 
 
 @dataclass(frozen=True)
@@ -235,6 +245,25 @@ class ExecutionRepository:
         value = self._store.load_execution_intent(intent_id, **reader_args, **connection_args)
         return _record_from_document(value) if value else None
 
+    def load_plan_position(self, account_ref, run_id, symbol, plan: OrderPlanRef, *, _reader=None) -> ExecutionPlanPosition:
+        reader_args = {} if _reader is None else {"_reader": _reader}
+        row = self._store.load_document("execution_mock_plan_positions", account_ref, plan.plan_id, **reader_args)
+        value = row["document"] if row else {}
+        if ((value.get("version"), value.get("plan_id"), value.get("policy_ref"), value.get("run_id"), value.get("symbol"))
+                != ("mock_plan_position/v1", plan.plan_id, plan.policy_ref, run_id, symbol)
+                or type(value.get("revision")) is not int or value["revision"] < plan.expected_revision):
+            raise ValueError("execution plan position scope changed")
+        quantity, cursor, unassigned = value.get("quantity"), value.get("fill_cursor"), value.get("unreconciled_sell_quantity", 0)
+        if any(type(item) is not int or item < 0 for item in (quantity, cursor, unassigned)):
+            raise ValueError("invalid execution plan position")
+        return ExecutionPlanPosition(OrderPlanRef(plan.plan_id, plan.policy_ref, value["revision"]),
+                                     symbol, quantity, cursor, unassigned)
+
+    def load_protective_execution(self, intent_id, *, _reader=None):
+        reader_args = {} if _reader is None else {"_reader": _reader}
+        value = self._store.load_execution_intent(intent_id, **reader_args)
+        return (_record_from_document(value), _protection_claim(value)) if value else (None, None)
+
     def active_intents(
         self, environment: str, account_ref: str, run_id: str, *, _reader: Any = None,
     ) -> tuple[ExecutionRecord, ...]:
@@ -283,13 +312,7 @@ class ExecutionRepository:
         return dict(claim) if claim is not None else None
 
     def protection_claim(self, intent_id: str) -> dict[str, Any] | None:
-        value=self._store.load_execution_intent(intent_id)
-        claim=value.get('mock_protection_claim') if value else None
-        if claim is not None and (not isinstance(claim,dict)
-                or set(claim)!={'workflow_id','gate_id','risk_snapshot_id','risk_reconciliation_revision'}
-                or type(claim['risk_reconciliation_revision']) is not int or claim['risk_reconciliation_revision']<=0):
-            raise ValueError('invalid native protection claim proof')
-        return dict(claim) if claim is not None else None
+        return _protection_claim(self._store.load_execution_intent(intent_id))
 
     def account_events(
         self, environment: str, account_ref: str, *, after_sequence: int = 0, limit: int = 500, _reader: Any = None,
@@ -409,6 +432,15 @@ def _event_document(event: OrderEvent) -> dict[str, Any]:
         "reason": event.reason,
         "broker_as_of": event.broker_as_of.isoformat() if event.broker_as_of else None,
     }
+
+
+def _protection_claim(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    claim = value.get("mock_protection_claim") if value else None
+    if claim is not None and (not isinstance(claim, dict)
+            or set(claim) != {"workflow_id", "gate_id", "risk_snapshot_id", "risk_reconciliation_revision"}
+            or type(claim["risk_reconciliation_revision"]) is not int or claim["risk_reconciliation_revision"] <= 0):
+        raise ValueError("invalid native protection claim proof")
+    return dict(claim) if claim is not None else None
 
 
 def _record_from_document(value: Mapping[str, Any]) -> ExecutionRecord:

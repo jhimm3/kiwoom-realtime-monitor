@@ -51,10 +51,11 @@ class BreakoutThemeResearchTests(unittest.TestCase):
             "basis": basis, "dependency_valid": dependency,
         })
 
-    def decide(self, *, policy=None, bar=None, history=None, proofs=(), position=None, setup=None, entry_proofs=()):
+    def decide(self, *, policy=None, bar=None, history=None, proofs=(), position=None, setup=None, entry_proofs=(),
+               research_context=False):
         return evaluate_breakout_theme(
             policy or self.base, bar=bar or self.signal, history=self.prior if history is None else history,
-            proofs=proofs, position=position, setup=setup, entry_proofs=entry_proofs,
+            proofs=proofs, position=position, setup=setup, entry_proofs=entry_proofs, research_context=research_context,
         )
 
     def filtered(self, variant, **changes):
@@ -291,3 +292,21 @@ class BreakoutThemeResearchTests(unittest.TestCase):
         result = self.decide(policy=policy, bar=failed, position=position, setup=setup, entry_proofs=())
         self.assertEqual(("EXIT", 3, "breakout_pinned_signal_open_failed"), (result.action, result.quantity, result.reason))
         self.assertIs(setup, result.setup)
+
+    def test_research_uses_reconstructed_context_at_the_cut_without_later_or_undated_rows(self):
+        bar = replace(self.signal, trade_value_million_won=2)
+        policy = self.filtered("B3", minimum_daily_headroom_bps=None)
+        market = self.market_proof()
+        catalyst = self.entry_proof("catalyst", "supported", basis="reconstructed_as_of")
+        late = replace(catalyst, value="unsupported", revision="later",
+                       available_at=catalyst.available_at + timedelta(seconds=1))
+        unknown = replace(catalyst, value="unsupported", revision="undated", available_at=None)
+        rows = (market, catalyst, late, unknown)
+        self.assertEqual("breakout_catalyst_unavailable", self.decide(policy=policy, bar=bar, entry_proofs=rows).reason)
+        known = self.decide(policy=policy, bar=bar, entry_proofs=rows, research_context=True)
+        self.assertEqual(("ENTER", (market, catalyst)), (known.action, known.setup.entry_proofs))
+        self.assertNotIn(late.revision, known.evidence_refs)
+        self.assertNotIn(unknown.revision, known.evidence_refs)
+        self.assertEqual("breakout_catalyst_unavailable", self.decide(
+            policy=policy, bar=bar, entry_proofs=(market, late, unknown), research_context=True,
+        ).reason)

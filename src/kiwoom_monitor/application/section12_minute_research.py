@@ -167,10 +167,12 @@ class MinuteShadowConfig:
 class MinuteExperimentRun:
     """Keep observed setups and actual paper fills together for one run."""
 
-    def __init__(self, config: MinuteExperiment, references, *, reconstructed_market_values=None) -> None:
+    def __init__(self, config: MinuteExperiment, references, *, reconstructed_market_values=None,
+                 research_context: bool = False) -> None:
         self.config = config
         self.references = references
         self.reconstructed_market_values = reconstructed_market_values
+        self.research_context = research_context
         self.setups: dict[str, Any] = {}
         self.armed: dict[str, Any] = {}
         self.reduced: dict[str, int] = {}
@@ -228,7 +230,8 @@ class MinuteExperimentRun:
                                                entry_proofs=self.config.breakout_entry_proofs, position=holding, setup=setup,
                                                reconstructed_market_proxy=self.reconstructed_market_values.get(
                                                    datetime.fromisoformat(bar.bar_end),
-                                               ) if self.reconstructed_market_values is not None else None)
+                                               ) if self.reconstructed_market_values is not None else None,
+                                               research_context=self.research_context)
             action, reason, setup = decision.action, decision.reason, decision.setup
             quantity, refs = decision.quantity, decision.evidence_refs
         else:

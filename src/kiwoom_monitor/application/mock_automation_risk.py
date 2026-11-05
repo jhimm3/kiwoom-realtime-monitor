@@ -307,6 +307,33 @@ def prepare_planned_leader_protection_exit(
     return json.loads(json.dumps({**workflow, "workflow_id": content_id("protection_exit", workflow)}))
 
 
+def read_planned_leader_protection_checkpoint(workflow, notice, spec, run_id):
+    """Decode historical readback only; never grant new order authority."""
+    from .breakout_strategy import StrategyDecision
+    from .mock_automation_session_clock import content_id
+
+    snapshot, raw = workflow["snapshot"], workflow["decision"]
+    plan = OrderPlanRef(**snapshot["plan"])
+    trigger = PlannedLeaderStop.from_dict(notice["planned_leader_stop"])
+    decision = StrategyDecision(**{**raw, "reasons": tuple(raw["reasons"]), "constraints": tuple(raw["constraints"])})
+    body = {key: value for key, value in raw.items() if key != "decision_id"}
+    if (set(workflow) != {"snapshot", "decision", "workflow_id"}
+            or workflow["workflow_id"] != content_id("protection_exit", {"snapshot": snapshot, "decision": raw})
+            or (snapshot["version"], snapshot["spec_id"], snapshot["account_ref"], snapshot["execution_run_id"])
+            != (PLANNED_LEADER_PROTECTION_EXIT_VERSION, spec.spec_id, spec.account_scope.account_ref, run_id)
+            or (snapshot["notice_revision"], snapshot["trigger_id"], plan.plan_id, plan.policy_ref)
+            != (notice["revision"], trigger.trigger_id, trigger.plan_id, trigger.policy_ref)
+            or (decision.snapshot_id, decision.decision_id) != (
+                content_id("protection_snapshot", snapshot), content_id("decision", body),
+            )
+            or decision.run_id != run_id or decision.proposal != "EXIT" or decision.final_action != "EXIT"
+            or decision.constraints != (PROTECTION_EXIT_VERSION,) or decision.symbol != trigger.stop_loss["symbol"]
+            or type(decision.quantity) is not int or decision.quantity <= 0
+            or type(decision.signal_reference_price) is not int or decision.signal_reference_price <= 0):
+        raise ValueError("invalid_planned_leader_protection_checkpoint")
+    return plan, decision
+
+
 def gross_price_stop_reached(price, entry, stop_loss_bps):
     """Shared gross-price threshold; provenance is checked by each caller."""
     return price * 10000 <= entry * (10000 - stop_loss_bps)

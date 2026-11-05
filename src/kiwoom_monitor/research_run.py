@@ -119,6 +119,7 @@ def execute_research(
         config, strategy_references, reconstructed_market_values=(
             reconstructed_market_proxy.values if reconstructed_market_proxy is not None else None
         ),
+        research_context=not shadow_only and execution_scope is None,
     ) if section12 else None
     if strategy_references is not None and (
         session_profile is None or execution_scope is not None or leader

@@ -2040,13 +2040,94 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_typed_stop_uses_refreshed_risk_and_protects_full_fill_after_unknown_cancel(self):
         await self._verify_partial_buy_protection(cancel_before_terminal=True, full_fill_after_cancel=True)
 
+    async def test_stopped_plan_restores_protective_sell_and_applies_mapped_late_fill(self):
+        await self._verify_partial_buy_protection(cancel_before_terminal=True, stop_after_sell="ACCEPTED")
+
+    async def test_stopped_plan_holds_unknown_protective_sell_and_unmapped_report(self):
+        await self._verify_partial_buy_protection(cancel_before_terminal=True, stop_after_sell="SUBMISSION_UNKNOWN")
+
     async def test_expired_zero_fill_plan_cancels_once_without_position_authority(self):
         await self._verify_expired_plan_cancel(late_fill=False)
 
     async def test_expired_zero_fill_plan_keeps_late_detail_without_stop_authority(self):
         await self._verify_expired_plan_cancel(late_fill=True)
 
-    async def _verify_expired_plan_cancel(self, *, late_fill):
+    async def test_expired_plan_late_fill_can_use_a_new_independent_hard_stop(self):
+        await self._verify_new_hard_stop_after_expiry(full_fill=False)
+
+    async def test_expired_plan_late_full_fill_can_use_a_new_independent_hard_stop(self):
+        await self._verify_new_hard_stop_after_expiry(full_fill=True)
+
+    async def _verify_new_hard_stop_after_expiry(self, *, full_fill):
+        from kiwoom_monitor.application.market_session_schedule import KST
+        from kiwoom_monitor.application.mock_automation_risk import (
+            PlannedLeaderStop, prepare_planned_leader_protection_exit,
+        )
+
+        root, terminal = await self._verify_expired_plan_cancel(late_fill=True, full_fill=full_fill)
+        episode = self.runner.episode
+        pin = episode._leader_position_proof
+        head = self._head(root.intent.plan.plan_id)
+        plan = replace(root.intent.plan, expected_revision=head['revision'])
+        self.clock += timedelta(seconds=1)
+        self.risk_revision = self.repository.load_latest_mock_automation_risk(ACCOUNT_REF).reconciliation_revision
+        quantity = terminal.filled_quantity
+        gross = quantity * root.intent.limit_price
+        original_account, original_risk = self._risk_cut(terminal, quantity, gross, 0)
+        episode.observe_native_risk({'risk': original_risk, 'account': original_account})
+        self.clock += timedelta(milliseconds=100)
+        payload = {'code': root.intent.symbol, 'market': 'KRX', 'current_price': 940,
+                   'trade_time': self.clock.astimezone(KST).strftime('%H%M%S'), 'cumulative_trade_value': 100}
+        episode.observe_leader_trade(payload, self.clock, source='actual-0B-fixture:1', approved=True)
+        notice = episode._protection_snapshot()
+        self.assertEqual('PENDING', notice['state'])
+        self.assertEqual(['BUY'], [call[1] for call in self.transport.calls])
+        stop = notice['risk_trigger']['stop_loss']
+        observation = {'payload': payload, 'received_at': self.clock.isoformat(), 'decided_at': self.clock.isoformat(),
+                       'source': 'actual-0B-fixture:1', 'approved': True}
+        trigger = PlannedLeaderStop(plan.plan_id, plan.policy_ref, original_risk.snapshot_id,
+                                    original_risk.reconciliation_revision, observation, stop)
+        notice = {**notice, 'planned_leader_stop': trigger.to_dict()}
+        self.clock += timedelta(seconds=1)
+        account, risk = self._risk_cut(terminal, quantity, gross, 0)
+        recovery = MockAccountRecovery(account, (terminal,))
+        record_mock_automation_recovery_from_risk(self.repository, self.runtime, recovery, risk,
+                                                 account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id)
+        control = self.repository.load_mock_automation_control(ACCOUNT_REF)
+        terms = dict(run_id=self.run_id, control_revision=control.control_revision, notice=notice,
+                     plan=plan, risk=risk, plan_position=head, leader_config=episode._config, position_proof=pin,
+                     confirmed_root_state=terminal.state.value, confirmed_root_at=terminal.as_of, now=self.clock)
+        with self.assertRaisesRegex(ValueError, 'independent later execution quote'):
+            prepare_planned_leader_protection_exit(self.spec, observation=observation, **terms)
+        later = {**observation, 'payload': {**payload, 'current_price': 990,
+                 'trade_time': self.clock.astimezone(KST).strftime('%H%M%S')},
+                 'received_at': self.clock.isoformat(), 'decided_at': self.clock.isoformat()}
+        def dispatch(saved_notice):
+            workflow = prepare_planned_leader_protection_exit(self.spec, observation=later, **{**terms, 'notice': saved_notice})
+            episode._protection_review = {**saved_notice, 'planned_leader_protection_exit': workflow}
+            episode._save_checkpoint(force=True)
+            raw = workflow['decision']
+            decision = StrategyDecision(**{**raw, 'constraints': tuple(raw['constraints']), 'reasons': tuple(raw['reasons'])})
+            return dispatch_mock_automation_decision_from_risk(
+                self.repository, self.runtime, decision, recovery, risk, account_ref=ACCOUNT_REF,
+                spec_id=self.spec.spec_id, strategy_ref=self.spec.strategy_ref,
+                protection_exit_id=workflow['workflow_id'], plan=plan,
+            )
+
+        old_time = terminal.as_of.isoformat()
+        old_trigger = replace(trigger, stop_loss={**stop, 'available_at': old_time},
+                              observation={**observation, 'received_at': old_time, 'decided_at': old_time})
+        with self.assertRaisesRegex(RuntimeError, 'PLANNED_LEADER_PROTECTION_DETAILED_FILLS_UNCONFIRMED'):
+            dispatch({**notice, 'planned_leader_stop': old_trigger.to_dict()})
+        self.assertEqual(head, self._head(plan.plan_id))
+        self.assertEqual(['BUY'], [call[1] for call in self.transport.calls])
+        gate, sell, receipt = dispatch(notice)
+        self.assertEqual('APPROVED_FOR_SINGLE_SUBMISSION', gate.status.value, gate.reasons)
+        self.assertIsNotNone(receipt)
+        self.assertEqual((plan, quantity, 990), (sell.intent.plan, sell.intent.quantity, sell.intent.limit_price))
+        self.assertEqual(['BUY', 'SELL'], [call[1] for call in self.transport.calls])
+
+    async def _verify_expired_plan_cancel(self, *, late_fill, full_fill=False):
         from dataclasses import asdict
 
         from kiwoom_monitor.central_server.execution_runtime import ManualMockOrderGateway
@@ -2128,18 +2209,23 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((pending,), self.runtime.load_active_intents())
 
         self.clock += timedelta(seconds=1)
-        fills = (BrokerFill("expired-plan-late-detail", 1, root.intent.limit_price, self.clock),) if late_fill else ()
-        result = self.runtime.reconcile(root.intent.intent_id, BrokerOrderSnapshot(
-            root.broker_order_id, ACCOUNT_REF, root.intent.symbol, OrderState.CANCELLED, len(fills), 0, self.clock, fills,
-        ))
-        self.assertEqual((OrderState.CANCELLED, len(fills)), (result.state, result.detailed_filled_quantity))
+        quantity = root.intent.quantity if full_fill else int(late_fill)
+        terminal_state = OrderState.FILLED if full_fill else OrderState.CANCELLED
+        fills = (BrokerFill("expired-plan-late-detail", quantity, root.intent.limit_price, self.clock),) if quantity else ()
+        terminal = BrokerOrderSnapshot(
+            root.broker_order_id, ACCOUNT_REF, root.intent.symbol, terminal_state, quantity, 0, self.clock, fills,
+        )
+        result = self.runtime.reconcile(root.intent.intent_id, terminal)
+        self.assertEqual((terminal_state, quantity), (result.state, result.detailed_filled_quantity))
         self.assertEqual(((), True), self.runtime.load_account_active_intents())
-        self.assertEqual((len(fills), 2 + len(fills)),
+        self.assertEqual((quantity, 2 if full_fill else 2 + len(fills)),
                          (self._head(plan.plan_id)["quantity"], self._head(plan.plan_id)["revision"]))
         self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
         self.assertIsNone(self.runner.episode._protection_snapshot())
+        return result, terminal
 
-    async def _verify_partial_buy_protection(self, *, cancel_before_terminal, full_fill_after_cancel=False):
+    async def _verify_partial_buy_protection(self, *, cancel_before_terminal, full_fill_after_cancel=False,
+                                             stop_after_sell=None):
         from kiwoom_monitor.application.market_session_schedule import KST
         from kiwoom_monitor.application.mock_automation_risk import (
             PlannedLeaderCancelClaim, PlannedLeaderStop, PlannedLeaderStopCancelRequest, prepare_planned_leader_protection_exit,
@@ -2161,16 +2247,15 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
             self.clock, (BrokerFill("planned-partial-buy", 1, 1001, self.clock),),
         )
         part = self.runtime.reconcile(buy.intent.intent_id, first)
-        with patch.object(self.runner.episode, "observe_leader_trade",
-                          wraps=self.runner.episode.observe_leader_trade) as observe:
-            await self.deliver(940)
-        quote = self.runner.episode._strategy_inputs.latest_stop_quote
+        await self.deliver(940)
+        captured = self.runner.episode._strategy_inputs.latest_stop_quote
+        quote = captured.raw
         pin = self.runner.episode._leader_position_proof
         config = self.runner.episode._config
         notice = self.runner.episode._protection_snapshot()
         self.assertEqual(("HARD_EXIT", "PENDING"), (quote["status"], notice["state"]))
         account, original_risk = self._risk_cut(first, 1, 1001, 2 * buy.intent.limit_price)
-        payload, received_at = observe.call_args.args
+        payload = captured.envelope.payload
         stop = {
             "version": "leader_absolute_stop/v1", "symbol": buy.intent.symbol, "quantity": 1,
             "entry_price_won": 1001, "price_won": quote["signal_reference_price"],
@@ -2180,8 +2265,7 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
         }
         trigger = PlannedLeaderStop(
             plan.plan_id, plan.policy_ref, original_risk.snapshot_id, original_risk.reconciliation_revision,
-            {"payload": payload, "received_at": received_at.isoformat(), "decided_at": quote["decided_at"],
-             **observe.call_args.kwargs}, stop,
+            captured.observation(), stop,
         )
         self.runner.episode._protection_review = {**notice, "planned_leader_stop": trigger.to_dict()}
         self.runner.episode._save_checkpoint(force=True)
@@ -2386,7 +2470,17 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
             self.runner.episode._save_checkpoint(force=True)
         self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
         self.assertEqual(head, self._head(plan.plan_id))
-        gate, sell, receipt = dispatch(workflow["workflow_id"])
+        if stop_after_sell == "SUBMISSION_UNKNOWN":
+            submit = self.transport.submit
+
+            def lose_ack(intent):
+                submit(intent)
+                raise SubmissionUnknown("protective sell fixture lost ACK")
+
+            with patch.object(self.transport, "submit", side_effect=lose_ack):
+                gate, sell, receipt = dispatch(workflow["workflow_id"])
+        else:
+            gate, sell, receipt = dispatch(workflow["workflow_id"])
         self.assertEqual("APPROVED_FOR_SINGLE_SUBMISSION", gate.status.value, gate.reasons)
         self.assertIsNotNone(receipt)
         self.assertEqual((planned, quantity, 990), (sell.intent.plan, sell.intent.quantity, sell.intent.limit_price))
@@ -2394,6 +2488,9 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
                          (self._head(plan.plan_id)["quantity"], self._head(plan.plan_id)["revision"]))
         self.assertEqual((gate, sell, receipt), dispatch(workflow["workflow_id"]))
         self.assertEqual(["BUY", "SELL"], [call[1] for call in self.transport.calls])
+        if stop_after_sell is not None:
+            await self._verify_stopped_protective_sell(sell, terminal, quantity, gross, stop_after_sell)
+            return
         self.clock += timedelta(seconds=1)
         filled = self.runtime.reconcile(sell.intent.intent_id, BrokerOrderSnapshot(
             sell.broker_order_id, ACCOUNT_REF, sell.intent.symbol, OrderState.FILLED, quantity, 0, self.clock,
@@ -2402,6 +2499,74 @@ class PlannedLeaderPartialProtectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((OrderState.FILLED, quantity), (filled.state, filled.detailed_filled_quantity))
         self.assertEqual((0, expected_revision + 2),
                          (self._head(plan.plan_id)["quantity"], self._head(plan.plan_id)["revision"]))
+
+    async def _verify_stopped_protective_sell(self, sell, terminal_buy, quantity, gross, expected_state):
+        emergency_stop_mock_automation(
+            self.repository, self.runtime, account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id,
+            stopped_at=self.clock, reason="fixture protective stop",
+        )
+        self.assertTrue(self.runtime.stop())
+        self.execution = ExecutionRepository(self.store)
+        self.runtime = ExecutionRuntime(
+            OrderLifecycle(self.execution, self.transport, now_provider=lambda: self.clock), self.execution,
+            account_ref=ACCOUNT_REF, run_id=self.run_id, owner_token="stopped-plan-protection-restart",
+            now_provider=lambda: self.clock,
+        )
+        self.runtime.start(new_orders_enabled=False)
+        self.addCleanup(self.runtime.stop)
+        case = self
+        broker_id = self.transport.calls[-1][0]
+
+        class Reader:
+            async def read(self):
+                account = AccountSnapshot(ACCOUNT_REF, case.cash - gross + quantity * 990, 0, {}, case.clock)
+                late = BrokerOrderSnapshot(
+                    broker_id, ACCOUNT_REF, sell.intent.symbol, OrderState.FILLED, quantity, 0, case.clock,
+                    (BrokerFill("stopped-protection-late-sell", quantity, 990, case.clock),),
+                )
+                return MockAccountRecovery(account, (terminal_buy, late))
+
+            async def read_trade_cost_pages(self, *_args):
+                return ()
+
+        monitor = MockAccountMonitor(
+            Reader(), self.runtime, self.execution, now_provider=lambda: self.clock,
+            automation_risk_repository=self.repository, automation_binding_revision=self.spec.binding_revision,
+            automation_account_scope=self.spec.account_scope,
+        )
+        monitor.set_automation_execution_inputs_enabled(True)
+        self.addAsyncCleanup(monitor.close)
+        self.bundle.repository, self.bundle.runtime, self.bundle.monitor = self.execution, self.runtime, monitor
+        self.runner = _prepared_runner(self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
+                                       leader_context_source=lambda: None)
+        self.addAsyncCleanup(self.runner.close)
+        with patch.object(self.runner.episode, "_register_native_unfilled", side_effect=AssertionError("no legacy enrollment")):
+            await self.runner.episode.advance_once()
+            first = self.runner.episode.status["planned_protection"]
+            self.assertEqual((sell.intent.intent_id, expected_state, quantity, quantity, False),
+                             (first["intent_id"], first["state"], first["plan_quantity"],
+                              first["reserved_quantity"], first["order_authorized"]))
+            self.assertEqual("STOPPED", self.runner.episode.status["state"])
+            with patch.object(self.execution, "load_plan_position", side_effect=AssertionError("same revision reread")):
+                await self.runner.episode.advance_once()
+            self.assertEqual(first, self.runner.episode.status["planned_protection"])
+            self.clock += timedelta(seconds=1)
+            await monitor.refresh_recovery()
+            await self.runner.episode.advance_once()
+        last = self.runner.episode.status["planned_protection"]
+        if expected_state == "SUBMISSION_UNKNOWN":
+            self.assertEqual(first, last)
+            self.assertEqual((quantity, 0), (self._head(sell.intent.plan.plan_id)["quantity"],
+                                            self.execution.load(sell.intent.intent_id).detailed_filled_quantity))
+            cut = monitor.latest_automation_execution_cut
+            self.assertIn("local_active_order_not_confirmed_by_broker", cut["observation"].reasons)
+            self.assertFalse(cut["risk"].reconciliation_complete)
+        else:
+            self.assertEqual(("FILLED", 0, 0, quantity, False),
+                             (last["state"], last["plan_quantity"], last["reserved_quantity"],
+                              last["detailed_filled_quantity"], last["order_authorized"]))
+        self.assertEqual("STOPPED", self.runner.episode.status["state"])
+        self.assertEqual(["BUY", "SELL"], [call[1] for call in self.transport.calls])
 
 
 class MockUnfilledPurposeGateTests(unittest.IsolatedAsyncioTestCase):

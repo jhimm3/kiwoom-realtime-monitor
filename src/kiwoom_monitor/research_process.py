@@ -70,11 +70,15 @@ from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 from kiwoom_monitor.infrastructure.research_data_source import prepare_campaign_nas_input
 from kiwoom_monitor.infrastructure.research_data_source import load_frozen_strategy_references, load_research_input, research_input_encoded_bytes, campaign_input_scope, campaign_input_fingerprint
 from kiwoom_monitor.application.section12_minute_research import BREAKOUT_STUDY_FAMILY, MINUTE_EXPERIMENT_LABELS, MinuteExperiment
+from kiwoom_monitor.domain.research_contract import (
+    SECTION12_EVIDENCE_EXPERIMENT_FAMILIES as EVIDENCE_EXPERIMENT_FAMILIES,
+    SECTION12_EVIDENCE_EXPERIMENT_FORMAT,
+)
 from kiwoom_monitor.domain.simulation_contract import COMPLETED_CLOSE_EXECUTION_VERSION
 from kiwoom_monitor.infrastructure.research_storage import validate_research_storage_root
 from kiwoom_monitor.infrastructure.research_data_source import (prepare_development_partition,
     prepare_final_holdout_partition, final_holdout_partition_start, FrozenResearchDataset,
-    load_reconstructed_market_proxy)
+    load_reconstructed_market_proxy, RECONSTRUCTED_MARKET_REGULAR_MINUTES)
 from kiwoom_monitor.application.research_resources import ResearchResourceGuard, ResearchResourceLimits, ResearchResourceBlocked
 from kiwoom_monitor.application.research_implementation import research_implementation_hash
 from kiwoom_monitor.research_run import (
@@ -137,11 +141,6 @@ class ResearchProcessRequest:
             raise ValueError("reconstructed market proxy requires a breakout development comparison without other market proofs")
 
 
-EVIDENCE_EXPERIMENT_FAMILIES = {
-    "micro_experiment": "micro_execution/v1",
-    "daily_decline_experiment": "daily_decline/v1",
-    "account_risk_experiment": "account_risk_study/v1",
-}
 DAILY_DECLINE_NATIVE_SETUP_VERSION = "dd-native-setup-evidence/v1"
 BREAKOUT_COMPARISON_MODE = "breakout_filter_comparison"
 
@@ -1171,6 +1170,11 @@ def _next_nas_rolling_range(source, scope, spec, now):
     return _nas_rolling_range_for_start(scope, spec, now, start)
 
 
+def _supports_reported_result(request) -> bool:
+    return ((isinstance(request, ResearchProcessRequest) and request.mode == "single_run")
+            or (isinstance(request, EvidenceExperimentRequest) and request.mode in EVIDENCE_EXPERIMENT_FAMILIES))
+
+
 def execute_process_request(
     request: ResearchProcessRequest | LeaderBreakoutProcessRequest | EvidenceExperimentRequest,
     *,
@@ -1180,8 +1184,8 @@ def execute_process_request(
     reported_result_target=None,
 ) -> dict[str, Any]:
     if reported_result_target is not None and (
-            not isinstance(request, ResearchProcessRequest) or request.mode != "single_run" or campaign_cycle is not None):
-        raise ValueError("reported result delivery supports ordinary single_run only")
+            not _supports_reported_result(request) or campaign_cycle is not None):
+        raise ValueError("reported result delivery supports ordinary single_run or a Section 12 evidence experiment only")
     cancelled = lambda: bool(
         (cancel_path is not None and cancel_path.is_file())
         or (cancel_requested is not None and cancel_requested())
@@ -1190,7 +1194,13 @@ def execute_process_request(
     if isinstance(request, EvidenceExperimentRequest):
         if campaign_cycle is not None:
             raise ValueError("evidence experiments run outside a campaign")
-        return _execute_evidence_experiment(request, resource_guard, cancelled)
+        result = _execute_evidence_experiment(request, resource_guard, cancelled)
+        if reported_result_target is not None:
+            from kiwoom_monitor.research_result_delivery import attach_result_delivery
+
+            result = attach_result_delivery(result, request.database, request.runs_dir, result["run_id"],
+                                            reported_result_target, cancel_requested=cancelled)
+        return result
     development_only = isinstance(request, ResearchProcessRequest) and bool(
         request.evaluation.source_event_links or request.reconstructed_market_proxy
     )
@@ -1512,7 +1522,11 @@ def execute_process_request(
         )
         context = _section12_minute_result(repository, runs[0].run_id, tuple(config.policy.variant for config in configs))
         if market_proxy is not None:
-            context["reconstructed_market_proxy"] = market_proxy.identity()
+            context["reconstructed_market_proxy"] = {
+                **market_proxy.identity(),
+                "covered_minutes": len(market_proxy.values),
+                "regular_minutes": RECONSTRUCTED_MARKET_REGULAR_MINUTES,
+            }
         return {
             "status": "ok", "kind": BREAKOUT_COMPARISON_MODE, "order_authorized": False,
             "section12": context,
@@ -1579,10 +1593,8 @@ def _section12_minute_result(repository: ResearchRepository, run_id: str, varian
 
 def _evaluate_frozen_daily_decline_setup(request, scenario, descriptor_size, guard, checkpoint):
     from kiwoom_monitor.application.daily_decline import (
-        DailyDeclineBasis, DailyDeclineBenchmark, DailyDeclineCatalyst, DailyDeclineSpec,
-        evaluate_daily_decline_shadow,
+        decode_daily_decline_setup_inputs, evaluate_daily_decline_shadow,
     )
-    from kiwoom_monitor.application.market_session_schedule import decode_strategy_references
 
     required = {"version", "frozen_dataset", "symbol", "venue", "signal_day", "cut",
                 "strategy_references", "basis", "benchmark"}
@@ -1628,9 +1640,8 @@ def _evaluate_frozen_daily_decline_setup(request, scenario, descriptor_size, gua
         if frozen.manifest.get("dataset_id") != manifest["bundle_id"] or frozen.manifest.get("children") != children:
             raise ValueError("DD frozen bundle changed during load")
 
-    symbol, venue = scenario["symbol"], scenario["venue"]
-    if not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isascii() or not symbol.isalnum() or venue != "KRX":
-        raise ValueError("DD native setup requires a scoped KRX stock code")
+    inputs = decode_daily_decline_setup_inputs(scenario, request.policy)
+    symbol, venue = inputs["symbol"], inputs["venue"]
     subject = f"{symbol}:{venue}"
     if (frozen.manifest.get("kinds") != ["daily_bar"] or frozen.manifest.get("subject") != subject
             or not frozen.manifest.get("dataset_id")):
@@ -1643,42 +1654,17 @@ def _evaluate_frozen_daily_decline_setup(request, scenario, descriptor_size, gua
         ):
             raise ValueError("DD setup requires native daily query provenance")
 
-    def proof(name, proof_type, *dates):
-        raw = scenario.get(name)
-        if raw is None:
-            return None
-        value = dict(_mapping(raw, name))
-        for key in dates:
-            value[key] = date.fromisoformat(value[key])
-        value["available_at"] = datetime.fromisoformat(value["available_at"])
-        return proof_type(**value)
-
     try:
-        policy = dict(request.policy)
-        for name in ("tranche_weights_bps", "tranche_drop_units_bps"):
-            policy[name] = tuple(policy[name])
-        spec = DailyDeclineSpec(**policy)
-        signal_day = date.fromisoformat(scenario["signal_day"])
         cut = datetime.fromisoformat(scenario["cut"])
-        calendar, _ = decode_strategy_references(scenario["strategy_references"])
-        decision = evaluate_daily_decline_shadow(
-            frozen.observations, spec=spec, symbol=symbol, venue=venue, signal_day=signal_day, cut=cut, calendar=calendar,
-            basis=proof("basis", DailyDeclineBasis, "first_day", "last_day"),
-            benchmark=proof("benchmark", DailyDeclineBenchmark, "trading_date"),
-            catalyst=proof("catalyst", DailyDeclineCatalyst),
-        )
-    except (KeyError, TypeError) as error:
+        decision = evaluate_daily_decline_shadow(frozen.observations, cut=cut, **inputs)
+    except TypeError as error:
         raise ValueError("invalid DD native setup proof or policy") from error
 
-    setup = {"status": decision.status, "reason": decision.reason}
-    if (qualified := decision.setup) is not None:
-        setup.update(setup_id=qualified.plan_id, drawdown_bps=qualified.drawdown_bps,
-                     relative_decline_bps=qualified.relative_decline_bps, volatility_bps=qualified.volatility_bps,
-                     catalyst_state=qualified.catalyst_state, evidence_ids=list(qualified.evidence_ids))
     identity = {"frozen_manifest_sha256": manifest_sha, "frozen_dataset_id": frozen.manifest["dataset_id"],
                 "revision_ids_hash": frozen.manifest["revision_ids_hash"]}
     return {"version": "dd-native-setup-result/v1", "symbol": symbol, "venue": venue,
-            "signal_day": signal_day.isoformat(), "cut": cut.isoformat(), "setup": setup}, identity
+            "signal_day": inputs["signal_day"].isoformat(), "cut": cut.isoformat(),
+            "setup": decision.to_document()}, identity
 
 
 def _execute_evidence_experiment(request, guard, cancelled) -> dict[str, Any]:
@@ -1722,7 +1708,7 @@ def _execute_evidence_experiment(request, guard, cancelled) -> dict[str, Any]:
     repository.start_run(run_id, spec, {"dataset_id": identity.get("frozen_dataset_id", request.dataset_sha256),
                                        "source_kind": source_kind, **identity})
     _write_immutable_json(manifest, {
-        "format": "kiwoom-monitor-evidence-experiment", "version": 1, "run_id": run_id,
+        "format": SECTION12_EVIDENCE_EXPERIMENT_FORMAT, "version": 1, "run_id": run_id,
         "spec": spec, "logical_result_hash": result_hash, "result": result, "order_authorized": False,
     })
     repository.finish_run(run_id, result_hash)
@@ -2618,7 +2604,7 @@ def _run_research_process(argv: list[str] | None = None) -> int:
         parser.error('--result-connection and --result-owner must be supplied together')
     if args.result_connection:
         if not args.request or args.register_campaign:
-            parser.error('reported result delivery supports ordinary --request single_run only')
+            parser.error('reported result delivery requires one explicit --request outside a campaign')
         if any(path is not None and path.resolve() == args.result_connection.resolve()
                for path in (args.result, args.cancel)):
             parser.error('result/cancel must not overwrite result connection')
@@ -2779,8 +2765,8 @@ def _run_research_process(argv: list[str] | None = None) -> int:
                     cancel_requested=lambda: args.cancel is not None and args.cancel.is_file())
             else:
                 if args.result_connection:
-                    if not isinstance(request, ResearchProcessRequest) or request.mode != 'single_run':
-                        raise ValueError('reported result delivery supports ordinary single_run only')
+                    if not _supports_reported_result(request):
+                        raise ValueError("reported result delivery supports ordinary single_run or a Section 12 evidence experiment only")
                     connection = args.result_connection.resolve()
                     if (connection == request.database.resolve() or _is_within(connection, request.runs_dir)
                             or any(path is not None and _is_within(path, request.runs_dir)

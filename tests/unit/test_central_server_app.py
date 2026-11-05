@@ -2530,9 +2530,51 @@ class CentralServerAppTests(unittest.TestCase):
             }
             case["schema"]["paths"]["/api/v1/research/reported-results"] = {"post": result_post}
             case["schema"]["paths"]["/api/v1/research/reported-results/{result_id}"] = {"get": result_get}
+            case["schema"]["paths"]["/api/v1/research/micro-inputs"] = {"get": {
+                "summary": "Research Micro Inputs",
+                "operationId": "research_micro_inputs_api_v1_research_micro_inputs_get",
+                "parameters": [
+                    {"name": "symbol", "in": "query", "required": True,
+                     "schema": {"type": "string", "pattern": "^[A-Za-z0-9]{6}$", "title": "Symbol"}},
+                    {"name": "venue", "in": "query", "required": True,
+                     "schema": {"type": "string", "enum": ["KRX", "NXT"], "title": "Venue"}},
+                    {"name": "variant", "in": "query", "required": True,
+                     "schema": {"type": "string", "minLength": 1, "maxLength": 32, "title": "Variant"}},
+                    {"name": "lookback_seconds", "in": "query", "required": False,
+                     "schema": {"type": "integer", "minimum": 1, "maximum": 60, "default": 20,
+                                "title": "Lookback Seconds"}},
+                    {"name": "vi_limit", "in": "query", "required": False,
+                     "schema": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100, "title": "Vi Limit"}},
+                    {"name": "authorization", "in": "header", "required": False,
+                     "schema": {"type": "string", "default": "", "title": "Authorization"}},
+                ],
+                "responses": {
+                    "200": {"description": "Successful Response", "content": {"application/json": {"schema": {
+                        "type": "object", "additionalProperties": True,
+                        "title": "Response Research Micro Inputs Api V1 Research Micro Inputs Get"}}}},
+                    "422": copy.deepcopy(current["responses"]["422"]),
+                },
+            }}
+            case["schema"]["paths"]["/api/v1/research/daily-decline-setup"] = {"post": {
+                "summary": "Research Daily Decline Setup",
+                "operationId": "research_daily_decline_setup_api_v1_research_daily_decline_setup_post",
+                "parameters": [
+                    {"name": "evidence_sha256", "in": "query", "required": True,
+                     "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$", "title": "Evidence Sha256"}},
+                    {"name": "authorization", "in": "header", "required": False,
+                     "schema": {"type": "string", "default": "", "title": "Authorization"}},
+                ],
+                "responses": {
+                    "200": {"description": "Successful Response", "content": {"application/json": {"schema": {
+                        "type": "object", "additionalProperties": True,
+                        "title": "Response Research Daily Decline Setup Api V1 Research Daily Decline Setup Post"}}}},
+                    "422": copy.deepcopy(current["responses"]["422"]),
+                },
+            }}
             position = case["route_order"].index("/api/v1/research/ram-shadow/source-check")
             case["route_order"][position:position] = [
-                "/api/v1/research/reported-results", "/api/v1/research/reported-results/{result_id}"]
+                "/api/v1/research/micro-inputs", "/api/v1/research/daily-decline-setup", "/api/v1/research/reported-results",
+                "/api/v1/research/reported-results/{result_id}"]
             # Reviewed AR09 basic operator-state contract and AR06 reported
             # input provenance. Extend only these exact additive fields/routes;
             # keep the released oracle and the full final comparison intact.
@@ -4001,6 +4043,8 @@ class CentralServerAppTests(unittest.TestCase):
             ("GET", "/api/v1/market/coverage"),
             ("GET", "/api/v1/market/external-bars"),
             ("GET", "/api/v1/research/observations"),
+            ("GET", "/api/v1/research/micro-inputs"),
+            ("POST", "/api/v1/research/daily-decline-setup"),
             ("POST", "/api/v1/research/reported-results"),
             ("GET", "/api/v1/research/reported-results/{result_id}"),
             ("GET", "/api/v1/research/candidates"),
@@ -4098,6 +4142,204 @@ class CentralServerAppTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual([], response.json()["events"])
         self.assertEqual("DISABLED", response.json()["quality"]["status"])
+
+    def test_daily_decline_shadow_assesses_native_revisions_at_the_server_cut(self) -> None:
+        import hashlib
+        from dataclasses import asdict
+
+        from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
+        from tests.unit.test_daily_decline import BARS, CUT, HISTORY, SIGNAL_DAY, SINGLE, SYMBOL, synthetic_scenario
+
+        clock = [CUT]
+        fixture = synthetic_scenario()
+        document = {key: fixture[key] for key in ("symbol", "venue", "signal_day", "basis", "benchmark")}
+        document.update(
+            version="dd-shadow-setup-evidence/v1", policy=asdict(SINGLE),
+            strategy_references={"version": "strategy-reference/v1", "calendar": fixture["calendar"], "listings": []},
+        )
+        url = "/api/v1/research/daily-decline-setup"
+        admin = {"Authorization": "Bearer private-token"}
+        query = {"Authorization": "Bearer query-token"}
+
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            path = Path(directory) / "dd.sqlite3"
+            store = SQLiteQueryStore(path, now_provider=lambda: clock[0])
+            stack.callback(store.close)
+            stack.enter_context(patch("kiwoom_monitor.central_server.app.create_query_store", return_value=store))
+            stack.enter_context(patch("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.server_now",
+                                      side_effect=lambda: clock[0]))
+            token = stack.enter_context(patch("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.get_access_token",
+                                               side_effect=AssertionError("DD setup read cannot use broker tokens")))
+            app = create_app(CentralServerSettings(
+                f"sqlite:///{path}", "private-token", query_access_token="query-token",
+                kiwoom_app_key="fixture-key", kiwoom_secret_key="fixture-secret",
+            ))
+            client = TestClient(app)
+            stack.callback(client.close)
+            ingestor = MarketDataIngestor(store, now_provider=lambda: clock[0])
+
+            def write(day, prices, mode="1"):
+                row = {"dt": day.strftime("%Y%m%d"), "open_pric": str(prices["open"]),
+                       "high_pric": str(prices["high"]), "low_pric": str(prices["low"]), "cur_prc": str(prices["close"])}
+                ingestor.ingest("ka10081", {"stk_cd": SYMBOL, "upd_stkpc_tp": mode}, {"stk_dt_pole_chart_qry": [row]})
+
+            def request(value=document, *, headers=admin, digest=None):
+                raw = json.dumps(value).encode()
+                return client.post(url, content=raw, headers=headers,
+                                   params={"evidence_sha256": digest or hashlib.sha256(raw).hexdigest()})
+
+            for day, row in zip((*HISTORY, SIGNAL_DAY), BARS, strict=True):
+                clock[0] = datetime(day.year, day.month, day.day, 20, 1, tzinfo=KST)
+                write(day, row["payload"])
+            clock[0] = CUT
+            native_ids = {row["revision_id"] for row in store.load_observation_revisions("daily_bar", f"{SYMBOL}:KRX")}
+            self.assertEqual(3, len(native_ids))
+
+            revisions = stack.enter_context(patch.object(store, "load_observation_revisions", wraps=store.load_observation_revisions))
+            export = stack.enter_context(patch.object(store, "create_observation_export", side_effect=AssertionError))
+            self.assertEqual(401, request(headers={}).status_code)
+            self.assertEqual(403, request(headers=query).status_code)
+            self.assertEqual(422, request(digest="0" * 64).status_code)
+            revisions.assert_not_called()
+
+            response = request()
+            self.assertEqual(200, response.status_code)
+            checked = response.json()
+            self.assertEqual(("native_setup_assessment", "caller_supplied", CUT.isoformat(), None, False),
+                             (checked["execution_scope"], checked["reference_authority"], checked["cut"],
+                              checked["candidate"], checked["order_authorized"]))
+            self.assertEqual(hashlib.sha256(json.dumps(document).encode()).hexdigest(), checked["evidence_sha256"])
+            self.assertEqual((3, 0, False), (checked["native_revision_count"], checked["other_revision_count"],
+                                            checked["revision_read_limit_reached"]))
+            setup = checked["setup"]
+            self.assertEqual(("QUALIFIED", 2500, 1618),
+                             (setup["status"], setup["drawdown_bps"], setup["relative_decline_bps"]))
+            self.assertEqual(native_ids, set(setup["evidence_ids"][:3]))
+            revisions.assert_called_once_with("daily_bar", f"{SYMBOL}:KRX", 5000)
+            self.assertEqual("benchmark_unavailable", request({**document, "benchmark": None}).json()["setup"]["reason"])
+
+            correction_at = CUT + timedelta(minutes=1)
+            clock[0] = correction_at
+            write(SIGNAL_DAY, BARS[-1]["payload"], mode="0")
+            clock[0] = CUT
+            self.assertEqual(setup, request().json()["setup"])
+            clock[0] = correction_at
+            self.assertEqual({"status": "UNKNOWN", "reason": "daily_window_unavailable"}, request().json()["setup"])
+            export.assert_not_called()
+            token.assert_not_called()
+
+    def test_micro_shadow_input_api_reads_native_collector_vi_and_krx_day_at_one_cut(self) -> None:
+        cut = datetime(2026, 9, 11, 9, 17, 9, tzinfo=KST)
+        clock = [cut]
+        url = "/api/v1/research/micro-inputs"
+        params = {"symbol": "005930", "venue": "KRX", "variant": "VI_GAP_UP", "lookback_seconds": 8, "vi_limit": 7}
+        admin = {"Authorization": "Bearer private-token"}
+        query = {"Authorization": "Bearer query-token"}
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            stack.enter_context(patch("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.server_now",
+                                      side_effect=lambda: clock[0]))
+            token = stack.enter_context(patch("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.get_access_token",
+                                              side_effect=AssertionError("no broker token in MICRO read fixture")))
+            rest = stack.enter_context(patch("kiwoom_monitor.central_server.app.CentralRestBroker.request",
+                                             side_effect=AssertionError("no broker REST in MICRO read fixture")))
+            stack.enter_context(patch("kiwoom_monitor.central_server.app.CentralRestBroker.start", new_callable=AsyncMock))
+            stack.enter_context(patch("kiwoom_monitor.central_server.app.CentralRealtimeCollector.start", new_callable=AsyncMock))
+            ws = stack.enter_context(patch("kiwoom_monitor.central_server.realtime_collector.connect",
+                                           side_effect=AssertionError("no broker WS in MICRO read fixture")))
+            path = Path(directory) / "monitor.sqlite3"
+            app = create_app(CentralServerSettings(
+                f"sqlite:///{path}", "private-token", query_access_token="query-token",
+                kiwoom_app_key="fixture-key", kiwoom_secret_key="fixture-secret", autonomous_top20_enabled=False,
+                market_event_collection_enabled=True, news_history_jobs_enabled=False,
+            ))
+            with TestClient(app) as client:
+                collector, vi = app.state.realtime_collector, app.state.market_event_service
+                store = collector._store
+                owner = object()
+
+                async def publish_vi(values):
+                    self.assertTrue(await vi.handle_ws_message({"trnm": "REAL", "data": [
+                        {"type": "1h", "values": values},
+                    ]}, None))
+                    await asyncio.gather(*tuple(vi._background))
+
+                async def seed_native_rows():
+                    collector._apply_trade_source_approval({("005930", "KRX"), ("005930", "NXT")}, cut, reset_all=False)
+                    collector.set_ram_observation_retention(20, owner=owner)
+                    collector._publish_parsed({"trnm": "REAL", "data": [
+                        {"type": "0B", "item": "005930", "values": {"10": "104", "15": "2", "20": "091703"}},
+                        {"type": "0B", "item": "005930_NX", "values": {"10": "106", "15": "1", "20": "091704"}},
+                    ]})
+                    base = {"9001": "A005930", "9068": "1", "1221": "100", "1223": "091501",
+                            "1224": "091701", "1490": "1", "9081": "KRX"}
+                    await publish_vi(base)
+                    await publish_vi(base | {"9068": "2"})
+                    clock[0] += timedelta(seconds=1)
+                    await publish_vi(base | {"9068": "2", "1490": "2"})
+                    clock[0] = cut
+
+                def save_day(observation_second=0):
+                    day = cut.date().isoformat()
+                    store.upsert_documents("krx_trading_day_observations", [{
+                        "owner": day, "key": "latest", "document": {"trading_date": day,
+                            "source": "kiwoom_websocket_0s", "status_code": "3", "trade_time": "090000",
+                            "remaining_time": "000000",
+                            "observed_at": cut.replace(hour=9, minute=0, second=observation_second).isoformat()},
+                    }])
+
+                client.portal.call(seed_native_rows)
+                save_day()
+                with patch.object(collector, "ram_observation_snapshot", wraps=collector.ram_observation_snapshot) as ram, \
+                        patch.object(store, "load_document", wraps=store.load_document) as day_read, \
+                        patch.object(store, "load_market_event_history", wraps=store.load_market_event_history) as vi_read:
+                    read_order = MagicMock()
+                    read_order.attach_mock(day_read, "day")
+                    read_order.attach_mock(vi_read, "vi")
+                    read_order.attach_mock(ram, "ram")
+                    self.assertEqual(401, client.get(url, params=params).status_code)
+                    self.assertEqual(403, client.get(url, params=params, headers=query).status_code)
+                    self.assertEqual(422, client.get(url, params=params | {"variant": "unsupported"}, headers=admin).status_code)
+                    ram.assert_not_called()
+                    day_read.assert_not_called()
+                    vi_read.assert_not_called()
+
+                    response = client.get(url, params=params, headers=admin)
+                    self.assertEqual(200, response.status_code)
+                    result = response.json()
+                    self.assertEqual(("UNKNOWN", None, False, cut.isoformat()),
+                                     (result["status"], result["candidate"], result["order_authorized"], result["decision_at"]))
+                    self.assertEqual(["native_quote_depth", "native_instrument_tradability", "native_cross_stream_order",
+                                      "native_vi_release_execution_price"], result["missing_inputs"])
+                    self.assertEqual(("OBSERVED", 1, "2026-09-11T09:17:03+09:00"),
+                                     (result["trade"]["state"], result["trade"]["count"], result["trade"]["latest"]["observed_at"]))
+                    self.assertEqual({("1223", "2026-09-11T09:15:01+09:00"), ("1224", "2026-09-11T09:17:01+09:00")},
+                                     {(row["fid"], row["observed_at"]) for row in result["vi"]["observations"]})
+                    self.assertEqual(2, len(result["vi"]["observations"]))
+                    ram.assert_called_once_with(("005930",), seconds=8)
+                    day_read.assert_called_once_with("krx_trading_day_observations", cut.date().isoformat(), "latest")
+                    vi_read.assert_called_once_with("vi", code="005930", limit=7)
+                    self.assertEqual(["day", "vi", "ram"], [entry[0] for entry in read_order.mock_calls])
+
+                    nxt = client.get(url, params=params | {"venue": "NXT"}, headers=admin).json()
+                    scalp = client.get(url, params=params | {"variant": "BOOK_SCALP"}, headers=admin).json()
+                    self.assertEqual(("unconfirmed_trading_date", "OBSERVED"), (nxt["vi"]["reason"], nxt["trade"]["state"]))
+                    self.assertIsNone(scalp["vi"])
+                    self.assertEqual(1, day_read.call_count)
+                    self.assertEqual(1, vi_read.call_count)
+
+                    clock[0] += timedelta(seconds=1)
+                    save_day(1)  # The changed document is stamped after the cut despite the earlier observation.
+                    clock[0] = cut
+                    future_day = client.get(url, params=params, headers=admin).json()
+                    self.assertEqual("unconfirmed_trading_date", future_day["vi"]["reason"])
+                    self.assertEqual(2, day_read.call_count)
+                    self.assertEqual(1, vi_read.call_count)
+                    self.assertIs(collector._ram_observation_owner, owner)
+                    self.assertEqual(20, collector._ram_trade_retention_seconds)
+            token.assert_not_called()
+            rest.assert_not_called()
+            ws.assert_not_called()
+            self.assertEqual("completed", app.state.shutdown_status["state"])
 
     def test_operational_settings_can_be_changed_and_are_persisted(self) -> None:
         from kiwoom_monitor.application.leader_breakout import LeaderBreakoutPolicy

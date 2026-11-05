@@ -699,7 +699,12 @@ class ResearchProcessTests(unittest.TestCase):
                     self.assertFalse((root / request["runs_dir"]).exists())
 
     def test_section12_close_and_ipo_requests_preserve_actual_filled_quantity(self) -> None:
-        from datetime import datetime, timedelta
+        import sqlite3
+        from contextlib import closing
+        from datetime import date, datetime, timedelta
+
+        from kiwoom_monitor.application.market_session_schedule import decode_strategy_references
+        from kiwoom_monitor.domain.market_data_contract import select_listing_evidence
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -749,11 +754,21 @@ class ResearchProcessTests(unittest.TestCase):
             )]
             listing = {"symbol": "005930", "listing_date": friday, "listing_type": "ipo", "available_at": stamp(friday, "08:00"),
                        "source": "fixture-listing", "revision": "listed", "evidence_id": "listing-1", "completeness": "complete"}
-            references = json.dumps({"version": "strategy-reference/v1", "calendar": calendar, "listings": [listing]}).encode()
-            (root / "references.json").write_bytes(references)
+            original = {**listing, "listing_date": "2026-10-15", "evidence_id": "ipo-before-entry"}
+            correction = {
+                **original, "listing_date": friday, "listing_type": "spac",
+                "available_at": stamp(friday, "15:18"), "revision": "corrected",
+                "evidence_id": "listing-correction-while-held",
+            }
+            reference_document = {"version": "strategy-reference/v1", "calendar": calendar}
+            _, listings = decode_strategy_references({**reference_document, "listings": [original, correction]})
+            corrected = select_listing_evidence(
+                listings, symbol="005930", trading_date=date.fromisoformat(friday),
+                as_of=datetime.fromisoformat(correction["available_at"]),
+            )
+            self.assertEqual((correction["evidence_id"],), tuple(row.evidence_id for row in corrected.evidence))
             request = _request_document()
-            request.update(mode="single_run", session_profile="krx-regular/v1",
-                           strategy_references={"path": "references.json", "sha256": hashlib.sha256(references).hexdigest()})
+            request.update(mode="single_run", session_profile="krx-regular/v1")
             request["execution"].update(version="completed_close_then_next_open/v1", same_bar_path_version="no_intrabar_fill/v1")
             request["execution"]["cost_model"].update(commission_bps=0, sell_tax_bps=0, slippage_bps=0,
                                                        valid_from=stamp(friday, "08:00"), valid_to=stamp(monday, "16:00"))
@@ -764,15 +779,24 @@ class ResearchProcessTests(unittest.TestCase):
             breakout = {"quantity": 4, "lookback_bars": 2, "breakout_buffer_bps": 100, "protection_loss_bps": 1000,
                         "exit_minutes_before_close": 1, "listing_phases": ["listing_day"]}
             cases = (
-                ("close_betting/v1", close, [("BUY", 4, 105), ("SELL", 4, 102)]),
+                ("close_betting/v1", close, [("BUY", 4, 105), ("SELL", 4, 102)], [listing]),
                 ("ipo_close/v1", {**close, "ipo_reduction_quantity": 2, "listing_phases": ["listing_day"]},
-                 [("BUY", 4, 105), ("SELL", 2, 102), ("SELL", 2, 89)]),
-                ("ipo_breakout/v1", breakout, [("BUY", 4, 105), ("SELL", 4, 106)]),
+                 [("BUY", 4, 105), ("SELL", 2, 102), ("SELL", 2, 89)], [listing]),
+                ("ipo_breakout/v1", breakout, [("BUY", 4, 105), ("SELL", 4, 106)], [listing]),
+                ("ipo_close/v1", {**close, "ipo_reduction_quantity": 2, "listing_phases": ["after_listing_day"]},
+                 [("BUY", 4, 105), ("SELL", 2, 102), ("SELL", 2, 89)], [original, correction]),
+                ("ipo_breakout/v1", {**breakout, "listing_phases": ["after_listing_day"]},
+                 [("BUY", 4, 105), ("SELL", 4, 106)], [original, correction]),
             )
             repository = ResearchRepository(root / request["database"])
-            for family, policy, expected in cases:
-                with self.subTest(family=family):
-                    request.update(family=family, strategy={"capital_won": 1000, "policy": policy})
+            for family, policy, expected, listing_rows in cases:
+                with self.subTest(family=family, listing_phases=policy["listing_phases"]):
+                    references = json.dumps({**reference_document, "listings": listing_rows}).encode()
+                    (root / "references.json").write_bytes(references)
+                    request.update(
+                        family=family, strategy={"capital_won": 1000, "policy": policy},
+                        strategy_references={"path": "references.json", "sha256": hashlib.sha256(references).hexdigest()},
+                    )
                     path = root / "request.json"
                     path.write_text(json.dumps(request), encoding="utf-8")
                     result = execute_process_request(load_research_process_request(path))
@@ -780,6 +804,38 @@ class ResearchProcessTests(unittest.TestCase):
                     fills = [(event["side"], event["quantity"], event["price"]) for event in events if event["event_type"] == "FILL"]
                     self.assertEqual(expected, fills)
                     self.assertNotIn("RISK_FILL", {event["event_type"] for event in events})
+                    if listing_rows == [original, correction]:
+                        run_id = result["run_id"]
+                        candidate, = repository.load_candidate_events(run_id)
+                        buy, = (event for event in events if event["event_type"] == "FILL" and event["side"] == "BUY")
+                        self.assertEqual(candidate["decision_id"], buy["decision_id"])
+                        self.assertLess(datetime.fromisoformat(buy["occurred_at"]),
+                                        datetime.fromisoformat(correction["available_at"]))
+                        self.assertEqual(
+                            {buy["intent_id"]},
+                            {event["intent_id"] for event in events if event["event_type"] == "MARK"},
+                        )
+                        with closing(sqlite3.connect(root / request["database"])) as connection:
+                            snapshots = {
+                                snapshot_id: json.loads(document)["feature_values"][0]["setup"]
+                                for snapshot_id, document in connection.execute(
+                                    "SELECT snapshot_id,document_json FROM research_feature_snapshots WHERE run_id=?",
+                                    (run_id,),
+                                )
+                            }
+                        entry_setup = snapshots[candidate["snapshot_id"]]
+                        self.assertEqual("after_listing_day", entry_setup["listing_phase"])
+                        self.assertEqual([original["evidence_id"]], entry_setup["listing_refs"])
+                        self.assertEqual([f"{friday}-{clock}" for clock in ("15:14", "15:15", "15:16")],
+                                         entry_setup["entry_bar_refs"])
+                        management = [
+                            decision for decision in repository.load_evaluations(run_id)
+                            if decision["final_action"] in {"HOLD", "REDUCE", "EXIT"}
+                            and datetime.fromisoformat(decision["decided_at"]) >= corrected.evidence[0].available_at
+                        ]
+                        self.assertIn("EXIT", {decision["final_action"] for decision in management})
+                        for decision in management:
+                            self.assertEqual(entry_setup, snapshots[decision["snapshot_id"]])
             request["shadow_only"] = True
             request.update(family="close_betting/v1", strategy={"capital_won": 1000, "policy": close})
             path.write_text(json.dumps(request), encoding="utf-8")
@@ -1096,6 +1152,11 @@ class ResearchProcessTests(unittest.TestCase):
             for events, expected in (
                 (run("breakout_study/v1", base), [("BUY", 105), ("SELL", 98)]),
                 (run("theme_leader_study/v1", theme, theme_proofs=[first_role, loss]), [("BUY", 105), ("SELL", 106)]),
+                (run("theme_leader_study/v1", theme, theme_proofs=[
+                    {**first_role, "basis": "reconstructed_as_of"},
+                    {**loss, "basis": "reconstructed_as_of"},
+                    {**loss, "basis": "reconstructed_as_of", "available_at": None, "revision": "undated"},
+                ]), [("BUY", 105), ("SELL", 106)]),
             ):
                 self.assertEqual(expected, [(event["side"], event["price"]) for event in events if event["event_type"] == "FILL"])
             rows[12]["payload"].update(open=100, low=100)
@@ -1185,8 +1246,8 @@ class ResearchProcessTests(unittest.TestCase):
                     "provider": "daishin_creon", "kind": "index_1m", "code": code,
                     "field_ids": [0, 1, 2, 3, 4, 5, 8, 9], "observed_at": archive_at,
                 }
-                for minute in range(1, 381):
-                    refs = [[code, hashlib.sha256(f"{minute}:{index}".encode()).hexdigest()] for index in range(21)]
+                for minute in (10, 11):
+                    refs = [[code, hashlib.sha256(f"{minute}:{index}".encode()).hexdigest()] for index in range(3)]
                     proxy_rows.append({
                         "scope": scope, "minute_end": at(minute), "replay_available_at_proxy": at(minute),
                         "archive_recorded_at": archive_at, "observed_raw": value, "baseline_middle_sum_raw": 201,
@@ -1200,10 +1261,10 @@ class ResearchProcessTests(unittest.TestCase):
                     "manifest_file_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
                     "partition_role": evaluation.folds[0].role, "trading_date": first.date().isoformat(),
                 },
-                "settings": {"baseline_sessions": 20, "comparison_threshold_bps": 15000,
+                "settings": {"baseline_sessions": 2, "comparison_threshold_bps": 15000,
                              "measure": "same_kst_minute_amount/v1",
                              "baseline_estimator": "even_median_middle_sum_over_two/v1"},
-                "baseline_dates": [(first.date() - timedelta(days=day)).isoformat() for day in range(20, 0, -1)],
+                "baseline_dates": [(first.date() - timedelta(days=day)).isoformat() for day in (2, 1)],
                 "source_pages": source_pages, "values": proxy_rows,
             }
             proxy_bytes = json.dumps(proxy).encode()
@@ -1222,13 +1283,15 @@ class ResearchProcessTests(unittest.TestCase):
                 path.write_text(json.dumps(request), encoding="utf-8")
                 result = execute_process_request(load_research_process_request(path))
                 self.assertEqual([1, 1, expected_count, 0], [run["candidate_count"] for run in result["runs"]])
+                market_context = result["section12"]["reconstructed_market_proxy"]
+                self.assertEqual((2, 380), (market_context["covered_minutes"], market_context["regular_minutes"]))
                 for index, run in enumerate(result["runs"]):
                     spec = repository.load_run(run["run_id"])["spec"]
                     if index < 2:
                         self.assertNotIn("reconstructed_market_proxy", spec)
                     else:
                         reference = spec["reconstructed_market_proxy"]
-                        self.assertEqual((scope, proxy_hash, 20), (reference["scope"], reference["sha256"],
+                        self.assertEqual((scope, proxy_hash, 2), (reference["scope"], reference["sha256"],
                                                                     reference["baseline_sessions"]))
                 scope_results.append([run["run_id"] for run in result["runs"]])
             self.assertEqual(scope_results[0][:2], scope_results[1][:2])
@@ -1240,6 +1303,20 @@ class ResearchProcessTests(unittest.TestCase):
             proxy_path.write_bytes(proxy_bytes + b" ")
             with self.assertRaisesRegex(ValueError, "artifact hash does not match"):
                 execute_process_request(load_research_process_request(path))
+
+            # The frozen history still runs if its exact signal minute has no proxy.
+            scope = scopes[1]
+            missing = {**proxy, "values": [row for row in proxy_rows
+                       if (row["scope"], row["minute_end"]) != (scope, at(11))]}
+            missing_bytes = json.dumps(missing).encode()
+            proxy_path.write_bytes(missing_bytes)
+            request["reconstructed_market_proxy"]["sha256"] = hashlib.sha256(missing_bytes).hexdigest()
+            path.write_text(json.dumps(request), encoding="utf-8")
+            result = execute_process_request(load_research_process_request(path))
+            self.assertEqual([1, 1, 0, 0], [run["candidate_count"] for run in result["runs"]])
+            self.assertEqual(1, result["section12"]["reconstructed_market_proxy"]["covered_minutes"])
+            report = repository.load_research_report(result["runs"][2]["run_id"])
+            self.assertGreater(report["fold_reports"][0]["no_trade_reasons"]["breakout_market_turnover_unavailable"], 0)
 
             from kiwoom_monitor.application.research_resources import ResearchResourceBlocked
             request["resource_budget"] = {"memory_mb": 128}

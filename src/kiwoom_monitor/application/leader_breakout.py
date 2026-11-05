@@ -586,6 +586,40 @@ def evaluate_leader_breakout_minutes(policy, observations, *, session_profile, c
         "fills_simulated": False, "performance_verified": False, "order_authorized": False}
 
 
+@dataclass(frozen=True)
+class LeaderTradeEnvelope:
+    payload: Mapping[str, Any]
+    received_at: datetime
+    source: str
+    generation: int
+
+
+@dataclass(frozen=True)
+class LeaderStopQuote:
+    raw: Mapping[str, Any]
+    envelope: LeaderTradeEnvelope
+
+    def observation(self) -> dict[str, Any]:
+        return {"payload": deepcopy(self.envelope.payload), "received_at": self.envelope.received_at.isoformat(),
+                "source": self.envelope.source, "approved": True, "decided_at": self.raw["decided_at"]}
+
+
+def replay_leader_stop_observation(config, position_context, observation):
+    if (not isinstance(observation, Mapping)
+            or set(observation) != {"payload", "received_at", "source", "approved", "decided_at"}
+            or observation["approved"] is not True or not isinstance(observation["payload"], Mapping)
+            or not isinstance(observation["source"], str) or not observation["source"]):
+        raise ValueError("invalid_leader_stop_observation")
+    received_at, decided_at = (datetime.fromisoformat(observation[key]) for key in ("received_at", "decided_at"))
+    if received_at.tzinfo is None or decided_at.tzinfo is None:
+        raise ValueError("invalid_leader_stop_observation_time")
+    raw, _ = evaluate_leader_breakout_trade(
+        config.policy, observation["payload"], received_at=received_at, source=observation["source"],
+        decision_time=decided_at, position_open=True, position_context=position_context,
+    )
+    return raw
+
+
 class LeaderTradeInputs:
     """Own bounded actual-0B delivery and continuity, without native authority."""
 
@@ -594,6 +628,7 @@ class LeaderTradeInputs:
         self._queue_lock = Lock()
         self._observations = {}
         self._source = None
+        self._generation = 0
         self._discontinuity = ""
         self._stop_quote = None
         # Legacy leader checkpoints may contain decoded minute documents. They
@@ -604,6 +639,7 @@ class LeaderTradeInputs:
     def reset(self, reason):
         with self._queue_lock:
             self._queue.clear()
+            self._generation += 1
             self._discontinuity = reason
             self._stop_quote = None
 
@@ -613,19 +649,22 @@ class LeaderTradeInputs:
         if approved is not True or not source:
             self.reset("0B_source_unapproved")
             return None
-        envelope = (deepcopy(payload), as_kst(received_at), source)
-        generation = (source, envelope[1].date())
+        payload, received_at = deepcopy(payload), as_kst(received_at)
+        generation = (source, received_at.date())
         with self._queue_lock:
             if self._source != generation:
                 self._queue.clear()
                 self._discontinuity = "0B_source_generation_changed"
                 self._source = generation
+                self._generation += 1
                 self._stop_quote = None
             if len(self._queue) >= 1000:
                 self._queue.clear()
+                self._generation += 1
                 self._discontinuity = "0B_input_overflow_no_cross_bridge"
                 self._stop_quote = None
                 return None
+            envelope = LeaderTradeEnvelope(payload, received_at, source, self._generation)
             self._queue.append(envelope)
         return envelope
 
@@ -673,22 +712,29 @@ class LeaderTradeInputs:
             position_context = next((c for c in config.contexts if c.evidence_ref == raw["context_ref"]), None)
         return raw, position_context
 
-    def capture_stop_quote(self, config, payload, *, received_at, source, decision_time, position_context):
-        raw, _ = evaluate_leader_breakout_trade(config.policy, payload, received_at=received_at,
-            source=source, decision_time=decision_time, position_open=True, position_context=position_context)
-        previous = self._stop_quote
-        if not any(r in raw["reasons"] for r in ("input_stale", "input_from_future", "price_unavailable")) and (
-                previous is None or datetime.fromisoformat(raw["available_at"]) > datetime.fromisoformat(previous["available_at"])):
-            self._stop_quote = raw
-            return raw
-        return None
+    def capture_stop_quote(self, config, envelope: LeaderTradeEnvelope, *, decision_time, position_context):
+        raw, _ = evaluate_leader_breakout_trade(config.policy, envelope.payload, received_at=envelope.received_at,
+            source=envelope.source, decision_time=decision_time, position_open=True, position_context=position_context)
+        if any(reason in raw["reasons"] for reason in ("input_stale", "input_from_future", "price_unavailable")):
+            return None
+        with self._queue_lock:
+            previous = self._stop_quote
+            if (envelope.generation != self._generation
+                    or previous is not None and envelope.received_at <= previous.envelope.received_at):
+                return None
+            quote = LeaderStopQuote(raw, envelope)
+            self._stop_quote = quote
+            return quote
 
     @property
     def latest_stop_quote(self):
-        return self._stop_quote
+        with self._queue_lock:
+            return self._stop_quote
 
-    def clear_stop_quote(self):
-        self._stop_quote = None
+    def clear_stop_quote(self, envelope: LeaderTradeEnvelope):
+        with self._queue_lock:
+            if envelope.generation == self._generation:
+                self._stop_quote = None
 
     def restore_bars(self, values):
         self._restored_bars = {

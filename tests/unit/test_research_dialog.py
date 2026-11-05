@@ -53,7 +53,8 @@ class ResearchDialogTests(unittest.TestCase):
             "status": "ok", "kind": "breakout_filter_comparison",
             "section12": {"family": "breakout_study/v1", "variants": ["B0", "B1", "B2", "B3"],
                           "execution_scope": "paper", "source_kind": "historical_reconstruction",
-                          "reconstructed_market_proxy": {"scope": "daishin_creon:StockChart:U001", "sha256": "a" * 64}},
+                          "reconstructed_market_proxy": {"scope": "daishin_creon:StockChart:U001", "sha256": "a" * 64,
+                                                         "covered_minutes": 2, "regular_minutes": 380}},
             "runs": [{"variant": "B2", "run_id": "run-b2", "candidate_count": 1},
                      {"variant": "B3", "run_id": "run-b3", "candidate_count": 0}],
             "pairs": [{"baseline": "B2", "variant": "B3", "comparison": {"fold_comparisons": [
@@ -68,6 +69,7 @@ class ResearchDialogTests(unittest.TestCase):
                 dialog._apply_result(comparison)
                 self.assertEqual("변형·구간", dialog._table.horizontalHeaderItem(0).text())
                 self.assertIn("B2/B3 복원 시장비율 daishin_creon:StockChart:U001 · 공급자 원단위 상대값", dialog._summary.text())
+                self.assertIn("시장 근거 2/380분", dialog._summary.text())
                 self.assertIn("Paper 체결 모의 · 계좌 주문 없음", dialog._summary.text())
                 self.assertIn("복원 시장비율 SHA256 " + "a" * 64, dialog._summary.toolTip())
                 self.assertIn("B3 실행 ID run-b3 · 후보 0", dialog._summary.toolTip())

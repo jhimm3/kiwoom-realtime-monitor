@@ -522,7 +522,8 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
     """Reproduce the two proof cuts while holding the existing account owner transaction."""
     from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
     from kiwoom_monitor.application.mock_automation_risk import (
-        PROTECTION_EXIT_VERSION, PlannedLeaderCancelClaim, PlannedLeaderStop,
+        PLANNED_LEADER_EXPIRED_ENTRY_CANCEL_VERSION, PROTECTION_EXIT_VERSION,
+        PlannedLeaderCancelClaim, PlannedLeaderExpiredEntryCancelClaim, PlannedLeaderStop,
         mock_automation_protection_trigger, mock_automation_risk_snapshot_from_dict,
         prepare_planned_leader_protection_exit, validate_planned_leader_stop,
     )
@@ -598,6 +599,7 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
     cursor.execute(f'SELECT accepted_sequence,document_json FROM central_execution_events WHERE intent_id={p} '
                    'ORDER BY accepted_sequence', (plan.plan_id,))
     original_quantity = current_quantity = fill_cursor = cancel_sequence = unknown_sequence = 0
+    expired_entry_cancel = False
     fill_ids = []
     event, terminal_sequence = {}, 0
     for sequence, event_doc in cursor.fetchall():
@@ -606,9 +608,16 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
         if event['event_type'] == 'CANCEL_STARTED':
             if 'planned_leader_cancel_claim' not in event or event['state'] != 'CANCEL_PENDING':
                 raise RuntimeError('PLANNED_LEADER_PROTECTION_CANCEL_PROOF_CHANGED')
-            cancel = PlannedLeaderCancelClaim.from_dict(event['planned_leader_cancel_claim'])
-            if (cancel_sequence or (cancel.plan.plan_id, cancel.plan.policy_ref, cancel.trigger_id, cancel.notice_revision)
-                    != (plan.plan_id, plan.policy_ref, trigger.trigger_id, notice['revision'])):
+            cancel_document = event['planned_leader_cancel_claim']
+            expired_entry_cancel = cancel_document.get('version') == PLANNED_LEADER_EXPIRED_ENTRY_CANCEL_VERSION
+            if expired_entry_cancel:
+                cancel = PlannedLeaderExpiredEntryCancelClaim.from_dict(cancel_document, recovery)
+                same_stop = True  # Expiry is independent of the later stop.
+            else:
+                cancel = PlannedLeaderCancelClaim.from_dict(cancel_document)
+                same_stop = (cancel.trigger_id, cancel.notice_revision) == (trigger.trigger_id, notice['revision'])
+            if (cancel_sequence or not same_stop or (cancel.plan.plan_id, cancel.plan.policy_ref)
+                    != (plan.plan_id, plan.policy_ref)):
                 raise RuntimeError('PLANNED_LEADER_PROTECTION_CANCEL_PROOF_CHANGED')
             cancel_sequence = sequence
         if root_state == 'FILLED' and event['event_type'] in {
@@ -626,7 +635,16 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
                 original_quantity += event['quantity']
     head = document(PLAN_POSITION_COLLECTION, plan.plan_id)
     original_cursor = original_risk.execution_event_high_watermark
-    if root_state == 'CANCELLED':
+    if expired_entry_cancel:
+        # An expiry claim cannot arm a stop. The new stop must follow the
+        # broker-confirmed terminal root and the Risk must already own its fills.
+        terminal_confirmed = (
+            cancel_sequence < fill_cursor <= terminal_sequence <= original_cursor
+            and confirmed_at < datetime.fromisoformat(trigger.stop_loss['available_at'])
+            and event.get('event_type') in ({'BROKER_RECONCILED'} if root_state == 'CANCELLED' else {'FILL', 'BROKER_RECONCILED'})
+            and (root_state == 'CANCELLED' or cancel_sequence < unknown_sequence < fill_cursor)
+        )
+    elif root_state == 'CANCELLED':
         terminal_confirmed = (original_cursor < cancel_sequence < terminal_sequence
                               and event.get('event_type') == 'BROKER_RECONCILED')
     else:

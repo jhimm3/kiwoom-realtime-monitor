@@ -1122,6 +1122,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             input_authorize=authorize_research_input,
             result_authorize=authorize_research_result,
             get_market_theme_shadow_runtime=lambda: ram_shadow_session.runtime,
+            get_realtime_collector=lambda: app.state.realtime_collector,
             now_provider=server_now,
             check_stock_thesis_sources=ram_shadow_session.check_stock_thesis_sources))
 

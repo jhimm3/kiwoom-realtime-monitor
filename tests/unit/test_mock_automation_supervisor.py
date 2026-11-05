@@ -2331,6 +2331,123 @@ class MockCredentialProtectionContinuityTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_key_rotation_preserves_no_minute_incomplete_management_checkpoint(self):
         await self._exercise_rotation_protection(incomplete_before_rotation=True)
 
+    async def test_same_plan_dispatch_ack_loss_and_late_fill_survive_verified_key_rotation(self):
+        from datetime import timedelta
+        from kiwoom_monitor.application.mock_automation_admission import build_mock_automation_lease_receipt
+        from kiwoom_monitor.application.mock_automation_execution import dispatch_mock_automation_decision_from_risk
+        from kiwoom_monitor.application.mock_automation_recovery import record_mock_automation_recovery_from_risk
+        from kiwoom_monitor.central_server.database_execution import PLAN_POSITION_COLLECTION
+        from kiwoom_monitor.domain.order_contract import BrokerSubmission, OrderPlanRef, OrderState
+        from kiwoom_monitor.domain.strategy_contract import StrategyDecision
+        from tests.unit.test_mock_automation_specification import _automation_decision, _hash
+
+        repository = self.supervisor._repository
+        self.assertTrue(repository.save_mock_automation_lease_receipt(
+            build_mock_automation_lease_receipt(self.admission, admitted_at=self.admission.requested_at),
+        ))
+        await self.supervisor.bundle_changed(self.profile, None)
+        original_runtime = self.bundle.runtime
+        source_binding = self.bundle.binding
+        plan = OrderPlanRef("rotation-plan", "rotation-plan/v1", 0)
+        scope = dict(account_ref=self.account_ref, spec_id=self.spec.spec_id, strategy_ref=self.spec.strategy_ref)
+
+        async def refresh(bundle):
+            recovery = await bundle.monitor.refresh_recovery()
+            risk = repository.load_latest_mock_automation_risk(self.account_ref)
+            restored = record_mock_automation_recovery_from_risk(repository, bundle.runtime, recovery, risk,
+                                                                account_ref=self.account_ref, spec_id=self.spec.spec_id)
+            self.assertEqual(risk.snapshot_id, restored.risk_snapshot_id)
+            return recovery, risk
+
+        recovery, risk = await refresh(self.bundle)
+        decision_body = _automation_decision(self.bundle.run_id, "ENTER", self.clock).to_dict()
+        decision_body.pop("decision_id")
+        decision_body.update(quantity=3, required_capital_won=210_000)
+        decision = StrategyDecision(decision_id="decision_" + _hash(decision_body), **decision_body)
+        self.transport.submit.side_effect = None
+        self.transport.submit.return_value = BrokerSubmission("planned-rotation-broker-order", self.clock)
+
+        def dispatch(runtime, current_recovery, current_risk):
+            return dispatch_mock_automation_decision_from_risk(
+                repository, runtime, decision, current_recovery, current_risk, plan=plan, **scope,
+            )
+
+        save_receipt = repository.save_mock_automation_dispatch_receipt
+        committed_receipts = []
+
+        def lose_ack_after_save(receipt):
+            save_receipt(receipt)
+            committed_receipts.append(receipt)
+            raise OSError("controlled dispatch acknowledgment loss after native commit")
+
+        with patch.object(repository, "save_mock_automation_dispatch_receipt", side_effect=lose_ack_after_save):
+            with self.assertRaisesRegex(OSError, "after native commit"):
+                dispatch(original_runtime, recovery, risk)
+        (first_receipt,) = committed_receipts
+        intent_id = first_receipt.intent_id
+        self.assertEqual(first_receipt, repository.load_mock_automation_dispatch_receipt(self.account_ref, intent_id))
+        self.assertEqual(OrderState.ACCEPTED, original_runtime.load_intent(intent_id).state)
+        self.transport.submit.assert_called_once()
+
+        self.clock += timedelta(seconds=1)
+        first_fill_at = self.clock
+        second_fill_at = self.clock + timedelta(seconds=1)
+        read = self.bundle.client.request_with_continuation
+
+        def account_read(api_id, path, body, **kwargs):
+            late = self.bundle.client._settings.app_key == "a2"
+            if api_id == "ka10075":
+                return {"oso": [{
+                    "ord_no": "planned-rotation-broker-order", "stk_cd": "005930", "ord_qty": "3",
+                    "oso_qty": "1" if late else "2", "ord_pric": "70000", "io_tp_nm": "매수", "stex_tp": "1",
+                    "cntr_no": "planned-fill-late" if late else "planned-fill-first",
+                    "unit_cntr_qty": "1", "unit_cntr_pric": "70000",
+                    "tm": (second_fill_at if late else first_fill_at).strftime("%H%M%S"),
+                }]}, False, ""
+            if api_id == "kt00018":
+                return {"acnt_evlt_remn_indv_tot": [{"stk_cd": "005930", "rmnd_qty": "2" if late else "1"}]}, False, ""
+            return read(api_id, path, body, **kwargs)
+
+        with patch.object(self.bundle.client, "request_with_continuation", side_effect=account_read):
+            await refresh(self.bundle)
+            original = original_runtime.load_intent(intent_id)
+            self.assertEqual((OrderState.PARTIALLY_FILLED, ("planned-fill-first",)), (original.state, original.fill_ids))
+            source_events = tuple(original_runtime.load_intent_events(intent_id))
+            self.clock = second_fill_at
+            await self.rotate("a2", 1)
+            current = self.owner.bundle(self.profile)
+            self.assertEqual(source_binding, current.binding)
+            self.assertEqual(2, self.owner.active_revision(self.profile))
+            self.assertEqual(original_runtime.run_id, current.runtime.run_id)
+            self.assertTrue(original_runtime._retired)
+            self.assertNotEqual(original_runtime.owner_token, current.runtime.owner_token)
+            fresh_recovery, fresh_risk = await refresh(current)
+            self.assertEqual(2, fresh_recovery.account.positions["005930"])
+            gate, record, receipt = dispatch(current.runtime, fresh_recovery, fresh_risk)
+
+        self.assertEqual(first_receipt, receipt)
+        self.assertEqual(gate.intent_id, record.intent.intent_id)
+        self.assertEqual(original.intent, record.intent)
+        self.assertEqual(OrderState.PARTIALLY_FILLED, record.state)
+        self.assertEqual(("planned-fill-first", "planned-fill-late"), record.fill_ids)
+        current_events = tuple(current.runtime.load_intent_events(intent_id))
+        self.assertEqual(source_events, current_events[:len(source_events)])
+        self.assertEqual(["planned-fill-first", "planned-fill-late"],
+                         [event["broker_execution_id"] for event in current_events if event["event_type"] == "FILL"])
+        head = self.store.load_document(PLAN_POSITION_COLLECTION, self.account_ref, plan.plan_id)["document"]
+        page = current.repository.account_events("mock", self.account_ref)
+        newest_fill = next(event for event in page.events if event.broker_execution_id == "planned-fill-late")
+        self.assertEqual((2, newest_fill.accepted_sequence), (head["quantity"], head["fill_cursor"]))
+        self.assertEqual([intent_id], [row.intent.intent_id for row in current.runtime.load_active_intents()])
+        with self.store.mock_automation_read_scope() as reader:
+            leases = reader.execute("SELECT owner_token FROM central_execution_runtime_leases WHERE owner_key=?",
+                                    (f"mock:{self.account_ref}",)).fetchall()
+        self.assertEqual([(f"{current.run_id}:{current.runtime.owner_token}",)], leases)
+        self.assertTrue(repository.load_mock_automation_control(self.account_ref).entry_resume_required)
+        self.assertFalse(current.runtime._new_orders_enabled)
+        self.transport.submit.assert_called_once()
+        self.transport.cancel.assert_not_called()
+
     async def _exercise_rotation_protection(self, *, mutation=None, retry_mutation=False, incomplete_before_rotation=False):
         from datetime import timedelta
         from kiwoom_monitor.application.breakout_strategy import StrategyDecision

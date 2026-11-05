@@ -13,6 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from kiwoom_monitor.domain.research_contract import (
     ReportedResearchResult, REPORTED_RESEARCH_RESULT_KIND, encode_reported_result_owner,
+    SECTION12_EVIDENCE_EXPERIMENT_FORMAT, is_section12_evidence_manifest,
 )
 from kiwoom_monitor.domain.time_basis import as_kst
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient, CentralContentHttpError, validate_producer_connection
@@ -69,12 +70,27 @@ def _source(database: Path, runs_dir: Path, run_id: str):
         raise ValueError("an existing completed research run is required")
     raw = manifest_path.read_bytes()
     manifest = json.loads(raw)
-    if (not isinstance(manifest, dict) or manifest.get("format") != "kiwoom-monitor-research-run"
-            or type(manifest.get("version")) is not int or manifest["version"] != 3
-            or manifest.get("run_id") != run_id or manifest.get("logical_result_hash") != run["logical_result_hash"]
-            or manifest.get("spec") != run["spec"] or manifest.get("repository") != database.name
-            or manifest.get("input_dataset_id") != run["input_manifest"].get("dataset_id", "")
-            or manifest.get("input_revision_ids_hash") != run["input_manifest"].get("revision_ids_hash", "")):
+    if (not isinstance(manifest, dict) or manifest.get("run_id") != run_id
+            or manifest.get("logical_result_hash") != run["logical_result_hash"]
+            or manifest.get("spec") != run["spec"]):
+        raise ValueError("original completed run and manifest do not match")
+    if manifest.get("format") == SECTION12_EVIDENCE_EXPERIMENT_FORMAT:
+        if not is_section12_evidence_manifest(manifest):
+            raise ValueError("invalid Section 12 evidence experiment manifest")
+        spec = manifest["spec"]
+        input_identity = {key: spec[key] for key in ("frozen_dataset_id", "frozen_manifest_sha256", "revision_ids_hash")
+                          if key in spec}
+        input_identity.update(dataset_id=spec.get("frozen_dataset_id", spec["dataset_sha256"]),
+                              source_kind=spec["source_kind"])
+        if (run["input_manifest"] != input_identity
+                or run_id != "run_" + hashlib.sha256(_canonical(spec)).hexdigest()
+                or hashlib.sha256(_canonical(manifest["result"])).hexdigest() != run["logical_result_hash"]):
+            raise ValueError("original completed evidence run and manifest do not match")
+    elif (manifest.get("format") != "kiwoom-monitor-research-run"
+          or type(manifest.get("version")) is not int or manifest["version"] != 3
+          or manifest.get("repository") != database.name
+          or manifest.get("input_dataset_id") != run["input_manifest"].get("dataset_id", "")
+          or manifest.get("input_revision_ids_hash") != run["input_manifest"].get("revision_ids_hash", "")):
         raise ValueError("original completed run and manifest do not match")
     finished_at = run["finished_at"]
     moment = datetime.fromisoformat(finished_at)

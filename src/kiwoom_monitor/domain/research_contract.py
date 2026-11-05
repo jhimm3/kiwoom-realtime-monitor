@@ -20,6 +20,12 @@ DATASET_SNAPSHOT_RESEARCH_KINDS = frozenset({"ranking", "top20_membership", "min
 RESEARCH_OBSERVATION_KINDS = DATASET_SNAPSHOT_RESEARCH_KINDS | {"daily_bar"}
 REPORTED_RESEARCH_RESULT_KIND = "research-run-report"
 REPORTED_RESEARCH_RESULT_COLLECTION = "reported_research_results"
+SECTION12_EVIDENCE_EXPERIMENT_FORMAT = "kiwoom-monitor-evidence-experiment"
+SECTION12_EVIDENCE_EXPERIMENT_FAMILIES = {
+    "micro_experiment": "micro_execution/v1",
+    "daily_decline_experiment": "daily_decline/v1",
+    "account_risk_experiment": "account_risk_study/v1",
+}
 # Reuse the existing bounded research-publication document contract (256 KiB).
 MAX_REPORTED_RESEARCH_RESULT_BYTES = 256 * 1024
 
@@ -148,6 +154,28 @@ class ResearchResultConflict(ValueError):
     """An authenticated owner's immutable result ID already has other bytes."""
 
 
+def is_section12_evidence_manifest(payload: Mapping[str, Any]) -> bool:
+    """Recognize the original report shape without loading its calculation engine."""
+    if (set(payload) != {"format", "version", "run_id", "spec", "logical_result_hash", "result", "order_authorized"}
+            or payload["format"] != SECTION12_EVIDENCE_EXPERIMENT_FORMAT
+            or type(payload["version"]) is not int or payload["version"] != 1
+            or payload["order_authorized"] is not False
+            or not isinstance(payload["result"], dict)
+            or payload["result"].get("order_authorized", False) is not False
+            or not isinstance(payload["spec"], dict)):
+        return False
+    spec = payload["spec"]
+    mode = spec.get("mode")
+    if not isinstance(mode, str) or mode not in SECTION12_EVIDENCE_EXPERIMENT_FAMILIES:
+        return False
+    fields = {"family", "mode", "code_hash", "parameters", "dataset_sha256", "source_kind"}
+    if mode == "daily_decline_experiment" and spec.get("source_kind") == "frozen_native_daily_observations":
+        fields |= {"frozen_manifest_sha256", "frozen_dataset_id", "revision_ids_hash"}
+    elif spec.get("source_kind") != "synthetic":
+        return False
+    return set(spec) == fields and spec["family"] == SECTION12_EVIDENCE_EXPERIMENT_FAMILIES[mode]
+
+
 @dataclass(frozen=True)
 class ReportedResearchResult:
     """Reported bytes only; neither scientific validation nor execution admission."""
@@ -173,9 +201,11 @@ class ReportedResearchResult:
                 raise ValueError
         except (TypeError, ValueError):
             raise ValueError("reported producer timestamp must be timezone-aware") from None
-        if (not isinstance(payload, dict) or payload.get("format") != "kiwoom-monitor-research-run"
-                or type(payload.get("version")) is not int or payload["version"] != 3
-                or payload.get("run_id") != result_id):
+        if not isinstance(payload, dict) or payload.get("run_id") != result_id:
+            raise ValueError("reported payload must retain its original research run manifest")
+        legacy = (payload.get("format") == "kiwoom-monitor-research-run"
+                  and type(payload.get("version")) is int and payload["version"] == 3)
+        if not legacy and not is_section12_evidence_manifest(payload):
             raise ValueError("reported payload must retain its original research run manifest")
         encoded = json.dumps(dict(document), ensure_ascii=False, sort_keys=True,
                              separators=(",", ":"), allow_nan=False).encode("utf-8")

@@ -111,6 +111,92 @@ class ResearchResultDeliveryTests(unittest.TestCase):
             self.assertEqual((raw, ack_raw, row), (path.read_bytes(), path.with_name(delivery.ACK_FILE).read_bytes(), self.assert_completed(request, result)))
             self.assertNotIn(RESULT_TOKEN.encode(), path.with_name(delivery.TARGET_FILE).read_bytes() + ack_raw)
 
+    def test_section12_completed_evidence_cli_delivers_original_manifests_over_http(self):
+        from dataclasses import asdict
+        from tests.unit.test_daily_decline import SPLIT, quote, quote_receipt, synthetic_scenario
+        from tests.unit.test_micro_execution_evidence import _entry_market, _event, _policy, _scenario
+
+        entry = quote(1000)
+        dd = synthetic_scenario(quote_receipt(entry),
+                                {"kind": "ACCEPT", "available_at": entry.available_at, "quote_ref": entry.evidence_id,
+                                 "order_ref": "entry"},
+                                {"kind": "FILL", "available_at": entry.available_at, "order_ref": "entry",
+                                 "fill_id": "fill", "quantity": 2, "price_won": 1000, "fee_won": 0, "session_index": 1},
+                                {"kind": "TERMINAL", "available_at": entry.available_at, "order_ref": "entry"})
+        micro = _scenario(_entry_market() + [
+            _event("ORDER_ARRIVED", "arrive", 4, order_id="entry"),
+            _event("FILL", "filled", 5, order_id="entry", price_won=104, quantity=2),
+            _event("CANCELLED", "cancelled", 6, order_id="entry", filled_quantity=2),
+        ])
+        risk = {"version": "account-risk-scenario/v1", "initial_cash_won": 100,
+                "plan_budget_won": 100, "events": [{"sequence": 1, "kind": "PROPOSE", "order_id": "entry",
+                    "plan_id": "plan", "symbol": "005930", "side": "BUY", "tranche": 0,
+                    "limit_price_won": 10, "fee_budget_won": 0, "quantity": 2}]}
+        app = query_app(result_settings())
+        with wire_server(app) as (url, _):
+            for mode, scenario, policy in (
+                ("daily_decline_experiment", dd, asdict(SPLIT)),
+                ("micro_experiment", micro, _policy()),
+                ("account_risk_experiment", risk,
+                 {"version": "account-risk-allocation/v1", "tranche_bps": [10000]}),
+            ):
+                with self.subTest(mode=mode):
+                    root = self.root / mode
+                    root.mkdir()
+                    evidence = json.dumps(scenario).encode()
+                    (root / "evidence.json").write_bytes(evidence)
+                    request_path, output = root / "request.json", root / "result.json"
+                    request_path.write_text(json.dumps({
+                        "mode": mode, "dataset": "evidence.json", "dataset_sha256": hashlib.sha256(evidence).hexdigest(),
+                        "policy": policy, "database": "research.sqlite3", "runs_dir": "runs",
+                    }), encoding="utf-8")
+                    request = research_process.load_research_process_request(request_path)
+                    args = ["--request", str(request_path), "--result", str(output)]
+                    with self.native_counts(app) as local_counts, patch("sys.stdout", new=StringIO()):
+                        self.assertEqual(0, research_process._run_research_process(args))
+                    local = json.loads(output.read_bytes())
+                    path = Path(local["manifest"])
+                    original = path.read_bytes()
+                    self.assertEqual([], local_counts["HTTP"])
+                    self.assertFalse(path.with_name(delivery.TARGET_FILE).exists())
+                    self.assertFalse(path.with_name(delivery.ACK_FILE).exists())
+                    completed = self.assert_completed(request, local)
+
+                    connection = self.connection(root, url)
+                    with self.native_counts(app) as counts, patch("sys.stdout", new=StringIO()):
+                        self.assertEqual(0, research_process._run_research_process(
+                            args + ["--result-connection", str(connection), "--result-owner", "processor_a"]))
+                    delivered = json.loads(output.read_bytes())
+                    self.assertEqual(["POST"], counts["HTTP"])
+                    self.assertEqual((1, 1), (counts["INSERT"], counts["COMMIT"]))
+                    self.assertEqual(("completed", "delivered", False), (
+                        delivered["calculation_status"], delivered["delivery"]["status"], delivered["order_authorized"]))
+                    self.assertEqual(completed, self.assert_completed(request, delivered))
+                    stored = CentralContentClient(url, RESULT_TOKEN).load_research_result(local["run_id"], expected_owner="processor_a")
+                    self.assertEqual((1, "kiwoom-monitor-evidence-experiment"), (
+                        stored["result"]["version"], stored["result"]["payload"]["format"]))
+                    self.assertEqual(json.loads(original), stored["result"]["payload"])
+                    self.assertEqual(delivered["delivery"]["receipt"], stored["receipt"])
+                    self.assertFalse(stored["receipt"]["scientific_verified"])
+                    self.assertFalse(stored["receipt"]["order_authorized"])
+                    self.assertEqual(original, path.read_bytes())
+
+                    unauthorized = deepcopy(stored["result"])
+                    unauthorized["payload"]["order_authorized"] = True
+                    headers = {"Authorization": f"Bearer {RESULT_TOKEN}",
+                               "X-Kiwoom-Expected-Result-Owner": encode_reported_result_owner("processor_a")}
+                    self.assertEqual(400, httpx.post(url + "/api/v1/research/reported-results",
+                                                     headers=headers, json=unauthorized).status_code)
+                    changed = json.loads(original)
+                    changed["result"]["tampered"] = True
+                    path.write_bytes(json.dumps(changed).encode())
+                    with patch.object(CentralContentClient, "accept_research_result",
+                                      side_effect=AssertionError("modified evidence left the local source")):
+                        refused = delivery.resend_completed_result(request.database, request.runs_dir, local["run_id"], connection)
+                    self.assertEqual(("pending", "source"), (refused["status"], refused["stage"]))
+                    self.assertEqual(stored, CentralContentClient(url, RESULT_TOKEN).load_research_result(
+                        local["run_id"], expected_owner="processor_a"))
+
     def test_commit_ack_loss_explicit_resend_reuses_original_source_time_and_receipt(self):
         root, _, request, result = self.completed()
         local_db = request.database.read_bytes()

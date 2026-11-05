@@ -160,13 +160,13 @@ class BreakoutEntryProof:
     source: str
     revision: str
     evidence_refs: tuple[str, ...]
-    basis: Literal["point_in_time", "retrospective"]
+    basis: Literal["point_in_time", "reconstructed_as_of", "retrospective"]
     value: MarketTurnoverValues | int | Literal["supported", "unsupported"] | None
 
     def __post_init__(self) -> None:
         if not all(isinstance(text, str) and text.strip() for text in (self.scope, self.source, self.revision)):
             raise ValueError("breakout entry proof requires scope and source revision")
-        if self.basis not in {"point_in_time", "retrospective"}:
+        if self.basis not in {"point_in_time", "reconstructed_as_of", "retrospective"}:
             raise ValueError("invalid breakout proof basis")
         for instant in (self.effective_at, self.available_at):
             if instant is not None and instant.utcoffset() is None:
@@ -214,7 +214,7 @@ class ThemeRoleProof:
     source: str
     revision: str
     evidence_refs: tuple[str, ...]
-    basis: Literal["point_in_time", "retrospective"]
+    basis: Literal["point_in_time", "reconstructed_as_of", "retrospective"]
     dependency_valid: bool | None
 
     def __post_init__(self) -> None:
@@ -223,7 +223,7 @@ class ThemeRoleProof:
         object.__setattr__(self, "role", ThemeRole(self.role))
         if (self.role is ThemeRole.OWN_LEADER) != (self.leader_symbol == self.symbol):
             raise ValueError("theme proof leader does not agree with the role")
-        if (self.basis not in {"point_in_time", "retrospective"}
+        if (self.basis not in {"point_in_time", "reconstructed_as_of", "retrospective"}
                 or self.dependency_valid is not None and type(self.dependency_valid) is not bool
                 or self.role is not ThemeRole.DEPENDENT_FOLLOWER and self.dependency_valid is not None):
             raise ValueError("invalid theme proof basis or dependency")
@@ -303,13 +303,14 @@ def evaluate_breakout_theme(
     setup: BreakoutThemeSetup | None,
     entry_proofs: Iterable[BreakoutEntryProof] = (),
     reconstructed_market_proxy: ReconstructedMarketTurnoverRatio | None = None,
+    research_context: bool = False,
 ) -> BreakoutThemeDecision:
     """Return a decision at receipt. The next eligible open belongs to execution."""
     start, end, cutoff = _bar_times(bar)
     if not _complete_regular(bar, start, end, cutoff):
         return BreakoutThemeDecision("WAIT", 0, "breakout_complete_regular_minute_required", setup)
     if position is not None:
-        return _manage(bar, start, cutoff, proofs, position, setup)
+        return _manage(bar, start, cutoff, proofs, position, setup, research_context=research_context)
 
     exit_at = datetime.combine(start.date(), time.fromisoformat(policy.exit_at_kst), KST)
     if cutoff >= exit_at:
@@ -337,6 +338,7 @@ def evaluate_breakout_theme(
     if isinstance(policy, FilteredBreakoutThemePolicy):
         reason, selected, refs = _filter_entry(
             policy.entry_filters, bar, prior, end, cutoff, entry_proofs, refs, reconstructed_market_proxy,
+            research_context=research_context,
         )
         if reason:
             return BreakoutThemeDecision("WAIT", 0, reason, evidence_refs=refs)
@@ -349,7 +351,7 @@ def evaluate_breakout_theme(
             "entry_proofs": observations,
         }
     if policy.variant == "TH":
-        proof = _theme_at(proofs, bar.code, policy.theme_id, cutoff)
+        proof = _theme_at(proofs, bar.code, policy.theme_id, cutoff, research_context=research_context)
         if proof is None:
             return BreakoutThemeDecision("WAIT", 0, "theme_role_not_known_at_signal", evidence_refs=refs)
         refs = tuple(dict.fromkeys((*refs, proof.revision, *proof.evidence_refs)))
@@ -366,7 +368,7 @@ def evaluate_breakout_theme(
                                  preceding_revision_id=preceding[0].revision_id if preceding else None)
 
 
-def _filter_entry(filters, bar, prior, end, cutoff, evidence, refs, reconstructed_market_proxy):
+def _filter_entry(filters, bar, prior, end, cutoff, evidence, refs, reconstructed_market_proxy, *, research_context):
     # Completed history and native receipts both carry bar turnover. The run
     # records separately whether the decision clock was reconstructed.
     if any(type(row.trade_value_million_won) is not int or row.trade_value_million_won < 0
@@ -407,7 +409,7 @@ def _filter_entry(filters, bar, prior, end, cutoff, evidence, refs, reconstructe
     selected = [market]
     if isinstance(filters, ContextBreakoutFilters):
         if filters.minimum_daily_headroom_bps is not None:
-            daily = _entry_proof_at(evidence, "daily_headroom", bar.code, cutoff)
+            daily = _entry_proof_at(evidence, "daily_headroom", bar.code, cutoff, research_context=research_context)
             if daily is None:
                 return "breakout_daily_headroom_unavailable", None, refs
             refs = _proof_refs(refs, daily)
@@ -417,7 +419,7 @@ def _filter_entry(filters, bar, prior, end, cutoff, evidence, refs, reconstructe
                 return "breakout_daily_headroom_below_threshold", None, refs
             selected.append(daily)
         if filters.require_catalyst:
-            catalyst = _entry_proof_at(evidence, "catalyst", bar.code, cutoff)
+            catalyst = _entry_proof_at(evidence, "catalyst", bar.code, cutoff, research_context=research_context)
             if catalyst is None:
                 return "breakout_catalyst_unavailable", None, refs
             refs = _proof_refs(refs, catalyst)
@@ -429,15 +431,18 @@ def _filter_entry(filters, bar, prior, end, cutoff, evidence, refs, reconstructe
     return "", (turnover, tuple(selected)), refs
 
 
-def _entry_proof_at(evidence, kind, scope, cutoff, *, effective_at=None):
+def _entry_proof_at(evidence, kind, scope, cutoff, *, effective_at=None, research_context=False):
     rows = []
+    allowed = {"point_in_time", "reconstructed_as_of"} if research_context else {"point_in_time"}
     for proof in evidence:
-        if (proof.kind, proof.scope, proof.basis) != (kind, scope, "point_in_time"):
+        if (proof.kind, proof.scope) != (kind, scope) or proof.basis not in allowed:
             continue
         if (effective_at is not None and proof.effective_at is not None and proof.effective_at != effective_at
                 or proof.effective_at is not None and proof.effective_at > cutoff):
             continue
         if proof.available_at is None:
+            if research_context:
+                continue
             return None
         if proof.available_at <= cutoff:
             rows.append(proof)
@@ -454,7 +459,7 @@ def _proof_refs(refs, proof):
     return tuple(dict.fromkeys((*refs, proof.revision, *proof.evidence_refs)))
 
 
-def _manage(bar, start, cutoff, proofs, position, setup):
+def _manage(bar, start, cutoff, proofs, position, setup, *, research_context):
     refs = (bar.revision_id,)
     if setup is None or setup.symbol != bar.code:
         return BreakoutThemeDecision("WAIT", 0, "breakout_original_setup_unavailable", setup, refs)
@@ -473,7 +478,7 @@ def _manage(bar, start, cutoff, proofs, position, setup):
     original = setup.theme_proof
     if (setup.policy.exit_on_dependency_loss and original is not None
             and original.role is ThemeRole.DEPENDENT_FOLLOWER and setup.transition_proof is None):
-        proof = _theme_at(proofs, bar.code, original.theme_id, cutoff)
+        proof = _theme_at(proofs, bar.code, original.theme_id, cutoff, research_context=research_context)
         if proof is not None and proof.leader_symbol == original.leader_symbol:
             refs = tuple(dict.fromkeys((*refs, proof.revision, *proof.evidence_refs)))
             if proof.role is ThemeRole.TRANSITION:
@@ -484,13 +489,16 @@ def _manage(bar, start, cutoff, proofs, position, setup):
     return BreakoutThemeDecision("HOLD", 0, "breakout_structure_held", setup, refs)
 
 
-def _theme_at(proofs, symbol, theme_id, cutoff):
+def _theme_at(proofs, symbol, theme_id, cutoff, *, research_context):
     latest_at = None
     latest = set()
+    allowed = {"point_in_time", "reconstructed_as_of"} if research_context else {"point_in_time"}
     for proof in proofs:
-        if proof.symbol != symbol or proof.theme_id != theme_id or proof.basis != "point_in_time":
+        if proof.symbol != symbol or proof.theme_id != theme_id or proof.basis not in allowed:
             continue
         if proof.available_at is None:
+            if research_context:
+                continue
             return None
         if proof.available_at > cutoff or proof.effective_at is not None and proof.effective_at > cutoff:
             continue

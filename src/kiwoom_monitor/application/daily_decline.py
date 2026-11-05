@@ -8,7 +8,8 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Iterable, Literal, Mapping
 
 from kiwoom_monitor.application.market_session_schedule import (
-    MarketPhase, MarketSession, SessionSupport, SessionWindow, TradingDayEvidence, trading_day_as_of,
+    MarketPhase, MarketSession, SessionSupport, SessionWindow, TradingDayEvidence,
+    decode_strategy_references, trading_day_as_of,
 )
 from kiwoom_monitor.domain.time_basis import KST
 
@@ -99,6 +100,47 @@ class DailyDeclineSetupResult:
     status: Literal["QUALIFIED", "NOT_QUALIFIED", "UNKNOWN"]
     reason: str
     setup: DailyDeclineSetup | None = None
+
+    def to_document(self) -> dict[str, object]:
+        document = {"status": self.status, "reason": self.reason}
+        if self.setup is not None:
+            document.update(
+                setup_id=self.setup.plan_id, drawdown_bps=self.setup.drawdown_bps,
+                relative_decline_bps=self.setup.relative_decline_bps, volatility_bps=self.setup.volatility_bps,
+                catalyst_state=self.setup.catalyst_state, evidence_ids=list(self.setup.evidence_ids),
+            )
+        return document
+
+
+def decode_daily_decline_setup_inputs(document: Mapping[str, object], policy: Mapping[str, object]) -> dict:
+    """Read the same explicit setup inputs for frozen research and native Shadow."""
+    def proof(name, proof_type, *dates):
+        raw = document.get(name)
+        if raw is None:
+            return None
+        values = {**raw, "available_at": datetime.fromisoformat(raw["available_at"])}
+        for field in dates:
+            values[field] = date.fromisoformat(raw[field])
+        return proof_type(**values)
+
+    try:
+        symbol, venue = document["symbol"], document["venue"]
+        if (not isinstance(symbol, str) or len(symbol) != 6 or not symbol.isascii()
+                or not symbol.isalnum() or venue != "KRX"):
+            raise ValueError("DD native setup requires a scoped KRX stock code")
+        policy = dict(policy)
+        for name in ("tranche_weights_bps", "tranche_drop_units_bps"):
+            policy[name] = tuple(policy[name])
+        calendar, _ = decode_strategy_references(document["strategy_references"])
+        return dict(
+            spec=DailyDeclineSpec(**policy), symbol=symbol, venue=venue,
+            signal_day=date.fromisoformat(document["signal_day"]), calendar=calendar,
+            basis=proof("basis", DailyDeclineBasis, "first_day", "last_day"),
+            benchmark=proof("benchmark", DailyDeclineBenchmark, "trading_date"),
+            catalyst=proof("catalyst", DailyDeclineCatalyst),
+        )
+    except (KeyError, TypeError) as error:
+        raise ValueError("invalid DD native setup proof or policy") from error
 
 
 def _aware(value: datetime) -> bool:

@@ -348,6 +348,34 @@ class MockAutomationDialogControlTests(unittest.TestCase):
                     self.assertNotIn("요청 실패", self.dialog._message.text())
                     self.assertFalse(any(button.isEnabled() for button in (self.dialog._start, self.dialog._stop, self.dialog._resume)))
 
+    def test_protection_readback_keeps_unknown_reservation_and_confirmed_fills_separate(self):
+        self.context["status"].update(
+            runtime_mode=MockAccountRuntimeMode.AUTOMATIC.value,
+            control={"desired_state": "STOPPED", "active_spec_id": "ready", "entry_resume_required": True},
+        )
+        for state, plan_qty, reserved, filled, label in (
+            ("SUBMISSION_UNKNOWN", 2, 2, 0, "보호 매도 접수 미확인"),
+            ("FILLED", 0, 0, 2, "보호 매도 체결 완료"),
+        ):
+            with self.subTest(state=state):
+                self.context["status"]["runner"] = {"state": "STOPPED", "planned_protection": {
+                    "state": state, "plan_id": "plan-1", "plan_revision": 4, "intent_id": "sell-1",
+                    "plan_quantity": plan_qty, "reserved_quantity": reserved,
+                    "detailed_filled_quantity": filled, "unreconciled_sell_quantity": 0,
+                    "order_authorized": False,
+                }}
+                self.dialog._completed("refresh", self.context)
+                self.assertIn(f"{label} · 계획 보유 {plan_qty}주 · 주문 예약 {reserved}주 · 상세 체결 {filled}주",
+                              self.dialog._runtime.text())
+                self.assertIn("신규 진입 재개 대기", self.dialog._runtime.text())
+                self.assertEqual("계획 ID plan-1\n계획 판본 4\n보호 주문 의도 ID sell-1", self.dialog._runtime.toolTip())
+                self.assertFalse(self.dialog._start.isEnabled())
+
+        self.context["status"]["runner"] = None
+        self.dialog._completed("refresh", self.context)
+        self.assertNotIn("보호 매도", self.dialog._runtime.text())
+        self.assertEqual("", self.dialog._runtime.toolTip())
+
     def test_publication_review_waits_for_thread_finish_and_posts_exact_fresh_selection(self):
         import sys
         import threading

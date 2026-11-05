@@ -262,6 +262,7 @@ class ReportedResearchResultTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[2] / "src"
         excluded = ("research_run.py", "research_process.py", "research_result_delivery.py", "application/research_implementation.py",
                     "application/research_execution.py", "application/research_evaluation.py", "application/position_target.py",
+                    "application/account_risk_research.py", "application/daily_decline.py", "application/micro_execution_evidence.py",
                     "infrastructure/persistence/research_repository.py", "infrastructure/research_data_source.py")
         with TemporaryDirectory() as directory:
             target = Path(directory) / "src"
@@ -283,14 +284,26 @@ root = Path.cwd() / 'src'
 import kiwoom_monitor
 assert Path(kiwoom_monitor.__file__).resolve().is_relative_to(root)
 settings = CentralServerSettings('sqlite:///:memory:', 'admin', research_result_grants=(ProducerGrant('producer', 'result'),), news_naver_api_enabled=False, news_naver_market_enabled=False, news_query_set_enabled=False, autonomous_top20_enabled=False)
-document = json.loads(sys.argv[1])
+legacy = json.loads(sys.argv[1])
+evidence = {**legacy, 'result_id': 'run-evidence-fixture', 'payload': {
+    'format': 'kiwoom-monitor-evidence-experiment', 'version': 1, 'run_id': 'run-evidence-fixture',
+    'spec': {'family': 'account_risk_study/v1', 'mode': 'account_risk_experiment', 'source_kind': 'synthetic',
+             'code_hash': 'a'*64, 'dataset_sha256': 'b'*64, 'parameters': {}},
+    'logical_result_hash': 'c'*64, 'result': {'version': 'account-risk-result/v1'}, 'order_authorized': False,
+}}
+headers = {'Authorization':'Bearer result', 'X-Kiwoom-Expected-Result-Owner':encode_reported_result_owner('producer')}
 with TestClient(create_app(settings)) as client:
-    accepted = client.post('/api/v1/research/reported-results', json=document, headers={'Authorization':'Bearer result', 'X-Kiwoom-Expected-Result-Owner':encode_reported_result_owner('producer')})
-    assert accepted.status_code == 200, accepted.text
-    assert accepted.json()['receipt']['scientific_verified'] is False
-    assert accepted.json()['result'] == document
-    assert client.get('/api/v1/research/reported-results/run-fixture', headers={'Authorization':'Bearer result', 'X-Kiwoom-Expected-Result-Owner':encode_reported_result_owner('producer')}).json() == accepted.json()
-for module in ('kiwoom_monitor.research_run','kiwoom_monitor.application.research_evaluation','kiwoom_monitor.application.position_target','PySide6','paddle','openai'):
+    for document in (legacy, evidence):
+        accepted = client.post('/api/v1/research/reported-results', json=document, headers=headers)
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()['receipt']['scientific_verified'] is False
+        assert accepted.json()['receipt']['order_authorized'] is False
+        assert accepted.json()['result'] == document
+        assert client.get('/api/v1/research/reported-results/' + document['result_id'], headers=headers).json() == accepted.json()
+for module in ('kiwoom_monitor.research_run','kiwoom_monitor.application.research_evaluation',
+               'kiwoom_monitor.application.position_target','kiwoom_monitor.application.account_risk_research',
+               'kiwoom_monitor.application.daily_decline','kiwoom_monitor.application.micro_execution_evidence',
+               'PySide6','paddle','openai'):
     assert module not in sys.modules, module
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository

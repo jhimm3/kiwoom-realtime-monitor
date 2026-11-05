@@ -363,6 +363,8 @@ class PlannedLeaderPartialProtectionPostgresTests(unittest.IsolatedAsyncioTestCa
         self._risk_cut = PlannedLeaderPartialProtectionTests._risk_cut.__get__(self)
         self._verify_partial_buy_protection = PlannedLeaderPartialProtectionTests._verify_partial_buy_protection.__get__(self)
         self._verify_expired_plan_cancel = PlannedLeaderPartialProtectionTests._verify_expired_plan_cancel.__get__(self)
+        self._verify_new_hard_stop_after_expiry = PlannedLeaderPartialProtectionTests._verify_new_hard_stop_after_expiry.__get__(self)
+        self._verify_stopped_protective_sell = PlannedLeaderPartialProtectionTests._verify_stopped_protective_sell.__get__(self)
 
     async def test_typed_partial_buy_cancel_and_protective_sell_use_resolved_late_fill_after_restart(self):
         from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
@@ -388,3 +390,23 @@ class PlannedLeaderPartialProtectionPostgresTests(unittest.IsolatedAsyncioTestCa
         from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
 
         await PlannedLeaderPartialProtectionTests.test_expired_zero_fill_plan_keeps_late_detail_without_stop_authority(self)
+
+    async def test_expired_plan_late_fill_can_use_a_new_independent_hard_stop(self):
+        from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
+
+        await PlannedLeaderPartialProtectionTests.test_expired_plan_late_fill_can_use_a_new_independent_hard_stop(self)
+
+    async def test_expired_plan_late_full_fill_can_use_a_new_independent_hard_stop(self):
+        from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
+
+        await PlannedLeaderPartialProtectionTests.test_expired_plan_late_full_fill_can_use_a_new_independent_hard_stop(self)
+
+    async def test_stopped_plan_restores_protective_sell_and_applies_mapped_late_fill(self):
+        from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
+
+        await PlannedLeaderPartialProtectionTests.test_stopped_plan_restores_protective_sell_and_applies_mapped_late_fill(self)
+
+    async def test_stopped_plan_holds_unknown_protective_sell_and_unmapped_report(self):
+        from tests.unit.test_mock_automation_specification import PlannedLeaderPartialProtectionTests
+
+        await PlannedLeaderPartialProtectionTests.test_stopped_plan_holds_unknown_protective_sell_and_unmapped_report(self)

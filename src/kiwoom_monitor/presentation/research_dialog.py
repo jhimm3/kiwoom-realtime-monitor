@@ -1394,6 +1394,9 @@ def _section12_result_summary(context: Mapping[str, Any], report: object) -> str
     market_text = ""
     if isinstance(market_proxy, Mapping) and market_proxy.get("scope"):
         market_text = f"B2/B3 복원 시장비율 {market_proxy['scope']} · 공급자 원단위 상대값"
+        covered, regular = market_proxy.get("covered_minutes"), market_proxy.get("regular_minutes")
+        if type(covered) is int and type(regular) is int and 0 <= covered <= regular and regular > 0:
+            market_text += f" · 시장 근거 {covered}/{regular}분"
     return " · ".join(str(value) for value in (
         family, variant, scope, "계좌 주문 없음", source, clock, range_text, quality_text, events_text, market_text,
     ) if value)

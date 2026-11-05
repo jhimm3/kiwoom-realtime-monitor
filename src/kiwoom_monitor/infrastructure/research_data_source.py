@@ -71,6 +71,7 @@ BUNDLE_VERSION = "research_dataset_bundle/v1"
 BUNDLE_BOUNDARY_POLICY = "continuous_no_forced_close/v1"
 DEVELOPMENT_INPUT_VERSION = 'independent_development_input/v1'
 FINAL_INPUT_VERSION = 'independent_final_holdout_input/v1'
+RECONSTRUCTED_MARKET_REGULAR_MINUTES = 380
 
 
 @dataclass(frozen=True)
@@ -139,7 +140,7 @@ def load_reconstructed_market_proxy(
         settings = document["settings"]
         baseline_sessions = settings["baseline_sessions"]
         threshold = settings["comparison_threshold_bps"]
-        if (baseline_sessions != 20 or type(baseline_sessions) is not int
+        if (type(baseline_sessions) is not int or baseline_sessions < 2 or baseline_sessions % 2
                 or type(threshold) is not int or threshold < 0
                 or settings["measure"] != "same_kst_minute_amount/v1"
                 or settings["baseline_estimator"] != "even_median_middle_sum_over_two/v1"):
@@ -182,8 +183,9 @@ def load_reconstructed_market_proxy(
             values[value.minute_end] = value
 
         first_cut = datetime.combine(start.date(), time(9, 1), KST)
-        if set(values) != {first_cut + timedelta(minutes=i) for i in range(380)}:
-            raise ValueError("incomplete reconstructed regular market minute coverage")
+        regular_cuts = {first_cut + timedelta(minutes=i) for i in range(RECONSTRUCTED_MARKET_REGULAR_MINUTES)}
+        if not values.keys() <= regular_cuts:
+            raise ValueError("reconstructed market proxy minute is outside the regular session")
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"invalid reconstructed market proxy artifact: {exc}") from exc
     return FrozenReconstructedMarketProxy(
