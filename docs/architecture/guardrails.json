@@ -2994,6 +2994,19 @@
       "limits": {
         "db|src/kiwoom_monitor/central_server/database_execution.py|_require_close_entry_claim|cursor.execute": 1
       }
+    },
+    {
+      "id": "S12-05-close-management-native-evidence-20261105",
+      "reason": "CLOSE management restores the original plan and detailed fills after restart. Its native claim must bind both BUY and SELL to the retained candidate.",
+      "connection": "The existing candidate query moves to the combined claim. SELL reuses native intent events and the shared plan-head decoder in the same transaction, validates its single reserved revision at submission, and repeats the frozen exit proof without depending on new-entry Shadow settings.",
+      "validation": "SQLite and isolated PostgreSQL fixtures close and reopen the store, preserve partial entry fills and cancelled remainder, reject changed exit evidence before plan mutation, then accept one owned-position protective or next-session SELL and return its original receipt on retry after the plan is flat.",
+      "evidence": [
+        "tests/unit/test_mock_automation_specification.py",
+        "tests/integration/test_observation_bootstrap_postgres.py"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_close_execution_claim|cursor.execute": 1
+      }
     }
   ]
 }

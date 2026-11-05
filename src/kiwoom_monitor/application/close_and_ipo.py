@@ -109,6 +109,30 @@ class CloseIpoSetup:
     next_open_at: datetime | None
     next_calendar_ref: str | None
 
+    @classmethod
+    def from_document(cls, document: Mapping) -> CloseIpoSetup:
+        values = dict(document)
+        policy = values["policy"]
+        values["policy"] = (IpoBreakoutPolicy(**{
+            **policy, "listing_phases": tuple(ListingPhase(value) for value in policy["listing_phases"]),
+        }) if "breakout_buffer_bps" in policy else ClosePolicy.from_document(policy))
+        values["entry_date"] = date.fromisoformat(values["entry_date"])
+        values["entry_deadline"] = datetime.fromisoformat(values["entry_deadline"])
+        values["entry_bar_refs"] = tuple(values["entry_bar_refs"])
+        values["listing_refs"] = tuple(values["listing_refs"])
+        values["listing_phase"] = ListingPhase(values["listing_phase"]) if values["listing_phase"] is not None else None
+        auction = values["close_auction"]
+        if auction is not None:
+            values["close_auction"] = SessionWindow(**{
+                **auction, "trading_date": date.fromisoformat(auction["trading_date"]),
+                "session": MarketSession(auction["session"]), "phase": MarketPhase(auction["phase"]),
+                "support": SessionSupport(auction["support"]),
+                "starts_at": datetime.fromisoformat(auction["starts_at"]), "ends_at": datetime.fromisoformat(auction["ends_at"]),
+            })
+        values["next_date"] = date.fromisoformat(values["next_date"]) if values["next_date"] is not None else None
+        values["next_open_at"] = datetime.fromisoformat(values["next_open_at"]) if values["next_open_at"] is not None else None
+        return cls(**values)
+
 
 def matches_close_shadow(parameters: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
     """Compare the frozen rule, while each stored Shadow setup keeps its own calendar."""

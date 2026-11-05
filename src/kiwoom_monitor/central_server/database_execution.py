@@ -75,7 +75,8 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
     if (new_intent_claim or (submission_claim and "plan" in value)) and value.get('policy_version') == 'leader_execution_adapter/v1':
         _require_leader_execution_claim(cursor, ownership, value, p, now_provider=now_provider)
     if (new_intent_claim or submission_claim) and value.get("policy_version") == "close_execution_adapter/v1":
-        _require_close_entry_claim(cursor, p, value, ownership, now_provider=now_provider)
+        _require_close_execution_claim(cursor, p, value, ownership, now_provider=now_provider,
+                                       submission_claim=submission_claim)
     if "intent_id" in value:
         plan_projection = "document_json->'plan'" if p == "%s" else "json_extract(document_json,'$.plan')"
         stored_projection = "document_json" if "plan" in value else plan_projection
@@ -492,17 +493,22 @@ def _apply_plan_execution_event(cursor, p, intent, event, sequence):
     )
 
 
-def _require_close_entry_claim(cursor, p, value, ownership, *, now_provider):
-    """Bind CLOSE's initial claim to the native candidate and frozen 0B evidence."""
-    from dataclasses import asdict
-    from kiwoom_monitor.application.close_mock_execution import CLOSE_ENTRY_COLLECTION, build_close_entry_evidence
+def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider, submission_claim):
+    """Recheck entry or owned-position management in the order's native transaction."""
+    from dataclasses import asdict, replace
+    from kiwoom_monitor.application.close_mock_execution import (
+        CLOSE_ENTRY_COLLECTION, CLOSE_EXIT_COLLECTION, build_close_entry_evidence, build_close_exit_evidence, close_exit_key,
+    )
     from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
+    from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
     from kiwoom_monitor.application.section12_minute_research import MinuteShadowConfig
     from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, mock_automation_spec_from_dict
+    from kiwoom_monitor.domain.order_contract import OrderPlanRef
     from kiwoom_monitor.domain.strategy_contract import _id
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, plan_position_from_document
 
-    if value.get("side") != "BUY" or value.get("plan") is None:
-        raise RuntimeError("CLOSE_ENTRY_REQUIRES_NATIVE_PLAN")
+    if value.get("side") not in {"BUY", "SELL"} or value.get("plan") is None:
+        raise RuntimeError("CLOSE_EXECUTION_REQUIRES_NATIVE_PLAN")
     account = value["account_ref"]
     spec_doc = _plan_document(cursor, p, "execution_mock_automation_specs", account, ownership["active_spec_id"])
     if spec_doc is None:
@@ -524,23 +530,53 @@ def _require_close_entry_claim(cursor, p, value, ownership, *, now_provider):
         raise RuntimeError("CLOSE_SHADOW_CANDIDATE_MISSING")
     event = _json_document(row[0])
     event["expires_at"] = row[1].isoformat() if isinstance(row[1], datetime) else str(row[1])
-    settings = _plan_document(cursor, p, "server_operational_settings", "global", "current")
-    if settings is None or settings.get("shadow_candidate_enabled") is not True:
-        raise RuntimeError("CLOSE_SHADOW_NOT_ENABLED")
-    config = MinuteShadowConfig.from_document(settings["shadow_candidate_config"])
-    monitor_id = _id("section12-minute-shadow", {"config": config.to_dict(), "session_profile": spec.session_profile,
-        "universe_max_age_seconds": settings["shadow_candidate_universe_max_age_seconds"]})
-    if event["run_id"] != monitor_id or config.strategy.family != "close_betting/v1":
-        raise RuntimeError("CLOSE_CURRENT_SHADOW_CHANGED")
     now = kst_now() if now_provider is None else now_provider()
-    expected, decision, plan = build_close_entry_evidence(spec, run_id=value["run_id"],
-        parameters=package.candidate_spec["parameters"], event=event, quote=proof["snapshot"]["quote"],
-        decided_at=datetime.fromisoformat(value["created_at"]), now=now)
+    if value["side"] == "BUY":
+        settings = _plan_document(cursor, p, "server_operational_settings", "global", "current")
+        if settings is None or settings.get("shadow_candidate_enabled") is not True:
+            raise RuntimeError("CLOSE_SHADOW_NOT_ENABLED")
+        config = MinuteShadowConfig.from_document(settings["shadow_candidate_config"])
+        monitor_id = _id("section12-minute-shadow", {"config": config.to_dict(), "session_profile": spec.session_profile,
+            "universe_max_age_seconds": settings["shadow_candidate_universe_max_age_seconds"]})
+        if event["run_id"] != monitor_id or config.strategy.family != "close_betting/v1":
+            raise RuntimeError("CLOSE_CURRENT_SHADOW_CHANGED")
+        expected, decision, plan = build_close_entry_evidence(spec, run_id=value["run_id"],
+            parameters=package.candidate_spec["parameters"], event=event, quote=proof["snapshot"]["quote"],
+            decided_at=datetime.fromisoformat(value["created_at"]), now=now)
+    else:
+        plan = OrderPlanRef(**value["plan"])
+        exit_proof = _plan_document(cursor, p, CLOSE_EXIT_COLLECTION, account, close_exit_key(plan))
+        head_doc = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, plan.plan_id)
+        root_id = mock_automation_intent_id(spec.spec_id, proof["decision"]["decision_id"])
+        root_row = _execution_intent_row(cursor, root_id, p)
+        if exit_proof is None or head_doc is None or root_row is None:
+            raise RuntimeError("CLOSE_EXIT_EVIDENCE_MISSING")
+        head = plan_position_from_document(head_doc, value["run_id"], value["symbol"], plan)
+        # Creating the intent reserves exactly one head revision. Submission
+        # rechecks that reservation, without treating it as a new position.
+        if head.plan.expected_revision != plan.expected_revision + int(submission_claim):
+            raise RuntimeError("CLOSE_EXIT_PLAN_REVISION_CHANGED")
+        if submission_claim:
+            queued = _execution_intent_row(cursor, value["intent_id"], p)
+            queued = _json_document(queued[0]) if queued else {}
+            if queued.get("plan") != value["plan"] or queued.get("state") != "QUEUED":
+                raise RuntimeError("CLOSE_EXIT_RESERVATION_CHANGED")
+        prepared = build_close_exit_evidence(spec, run_id=value["run_id"],
+            parameters=package.candidate_spec["parameters"], event=event, entry_evidence=proof,
+            root=_record_from_document(_json_document(root_row[0])), head=replace(head, plan=plan),
+            fill_events=[_json_document(item[0]) for item in _execution_event_rows(cursor, root_id, p)],
+            trigger_quote=exit_proof["snapshot"]["trigger_quote"], quote=exit_proof["snapshot"]["quote"],
+            decided_at=datetime.fromisoformat(value["created_at"]), now=now)
+        if prepared is None:
+            raise RuntimeError("CLOSE_EXIT_TRIGGER_MISSING")
+        expected, decision, plan = prepared
+        proof = exit_proof
     if (json.dumps(expected, sort_keys=True) != json.dumps(proof, sort_keys=True)
             or value["plan"] != asdict(plan) or value["decision_id"] != decision.decision_id
             or value["symbol"] != decision.symbol or value["quantity"] != decision.quantity
             or value["order_type"] != "LIMIT" or value["limit_price"] != decision.signal_reference_price):
-        raise RuntimeError("CLOSE_ENTRY_PROOF_OR_ORDER_CHANGED")
+        raise RuntimeError("CLOSE_ENTRY_PROOF_OR_ORDER_CHANGED" if value["side"] == "BUY"
+                           else "CLOSE_EXIT_PROOF_OR_ORDER_CHANGED")
 
 
 def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider):

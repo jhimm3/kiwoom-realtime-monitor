@@ -369,6 +369,21 @@ class PlannedLeaderPostgresTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CloseEntryPostgresTests(unittest.TestCase):
+    def test_close_native_protection_restores_fills_after_restart_with_shadow_disabled(self):
+        self._verify_exit(overnight=False)
+
+    def test_close_native_next_session_deadline_restores_original_plan_after_restart(self):
+        self._verify_exit(overnight=True)
+
+    def _verify_exit(self, *, overnight):
+        from tests.unit.test_mock_automation_specification import MockAutomationSpecificationTests
+
+        url = os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", "")
+        if not url:
+            raise unittest.SkipTest("dedicated diagnostic PostgreSQL URL is required")
+        scoped = self.enterContext(isolated_observation_schema(url))
+        MockAutomationSpecificationTests._verify_close_exit_claim(self, lambda: PostgresQueryStore(scoped), overnight=overnight)
+
     def test_close_entry_uses_native_shadow_quote_policy_and_one_plan(self):
         from tests.unit.test_mock_automation_specification import MockAutomationSpecificationTests
 

@@ -327,6 +327,8 @@ disabled tombstone만 남으므로 과거 App Key/Secret Key는 보존하지 않
 
 종가베팅 최초 진입의 불변 근거는 `central_documents`의 collection=`execution_close_entry_evidence`, owner=모의계좌 UUID, key=`close_plan_…`에 저장한다. 계획 키는 명세·실행 run·원래 Shadow 후보 ID로 결정한다. 문서의 `snapshot`은 계좌·명세·후보 package·Shadow snapshot과 0B 가격 참조를, `decision`은 실제 수량·지정가·시점을 보존한다. `proof_id`를 계획의 `policy_ref`로 결합한다. 기존 immutable writer가 같은 내용의 재요청과 다른 내용의 충돌을 구분하고, 실제 intent의 native 트랜잭션은 원래 후보·만료와 현재 Shadow 설정을 다시 대조한다. 일반 종가베팅 실행기 연결은 [현재 범위](docs/architecture/section12-development-roadmap-20261105.md#s12-close-native-entry)를 따른다.
 
+종가베팅 청산의 불변 근거는 같은 `central_documents`의 collection=`execution_close_exit_evidence`, owner=모의계좌 UUID에 둔다. key=`close_exit_slot_…`은 원래 계획 ID·정책 참조·청산 전 판본으로 결정한다. `snapshot`은 진입 근거와 intent, 상세 체결 해시·평균단가, 계획 잔량·마지막 체결 커서, 판단·주문 0B 가격과 청산 이유를 보존한다. native 주문 생성은 같은 트랜잭션에서 상세 체결과 수량을 재검증하고 계획 판본을 1회 예약한다. 제출은 그 예약을 재검증한다. 재시작 후 원래 정책으로 관리하며 새 진입용 Shadow 설정의 변경은 보유를 재분류하지 않는다. 같은 청산의 재요청은 이미 수락한 주문과 최초 영수증을 반환한다. 기존 원본·순서·체결별 수락 커서는 유지한다. [구현과 수락 범위](docs/architecture/section12-development-roadmap-20261105.md#s12-close-native-exit).
+
 R6b3a 시세 역할은 기존 central_documents의 collection=`server_market_profile_settings`,
 owner=`global`, key=`settings`에 저장한다. 필드는 market_profile_id,
 불변 legacy_real_profile_id=`nas-real-default`, 양의 정수 revision 세 개뿐이다.

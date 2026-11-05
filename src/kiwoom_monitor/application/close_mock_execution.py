@@ -2,23 +2,27 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import asdict
+from datetime import datetime, timedelta
 import json
 
 from .breakout_strategy import StrategyState
-from .close_and_ipo import matches_close_shadow
+from .close_and_ipo import CloseIpoSetup, ClosePolicy, matches_close_shadow
+from .market_session_schedule import KST
 from .mock_automation_execution import (
     MockAutomationGateStatus,
     assess_mock_automation_decision_from_risk,
     dispatch_mock_automation_decision_from_risk,
 )
 from .mock_automation_session_clock import content_id
+from .mock_automation_risk import mock_owned_buy_basis
 from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE
-from kiwoom_monitor.domain.order_contract import OrderPlanRef
+from kiwoom_monitor.domain.order_contract import OrderPlanRef, OrderSide, TERMINAL_ORDER_STATES
 from kiwoom_monitor.domain.strategy_contract import StrategyDecision
 
 
 CLOSE_ENTRY_COLLECTION = "execution_close_entry_evidence"
+CLOSE_EXIT_COLLECTION = "execution_close_exit_evidence"
 CLOSE_ORDER_POLICY_VERSION = "close_execution_adapter/v1"
 
 
@@ -26,13 +30,7 @@ def close_entry_plan_id(spec_id: str, run_id: str, event_id: str) -> str:
     return content_id("close_plan", {"spec_id": spec_id, "run_id": run_id, "event_id": event_id})
 
 
-def build_close_entry_evidence(spec, *, run_id, parameters, event, quote, decided_at, now):
-    """Freeze a sized Decision. Native claim independently repeats this pure check."""
-    terms = spec.close_execution_policy
-    if spec.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE or terms is None:
-        raise ValueError("CLOSE native execution terms are missing")
-    if not matches_close_shadow(parameters, event):
-        raise ValueError("CLOSE entry does not match its stored Shadow setup")
+def _close_quote(spec, quote, decided_at, now):
     at = quote.get("available_at")
     if isinstance(at, str):
         at = datetime.fromisoformat(at)
@@ -45,7 +43,20 @@ def build_close_entry_evidence(spec, *, run_id, parameters, event, quote, decide
             or not 0 <= (now - at).total_seconds() <= gap
             or not 0 <= (now - decided_at).total_seconds() <= gap
             or at > decided_at):
-        raise ValueError("CLOSE entry requires a fresh acknowledged 0B quote")
+        raise ValueError("CLOSE execution requires a fresh acknowledged 0B quote")
+    return {"price_won": quote["price_won"], "available_at": at.isoformat(),
+            "input_ref": quote["input_ref"], "durable": False, "market_status": "TRADABLE"}
+
+
+def build_close_entry_evidence(spec, *, run_id, parameters, event, quote, decided_at, now):
+    """Freeze a sized Decision. Native claim independently repeats this pure check."""
+    terms = spec.close_execution_policy
+    if spec.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE or terms is None:
+        raise ValueError("CLOSE native execution terms are missing")
+    if not matches_close_shadow(parameters, event):
+        raise ValueError("CLOSE entry does not match its stored Shadow setup")
+    frozen_quote = _close_quote(spec, quote, decided_at, now)
+    gap = spec.maximum_data_gap_seconds
     available = datetime.fromisoformat(event["available_at"])
     expiry = datetime.fromisoformat(event["expires_at"])
     deadline = datetime.fromisoformat(event["close_ipo_entry_setup"]["entry_deadline"])
@@ -56,8 +67,6 @@ def build_close_entry_evidence(spec, *, run_id, parameters, event, quote, decide
     if (type(signal_price) is not int or signal_price <= 0
             or quote["price_won"] * 10_000 > signal_price * (10_000 + terms.maximum_adverse_slippage_bps)):
         raise ValueError("CLOSE entry quote exceeds the approved signal slippage bound")
-    frozen_quote = {"price_won": quote["price_won"], "available_at": at.isoformat(),
-                    "input_ref": quote["input_ref"], "durable": False, "market_status": "TRADABLE"}
     snapshot = {"version": "close_entry_snapshot/v1", "spec_id": spec.spec_id,
                 "candidate_package_hash": spec.candidate_package_hash, "account_ref": spec.account_scope.account_ref,
                 "execution_run_id": run_id, "candidate_event_id": event["event_id"],
@@ -104,4 +113,114 @@ def dispatch_close_entry(repository, runtime, spec, *, parameters, event, quote,
         if gate.status is MockAutomationGateStatus.BLOCKED:
             return gate, None, None
     repository.save_close_entry_evidence(runtime.account_ref, plan_id, evidence)
+    return dispatch_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)
+
+
+def close_exit_key(plan: OrderPlanRef) -> str:
+    return content_id("close_exit_slot", asdict(plan))
+
+
+def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence, root, head, fill_events,
+                              trigger_quote, quote, decided_at, now):
+    """Manage only the original plan's detailed fills, independently of new-entry settings."""
+    entered_at = datetime.fromisoformat(entry_evidence["decision"]["decided_at"])
+    expected_entry, entry_decision, original_plan = build_close_entry_evidence(spec, run_id=run_id,
+        parameters=parameters, event=event, quote=entry_evidence["snapshot"]["quote"], decided_at=entered_at, now=entered_at)
+    from .mock_automation_execution import mock_automation_intent_id
+
+    if (entry_evidence != expected_entry or root is None or root.state not in TERMINAL_ORDER_STATES
+            or (root.intent.intent_id, root.intent.run_id, root.intent.account_ref, root.intent.environment,
+                root.intent.side, root.intent.symbol, root.intent.policy_version, getattr(root.intent, "plan", None))
+            != (mock_automation_intent_id(spec.spec_id, entry_decision.decision_id), run_id,
+                spec.account_scope.account_ref, "mock", OrderSide.BUY, event["symbol"], CLOSE_ORDER_POLICY_VERSION, original_plan)
+            or (head.plan.plan_id, head.plan.policy_ref) != (original_plan.plan_id, original_plan.policy_ref)
+            or head.symbol != event["symbol"] or head.quantity <= 0 or head.unreconciled_sell_quantity):
+        raise ValueError("CLOSE exit requires the original terminal entry and confirmed plan quantity")
+    fills = [row for row in fill_events if row["event_type"] == "FILL"]
+    quantity = basis = 0
+    for fill in fills:
+        if (not fill.get("broker_execution_id") or type(fill["quantity"]) is not int or fill["quantity"] <= 0
+                or type(fill["price"]) is not int or fill["price"] <= 0):
+            raise ValueError("CLOSE entry detailed fill basis is invalid")
+        basis = mock_owned_buy_basis(quantity, basis, fill["quantity"], fill["price"])
+        quantity += fill["quantity"]
+    if (quantity != root.detailed_filled_quantity or quantity < head.quantity
+            or len(fills) != len(root.fill_ids)
+            or {row["broker_execution_id"] for row in fills} != set(root.fill_ids)):
+        raise ValueError("CLOSE entry detailed fill basis is incomplete")
+    trigger = _close_quote(spec, trigger_quote, decided_at, now)
+    execution_quote = _close_quote(spec, quote, decided_at, now)
+    if (datetime.fromisoformat(trigger["available_at"]) > datetime.fromisoformat(execution_quote["available_at"])
+            or execution_quote["price_won"] * 10_000 < trigger["price_won"] * (
+                10_000 - spec.close_execution_policy.protective_slippage_bps)):
+        raise ValueError("CLOSE exit quote exceeds the approved protective slippage bound")
+    setup = CloseIpoSetup.from_document(event["close_ipo_entry_setup"])
+    if not isinstance(setup.policy, ClosePolicy) or setup.policy.variant != "CLOSE":
+        raise ValueError("CLOSE exit requires the original ordinary CLOSE policy")
+    local = decided_at.astimezone(KST)
+    if trigger["price_won"] * 10_000 <= basis * (10_000 - setup.policy.protection_loss_bps):
+        reason = "filled_position_protection_0B"
+    elif local.date() > setup.next_date:
+        reason = "next_session_management_overdue_0B"
+    elif local.date() == setup.next_date and decided_at >= setup.next_open_at + timedelta(
+            minutes=setup.policy.exit_minutes_after_open):
+        reason = "next_session_exit_deadline_0B"
+    else:
+        return None
+    snapshot = {"version": "close_exit_snapshot/v1", "spec_id": spec.spec_id,
+        "candidate_package_hash": spec.candidate_package_hash, "account_ref": spec.account_scope.account_ref,
+        "execution_run_id": run_id, "entry_proof_id": entry_evidence["proof_id"], "plan": asdict(head.plan),
+        "entry_intent_id": root.intent.intent_id, "quantity": head.quantity, "fill_cursor": head.fill_cursor,
+        "entry_price_won": basis, "entry_fill_ref": content_id("close_fills", fills),
+        "trigger_quote": trigger, "quote": execution_quote, "reason": reason}
+    state = StrategyState(status="open", symbol=event["symbol"], entry_price=basis,
+        position_quantity=head.quantity, opened_at=fills[0]["occurred_at"]).to_dict()
+    body = {"run_id": run_id, "snapshot_id": content_id("snapshot", snapshot), "symbol": event["symbol"],
+        "proposal": "EXIT", "final_action": "EXIT", "quantity": head.quantity,
+        "signal_reference_price": execution_quote["price_won"], "required_capital_won": 0,
+        "reasons": (reason,), "constraints": (CLOSE_ORDER_POLICY_VERSION,), "state_before": state, "state_after": state,
+        "decided_at": decided_at.isoformat()}
+    decision = StrategyDecision(decision_id=content_id("decision", body), **body)
+    document = json.loads(json.dumps({"snapshot": snapshot, "decision": decision.to_dict()}, allow_nan=False))
+    return {**document, "proof_id": content_id("close_exit", document)}, decision, head.plan
+
+
+def dispatch_close_exit(repository, runtime, execution, spec, plan, *, parameters, event, trigger_quote, quote, recovery, risk):
+    """Restore frozen management from its native entry and use the existing SELL gate."""
+    from .mock_automation_execution import mock_automation_intent_id
+
+    saved = repository.load_close_exit_evidence(runtime.account_ref, close_exit_key(plan))
+    scope = {"account_ref": runtime.account_ref, "spec_id": spec.spec_id, "strategy_ref": spec.strategy_ref}
+    now = decided_at = runtime.server_now()
+    if saved is not None:
+        snapshot = saved["snapshot"]
+        if (saved["proof_id"] != content_id("close_exit", {key: value for key, value in saved.items() if key != "proof_id"})
+                or snapshot["plan"] != asdict(plan) or snapshot["spec_id"] != spec.spec_id
+                or snapshot["execution_run_id"] != runtime.run_id or snapshot["account_ref"] != runtime.account_ref):
+            raise ValueError("stored CLOSE exit evidence changed")
+        raw = {**saved["decision"], "reasons": tuple(saved["decision"]["reasons"]),
+               "constraints": tuple(saved["decision"]["constraints"])}
+        decision = StrategyDecision(**raw)
+        if runtime.load_intent(mock_automation_intent_id(spec.spec_id, decision.decision_id)) is not None:
+            return dispatch_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)
+        trigger_quote, quote = snapshot["trigger_quote"], snapshot["quote"]
+        decided_at = datetime.fromisoformat(decision.decided_at)
+    entry = repository.load_close_entry_evidence(runtime.account_ref, plan.plan_id)
+    if entry is None:
+        raise ValueError("CLOSE original entry evidence is missing")
+    root_id = mock_automation_intent_id(spec.spec_id, entry["decision"]["decision_id"])
+    root = execution.load(root_id)
+    head = execution.load_plan_position(runtime.account_ref, runtime.run_id, event["symbol"], plan)
+    if head.plan != plan:
+        raise ValueError("CLOSE plan revision changed before management")
+    prepared = build_close_exit_evidence(spec, run_id=runtime.run_id, parameters=parameters, event=event,
+        entry_evidence=entry, root=root, head=head, fill_events=execution.events(root_id),
+        trigger_quote=trigger_quote, quote=quote, decided_at=decided_at, now=now)
+    if prepared is None:
+        return None, None, None
+    evidence, decision, plan = prepared
+    gate = assess_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)
+    if gate.status is MockAutomationGateStatus.BLOCKED:
+        return gate, None, None
+    repository.save_close_exit_evidence(runtime.account_ref, close_exit_key(plan), evidence)
     return dispatch_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)

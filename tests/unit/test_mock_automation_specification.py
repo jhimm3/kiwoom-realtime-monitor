@@ -1359,16 +1359,124 @@ class MockAutomationSpecificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'expired'):
             build_close_entry_evidence(spec, run_id=run_id, parameters=parameters, event=event,
                 quote={**quote, 'available_at': expiry}, decided_at=expiry, now=expiry)
+        return SimpleNamespace(store=store, example=example, spec=spec, parameters=parameters, event=event,
+            repository=repository, runtime=runtime, execution=execution, clock=clock, quote=quote,
+            transport=transport, buy=buy, entry_proof=proof, settings=settings)
+
+    def test_close_native_protection_restores_fills_after_restart_with_shadow_disabled(self):
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-protection.sqlite3'
+        self._verify_close_exit_claim(lambda: SQLiteQueryStore(db), overnight=False)
+
+    def test_close_native_next_session_deadline_restores_original_plan_after_restart(self):
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-deadline.sqlite3'
+        self._verify_close_exit_claim(lambda: SQLiteQueryStore(db), overnight=True)
+
+    def _verify_close_exit_claim(self, store_factory, *, overnight):
+        from kiwoom_monitor.application.close_mock_execution import (
+            CLOSE_EXIT_COLLECTION, close_exit_key, dispatch_close_exit,
+        )
+
+        store = store_factory()
+        self.addCleanup(store.close)
+        store.initialize()
+        context = MockAutomationSpecificationTests._verify_close_entry_claim(self, store)
+        clock, buy = context.clock, context.buy
+        fills = (BrokerFill('close-entry-one', 2, 104, buy.intent.created_at + timedelta(seconds=1)),
+                 BrokerFill('close-entry-two', 1, 102, buy.intent.created_at + timedelta(seconds=2)))
+        context.runtime.reconcile(buy.intent.intent_id, BrokerOrderSnapshot(
+            buy.broker_order_id, ACCOUNT_REF, buy.intent.symbol, OrderState.PARTIALLY_FILLED, 3, 1, clock[0], fills))
+        with patch.object(context.transport, 'cancel', return_value=BrokerSubmission(buy.broker_order_id, clock[0])):
+            self.assertEqual(OrderState.CANCEL_PENDING, context.runtime.cancel(buy.intent.intent_id).state)
+        clock[0] += timedelta(seconds=1)
+        terminal = context.runtime.reconcile(buy.intent.intent_id, BrokerOrderSnapshot(
+            buy.broker_order_id, ACCOUNT_REF, buy.intent.symbol, OrderState.CANCELLED, 3, 0, clock[0], fills))
+        self.assertEqual(OrderState.CANCELLED, terminal.state)
+        self.assertTrue(context.runtime.stop())
+        store.close()
+        if overnight:
+            clock[0] = context.example.following.starts_at + timedelta(minutes=8)
+        reopened = store_factory()
+        self.addCleanup(reopened.close)
+        reopened.initialize()
+        self.enterContext(patch.object(reopened, '_execution_wall_now', lambda: clock[0], create=True))
+        repository = ForwardEvaluationRepository(reopened)
+        execution = ExecutionRepository(reopened)
+        runtime = ExecutionRuntime(OrderLifecycle(execution, context.transport, now_provider=lambda: clock[0]), execution,
+            account_ref=ACCOUNT_REF, run_id=context.runtime.run_id, owner_token='close-management-restarted',
+            now_provider=lambda: clock[0])
+        self.addCleanup(runtime.stop)
+        runtime.start(new_orders_enabled=False)
+        head = execution.load_plan_position(ACCOUNT_REF, runtime.run_id, buy.intent.symbol, buy.intent.plan)
+        self.assertEqual(3, head.quantity)
+        self.assertEqual(context.entry_proof, repository.load_close_entry_evidence(ACCOUNT_REF, head.plan.plan_id))
+        reopened.upsert_documents('server_operational_settings', [{'owner': 'global', 'key': 'current',
+            'document': {**context.settings, 'shadow_candidate_enabled': False, 'shadow_candidate_config': {}}}])
+        account = AccountSnapshot(ACCOUNT_REF, 100_000, 0, {buy.intent.symbol: 3}, clock[0])
+        recovery = MockAccountRecovery(account, ())
+        risk = build_mock_automation_risk_snapshot(recovery, execution.account_events('mock', ACCOUNT_REF).events,
+            (), (), execution_run_id=runtime.run_id, binding_revision=context.spec.binding_revision,
+            reconciliation_revision=2, observed_at=clock[0], broker_query_started_at=clock[0],
+            broker_query_completed_at=clock[0])
+        self.assertTrue(risk.reconciliation_complete)
+        repository.save_mock_automation_risk_snapshot(risk)
+        record_mock_automation_recovery_from_risk(repository, runtime, recovery, risk,
+            account_ref=ACCOUNT_REF, spec_id=context.spec.spec_id)
+        quote = {**context.quote, 'price_won': 100, 'available_at': clock[0]}
+        call = dict(parameters=context.parameters, event=context.event, trigger_quote=quote, quote=quote,
+                    recovery=recovery, risk=risk)
+        if not overnight:
+            self.assertEqual((None, None, None), dispatch_close_exit(repository, runtime, execution,
+                context.spec, head.plan, **call))
+            self.assertIsNone(repository.load_close_exit_evidence(ACCOUNT_REF, close_exit_key(head.plan)))
+        trigger, price = (100, 99) if overnight else (94, 93)
+        call.update(trigger_quote={**quote, 'price_won': trigger}, quote={**quote, 'price_won': price})
+        with self.assertRaisesRegex(ValueError, 'protective slippage'):
+            dispatch_close_exit(repository, runtime, execution, context.spec, head.plan,
+                **{**call, 'quote': {**quote, 'price_won': 90}})
+        submit = runtime.submit_automation_intent
+        changed = []
+
+        def mutate_after_gate(intent, account, **kwargs):
+            key = close_exit_key(intent.plan)
+            original = repository.load_close_exit_evidence(ACCOUNT_REF, key)
+            changed.append(original)
+            invalid = deepcopy(original)
+            invalid['snapshot']['entry_price_won'] = 999
+            reopened.upsert_documents(CLOSE_EXIT_COLLECTION, [{'owner': ACCOUNT_REF, 'key': key, 'document': invalid}])
+            return submit(intent, account, **kwargs)
+
+        with patch.object(runtime, 'submit_automation_intent', side_effect=mutate_after_gate):
+            with self.assertRaisesRegex(RuntimeError, 'CLOSE_EXIT_PROOF_OR_ORDER_CHANGED'):
+                dispatch_close_exit(repository, runtime, execution, context.spec, head.plan, **call)
+        reopened.upsert_documents(CLOSE_EXIT_COLLECTION,
+            [{'owner': ACCOUNT_REF, 'key': close_exit_key(head.plan), 'document': changed[0]}])
+        self.assertEqual(head, execution.load_plan_position(ACCOUNT_REF, runtime.run_id, buy.intent.symbol, head.plan))
+        self.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
+        gate, sell, receipt = dispatch_close_exit(repository, runtime, execution, context.spec, head.plan, **call)
+        self.assertEqual((MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION, OrderState.ACCEPTED, 3, price, head.plan),
+            (gate.status, sell.state, sell.intent.quantity, sell.intent.limit_price, sell.intent.plan))
+        evidence = repository.load_close_exit_evidence(ACCOUNT_REF, close_exit_key(head.plan))
+        reason = 'next_session_exit_deadline_0B' if overnight else 'filled_position_protection_0B'
+        self.assertEqual((103, 3, reason), (evidence['snapshot']['entry_price_won'],
+            evidence['snapshot']['quantity'], evidence['snapshot']['reason']))
+        runtime.reconcile(sell.intent.intent_id, BrokerOrderSnapshot(sell.broker_order_id, ACCOUNT_REF,
+            buy.intent.symbol, OrderState.FILLED, 3, 0, clock[0], (BrokerFill('close-exit-one', 3, price, clock[0]),)))
+        self.assertEqual(0, execution.load_plan_position(ACCOUNT_REF, runtime.run_id, buy.intent.symbol, head.plan).quantity)
+        repeated = dispatch_close_exit(repository, runtime, execution, context.spec, head.plan,
+            **{**call, 'quote': {**quote, 'price_won': price + 1}})
+        self.assertEqual((sell.intent, receipt), (repeated[1].intent, repeated[2]))
+        self.assertEqual(['BUY', 'SELL'], [row[1] for row in context.transport.calls])
+        self.assertEqual(((), True), runtime.load_account_active_intents())
 
     def test_section12_close_overnight_reopens_native_plan_and_exits_only_detailed_fills(self):
         db = Path(self.enterContext(tempfile.TemporaryDirectory())) / "close-overnight.sqlite3"
         self._verify_native_close_overnight(lambda now: SQLiteQueryStore(db, now_provider=now))
 
     def _verify_native_close_overnight(self, store_factory):
-        from datetime import date, time
+        from datetime import time
         from kiwoom_monitor.application.breakout_strategy import StrategyState
-        from kiwoom_monitor.application.close_and_ipo import CloseIpoPosition, CloseIpoSetup, ClosePolicy
-        from kiwoom_monitor.application.market_session_schedule import KST, MarketPhase, MarketSession, SessionSupport, SessionWindow
+        from kiwoom_monitor.application.close_and_ipo import CloseIpoPosition, CloseIpoSetup
+        from kiwoom_monitor.application.market_session_schedule import KST
         from kiwoom_monitor.application.section12_minute_research import CLOSE_FAMILY, build_minute_evaluation
         from tests.unit.test_close_and_ipo import CloseAndIpoTests
 
@@ -1457,21 +1565,7 @@ class MockAutomationSpecificationTests(unittest.TestCase):
         saved_setup = stored["close_ipo_entry_setup"]
         self.assertEqual((candidate["snapshot_id"], setup), (stored["snapshot_id"], saved_setup))
         self.assertEqual(plan.policy_ref, "close-fixture/" + _hash(saved_setup))
-        auction = saved_setup["close_auction"]
-        restored_setup = CloseIpoSetup(
-            ClosePolicy(**saved_setup["policy"]), saved_setup["symbol"], date.fromisoformat(saved_setup["entry_date"]),
-            datetime.fromisoformat(saved_setup["entry_deadline"]), saved_setup["entry_calendar_ref"],
-            tuple(saved_setup["entry_bar_refs"]), saved_setup["listing_phase"], tuple(saved_setup["listing_refs"]),
-            saved_setup["breakout_level"],
-            SessionWindow(
-                auction["venue"], date.fromisoformat(auction["trading_date"]), MarketSession(auction["session"]),
-                MarketPhase(auction["phase"]), datetime.fromisoformat(auction["starts_at"]),
-                datetime.fromisoformat(auction["ends_at"]), auction["schedule_version"], SessionSupport(auction["support"]),
-                auction["reason"],
-            ),
-            date.fromisoformat(saved_setup["next_date"]), datetime.fromisoformat(saved_setup["next_open_at"]),
-            saved_setup["next_calendar_ref"],
-        )
+        restored_setup = CloseIpoSetup.from_document(saved_setup)
         self.assertEqual(entry.setup, restored_setup)
         self.assertEqual(first_head.quantity, ledger.load_plan_position(
             ACCOUNT_REF, fixture.run_id, example.symbol, plan,

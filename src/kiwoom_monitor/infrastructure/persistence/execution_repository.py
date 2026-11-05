@@ -249,15 +249,7 @@ class ExecutionRepository:
         reader_args = {} if _reader is None else {"_reader": _reader}
         row = self._store.load_document("execution_mock_plan_positions", account_ref, plan.plan_id, **reader_args)
         value = row["document"] if row else {}
-        if ((value.get("version"), value.get("plan_id"), value.get("policy_ref"), value.get("run_id"), value.get("symbol"))
-                != ("mock_plan_position/v1", plan.plan_id, plan.policy_ref, run_id, symbol)
-                or type(value.get("revision")) is not int or value["revision"] < plan.expected_revision):
-            raise ValueError("execution plan position scope changed")
-        quantity, cursor, unassigned = value.get("quantity"), value.get("fill_cursor"), value.get("unreconciled_sell_quantity", 0)
-        if any(type(item) is not int or item < 0 for item in (quantity, cursor, unassigned)):
-            raise ValueError("invalid execution plan position")
-        return ExecutionPlanPosition(OrderPlanRef(plan.plan_id, plan.policy_ref, value["revision"]),
-                                     symbol, quantity, cursor, unassigned)
+        return plan_position_from_document(value, run_id, symbol, plan)
 
     def load_protective_execution(self, intent_id, *, _reader=None):
         reader_args = {} if _reader is None else {"_reader": _reader}
@@ -386,6 +378,19 @@ class ExecutionRepository:
         owner_key = f"{environment}:{account_ref}"
         with observer.account.source_execution_owner(owner_key, run_id) if observer is not None else nullcontext():
             return self._store.release_execution_runtime(owner_key, f"{run_id}:{owner_token}")
+
+
+def plan_position_from_document(value, run_id, symbol, plan: OrderPlanRef) -> ExecutionPlanPosition:
+    """Decode the same native plan head for public reads and transactional claims."""
+    if ((value.get("version"), value.get("plan_id"), value.get("policy_ref"), value.get("run_id"), value.get("symbol"))
+            != ("mock_plan_position/v1", plan.plan_id, plan.policy_ref, run_id, symbol)
+            or type(value.get("revision")) is not int or value["revision"] < plan.expected_revision):
+        raise ValueError("execution plan position scope changed")
+    quantity, cursor, unassigned = value.get("quantity"), value.get("fill_cursor"), value.get("unreconciled_sell_quantity", 0)
+    if any(type(item) is not int or item < 0 for item in (quantity, cursor, unassigned)):
+        raise ValueError("invalid execution plan position")
+    return ExecutionPlanPosition(OrderPlanRef(plan.plan_id, plan.policy_ref, value["revision"]),
+                                 symbol, quantity, cursor, unassigned)
 
 
 def _record_document(record: ExecutionRecord) -> dict[str, Any]:

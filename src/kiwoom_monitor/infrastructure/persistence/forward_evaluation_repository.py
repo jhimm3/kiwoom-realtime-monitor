@@ -168,6 +168,20 @@ class ForwardEvaluationRepository:
             raise ValueError("CLOSE entry evidence does not match its account and plan")
         return self._save_immutable(CLOSE_ENTRY_COLLECTION, account_ref, plan_id, dict(value))
 
+    def load_close_exit_evidence(self, account_ref: str, key: str) -> Mapping[str, Any] | None:
+        from kiwoom_monitor.application.close_mock_execution import CLOSE_EXIT_COLLECTION
+
+        return self._find(CLOSE_EXIT_COLLECTION, account_ref, key)
+
+    def save_close_exit_evidence(self, account_ref: str, key: str, value: Mapping[str, Any]) -> bool:
+        from kiwoom_monitor.application.close_mock_execution import CLOSE_EXIT_COLLECTION, close_exit_key
+        from kiwoom_monitor.domain.order_contract import OrderPlanRef
+
+        if (value["snapshot"]["account_ref"] != account_ref
+                or close_exit_key(OrderPlanRef(**value["snapshot"]["plan"])) != key):
+            raise ValueError("CLOSE exit evidence does not match its account and plan revision")
+        return self._save_immutable(CLOSE_EXIT_COLLECTION, account_ref, key, dict(value))
+
     def load_profile(self, strategy_ref: str, profile_id: str, *, _reader: Any = None) -> ForwardEvaluationSpec | None:
         document = self._find(self.PROFILE_COLLECTION, strategy_ref, profile_id, _reader=_reader)
         return forward_spec_from_dict(document) if document else None
