@@ -13,7 +13,7 @@ import time
 import unittest
 import uuid
 from contextlib import closing, contextmanager, ExitStack
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.error import HTTPError
@@ -2690,6 +2690,16 @@ class CentralServerAppTests(unittest.TestCase):
                 kinds = writer["common_db_observed_kinds"]
                 position = kinds.index(insertion["after"]) + 1
                 kinds[position:position] = insertion["values"]
+                # S12-03 keeps plan approval/reservation and FILL attribution in the
+                # existing native transactions. No other writer descriptor changes.
+                intent_writer = next(row for row in writers if row["writer_id"] == "execution.intent")
+                intent_writer["tables"].extend(["central_execution_events", "central_documents"])
+                intent_writer["measurement"] = "one native transaction; lease check and idempotent insert with optional plan reservation"
+                event_writer = next(row for row in writers if row["writer_id"] == "execution.event")
+                event_writer["tables"].append("central_documents")
+                event_writer["measurement"] = (
+                    "one native transaction for event insert, intent update and optional plan projection; one logical event attempted"
+                )
                 case["headers"]["content-length"] = str(len(json.dumps(
                     body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")))
         actual = []
@@ -2823,6 +2833,12 @@ class CentralServerAppTests(unittest.TestCase):
     def test_research_read_http_and_fixed_dataset_match_pre_extraction_baseline(self) -> None:
         baseline = Path(__file__).resolve().parents[2] / "tests/fixtures/api_contract_baselines/research_reads_http_v1.json"
         expected = json.loads(baseline.read_text(encoding="utf-8"))["result"]
+        # The same 400 boundary now lists the S12 daily research observation kind.
+        for case in expected["cases"]:
+            if case["name"] in {"unknown-kind", "empty-kinds"}:
+                case["body"]["detail"] = "research export kinds must be ranking, top20_membership, minute_bar, or daily_bar"
+                case["headers"]["content-length"] = str(len(json.dumps(
+                    case["body"], ensure_ascii=False, separators=(",", ":")).encode("utf-8")))
         # Receipt representation changes to KST; source instants and export IDs stay frozen.
         observation_lists = [case["body"].get("observations", []) for case in expected["cases"]
                              if isinstance(case["body"], dict)]
@@ -4234,6 +4250,120 @@ class CentralServerAppTests(unittest.TestCase):
             self.assertEqual(200, disabled.status_code)
             self.assertFalse(disabled.json()["shadow_candidate_enabled"])
             self.assertEqual("DISABLED", inactive.json()["quality"]["status"])
+
+    def test_section12_minute_shadow_uses_native_closes_and_restores_selected_policy(self) -> None:
+        from kiwoom_monitor.application.section12_minute_research import MINUTE_SHADOW_VERSION
+        from kiwoom_monitor.central_server.market_observations import bar_observation_key, minute_bar_observation
+        from kiwoom_monitor.domain.market_data_contract import DataValueKind, ObservationOrigin
+
+        for variant in ("B0", "B1"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "monitor.sqlite3"
+                settings = CentralServerSettings(f"sqlite:///{path}", "private-token")
+                headers = {"Authorization": "Bearer private-token"}
+                settings_url, candidates_url = "/api/v1/settings/operations", "/api/v1/research/candidates"
+                start = datetime(2026, 9, 14, 9, 0, tzinfo=KST)
+                clock = [start + timedelta(minutes=12, seconds=3)]
+
+                class FixedClock(datetime):
+                    @classmethod
+                    def now(cls, tz=None):
+                        return clock[0].astimezone(tz)
+
+                strategy = {"capital_won": 100_000, "policy": {
+                    "variant": variant, "quantity": 1, "exit_at_kst": "10:00",
+                    "theme_id": None, "theme_role": None, "exit_on_dependency_loss": False,
+                }}
+                if variant == "B1":
+                    strategy["policy"]["entry_filters"] = {
+                        "minimum_price_progress_bps": 100, "minimum_symbol_relative_turnover_bps": 20_000,
+                    }
+                config = {"version": MINUTE_SHADOW_VERSION, "strategy": strategy, "signal_valid_seconds": 30}
+
+                def save_bar(store, minute, price, turnover, *, native=True):
+                    bar_start = start + timedelta(minutes=minute)
+                    bar_end = bar_start + timedelta(minutes=1)
+                    value = {
+                        "trading_date": start.date().isoformat(), "minute": bar_start.strftime("%H:%M"),
+                        "code": "005930", "market": "KRX", "open": price, "high": price,
+                        "low": price, "close": price, "volume": 100, "trade_value_million_won": turnover,
+                        "updated_at": (bar_end + timedelta(seconds=2)).timestamp(), "operation_id": f"delta-{minute}",
+                    }
+                    obs = minute_bar_observation(
+                        value, origin=ObservationOrigin.REALTIME if native else ObservationOrigin.QUERY,
+                        completeness=DataCompleteness.IN_PROGRESS if native else DataCompleteness.COMPLETE,
+                        source="kiwoom-websocket-0B" if native else "completed-history-fixture",
+                        value_kind=DataValueKind.ACTUAL,
+                    )
+                    rows = [(bar_observation_key(obs), obs)]
+                    if native:
+                        store.save_minute_bars([value], observations=rows)
+                        store.finalize_minute_bars([{
+                            **{key: value[key] for key in ("trading_date", "minute", "code", "market")},
+                            "available_at": value["updated_at"], "capture_quality": "complete",
+                            "finalization_source": "timer", "operation_id": f"close-{minute}",
+                        }])
+                    else:
+                        store.replace_minute_bars([value], observations=rows)
+
+                with patch("kiwoom_monitor.central_server.app.datetime", FixedClock):
+                    with TestClient(create_app(settings)) as client:
+                        invalid = client.put(settings_url, headers=headers, json={
+                            "shadow_candidate_enabled": False,
+                            "shadow_candidate_config": {**config, "signal_valid_seconds": 0},
+                        })
+                        self.assertEqual(422, invalid.status_code)
+                        store = SQLiteQueryStore(path)
+                        for minute in range(11):
+                            save_bar(store, minute, 1000, 10, native=False)
+                        rank_at = start + timedelta(minutes=11, seconds=3)
+                        rank_payload = {"codes": ["005930"]}
+                        store.save_dataset_snapshot(
+                            "top20_membership", start.date().isoformat(), rank_at.isoformat(), rank_payload,
+                            observation=ranking_observation(start.date().isoformat(), rank_at.isoformat(),
+                                                            rank_payload, rank_at, source="top20-fixture"),
+                        )
+                        enabled = client.put(settings_url, headers=headers, json={
+                            "shadow_candidate_enabled": True, "shadow_candidate_config": config,
+                            "shadow_candidate_universe_max_age_seconds": 120,
+                        })
+                        self.assertEqual(200, enabled.status_code, enabled.text)
+                        monitor = client.app.state.candidate_monitor
+                        monitor.run_once()
+                        self.assertEqual([], client.get(candidates_url, headers=headers).json()["events"])
+                        save_bar(store, 11, 1000, 10, native=False)
+                        monitor.run_once()
+                        after_query = client.get(candidates_url, headers=headers).json()
+                        self.assertEqual([], after_query["events"])
+                        self.assertNotIn("last_decision_at", after_query["quality"])
+                        clock[0] = start + timedelta(minutes=13, seconds=3)
+                        save_bar(store, 12, 1100, 25)
+                        monitor.run_once()
+                        page = client.get(candidates_url, headers=headers).json()
+                        self.assertEqual(1, len(page["events"]), page["quality"])
+                        [event] = page["events"]
+                        self.assertEqual(("ACTIVE", "breakout_study", variant, 1100),
+                                         tuple(event[key] for key in ("status", "strategy_id", "strategy_variant", "signal_reference_price")))
+                        self.assertEqual(start + timedelta(minutes=13, seconds=30),
+                                         datetime.fromisoformat(event["expires_at"]))
+                        self.assertEqual(variant, page["quality"]["strategy_variant"])
+                        run_id = monitor.monitor_id
+                    with TestClient(create_app(settings)) as client:
+                        restored = client.app.state.candidate_monitor
+                        restored.run_once()
+                        restored.run_once()
+                        self.assertEqual(run_id, restored.monitor_id)
+                        [again] = client.get(candidates_url, headers=headers).json()["events"]
+                        self.assertEqual(event, again)
+                        self.assertEqual(config, client.get(settings_url, headers=headers).json()["shadow_candidate_config"])
+                        disabled = client.put(settings_url, headers=headers, json={"shadow_candidate_enabled": False})
+                        self.assertEqual(200, disabled.status_code, disabled.text)
+                        [inactive] = client.get(candidates_url, headers=headers).json()["events"]
+                        self.assertEqual("SUPERSEDED", inactive["status"])
+                        clock[0] = start + timedelta(minutes=13, seconds=30)
+                        [expired] = client.get(candidates_url, headers=headers).json()["events"]
+                        self.assertEqual("EXPIRED", expired["status"])
+                    store.close()
 
     def test_health_separates_ready_connection_from_failed_save_and_uses_current_monitor(self) -> None:
         import httpx

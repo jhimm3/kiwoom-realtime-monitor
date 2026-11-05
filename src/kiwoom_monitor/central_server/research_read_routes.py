@@ -11,6 +11,7 @@ from typing import Any, Protocol, TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from .async_lifetime import await_native_call
+from kiwoom_monitor.domain.strategy_contract import MINUTE_SHADOW_VERSION
 from kiwoom_monitor.domain.research_contract import (
     ReportedResearchResult, ResearchResultConflict,
     REPORTED_RESEARCH_RESULT_COLLECTION, MAX_REPORTED_RESEARCH_RESULT_BYTES,
@@ -174,6 +175,8 @@ def create_research_read_router(
             try:
                 expires_at = datetime.fromisoformat(str(event.get("expires_at", "")))
                 expired = expires_at.astimezone(timezone.utc) < now
+                if event.get("shadow_scope") == MINUTE_SHADOW_VERSION:
+                    expired = expires_at <= now
             except ValueError:
                 expired = True
             event["status"] = "EXPIRED" if expired else "ACTIVE"
@@ -181,6 +184,13 @@ def create_research_read_router(
         projector = getattr(candidate_monitor, "project_leader_candidate_status", None)
         for event in page["events"]:
             if event["status"] == "ACTIVE":
+                if event.get("shadow_scope") == MINUTE_SHADOW_VERSION:
+                    if datetime.fromisoformat(event["available_at"]) > now:
+                        event["status"] = "WARMUP"
+                        continue
+                    event["status"] = (candidate_monitor.project_minute_candidate_status(event)
+                                       if candidate_monitor is not None else "SUPERSEDED")
+                    continue
                 projected = projector(event) if callable(projector) else None
                 if projected is not None:
                     event["status"] = projected

@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import json
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta
+from pathlib import Path
 
-from kiwoom_monitor.application.micro_execution_evidence import replay_micro_execution
+from kiwoom_monitor.application.micro_execution_evidence import assess_micro_shadow_inputs, replay_micro_execution
+from kiwoom_monitor.central_server.database import SQLiteQueryStore
+from kiwoom_monitor.central_server.market_events import MarketEventService
+from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
+from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import parse_vi_events
 
 
 _START = datetime.fromisoformat("2026-09-11T09:10:00+09:00")
@@ -215,3 +222,79 @@ class MicroExecutionEvidenceTests(unittest.TestCase):
             replay_micro_execution(_scenario(list(reversed(events))), _policy())
         with self.assertRaisesRegex(ValueError, "offset-bearing"):
             replay_micro_execution(_scenario([events[0] | {"observed_at": "2026-09-11T09:10:00"}]), _policy())
+
+
+class MicroNativeShadowInputTests(unittest.TestCase):
+    def test_actual_collector_and_native_vi_store_expose_observations_without_a_candidate(self):
+        now = [_START]
+
+        def forbidden_token():
+            raise AssertionError("MICRO input assessment must not request broker access")
+
+        collector = CentralRealtimeCollector(forbidden_token, "mock", RealtimeHub(), lambda: now[0])
+        collector._apply_trade_source_approval({("005930", "KRX"), ("005930", "NXT")}, _START, reset_all=False)
+        retention_owner = object()
+        collector.set_ram_observation_retention(10, owner=retention_owner)
+        now[0] += timedelta(seconds=5)
+        collector._publish_parsed({"trnm": "REAL", "data": [
+            {"type": "0B", "item": "005930", "values": {"10": "104", "15": "2", "20": "091003"}},
+            {"type": "0B", "item": "005930_NX", "values": {"10": "106", "15": "1", "20": "091004"}},
+        ]})
+        snapshot = collector.ram_observation_snapshot(("005930",), seconds=10)
+        cut = now[0]
+
+        with closing(SQLiteQueryStore(Path(":memory:"))) as store:
+            store.initialize()
+            vi = MarketEventService(None, store, now_provider=lambda: now[0])
+            base = {"9001": "A005930", "9068": "1", "1225": "1", "1221": "+100",
+                    "1223": "091000", "1224": "091002", "1490": "1", "9081": "KRX"}
+
+            def receipt(values):
+                event, = parse_vi_events({"trnm": "REAL", "data": [{"type": "1h", "values": values}]})
+                return vi._vi_value(event)
+
+            activation = receipt(base)
+            release = receipt(base | {"9068": "2"})
+            other_venue = receipt(base | {"9068": "2", "9081": "NXT"})
+            unknown_venue = receipt(base | {"9068": "2", "9081": ""})
+            rest = vi._backfill_vi_value({"stk_cd": "A005930", "motn_tp": "2", "motn_tm": "091002",
+                                          "motn_pric": "100", "stex_tp": "KRX"})
+            now[0] += timedelta(seconds=1)
+            late = receipt(base | {"9068": "2", "1490": "2"})
+            self.assertEqual(6, store.append_vi_events([activation, release, other_venue, unknown_venue, rest, late]))
+            history = store.load_market_event_history("vi", code="005930", limit=6)
+            result = assess_micro_shadow_inputs(symbol="005930", venue="KRX", variant="VI_GAP_UP",
+                                               decision_at=cut, trading_date=cut.date(), trade_snapshot=snapshot,
+                                               vi_history=history)
+            self.assertEqual(("UNKNOWN", None), (result["status"], result["candidate"]))
+            self.assertEqual([
+                "native_quote_depth", "native_instrument_tradability", "native_cross_stream_order",
+                "native_vi_release_execution_price",
+            ], result["missing_inputs"])
+            self.assertEqual(("OBSERVED", 1, snapshot["rows"][0]["input_ref"]), (
+                result["trade"]["state"], result["trade"]["count"], result["trade"]["latest"]["ref"],
+            ))
+            self.assertEqual({
+                (activation["event_id"], "ACTIVATED", "1223", "2026-09-11T09:10:00+09:00"),
+                (release["event_id"], "RELEASED", "1224", "2026-09-11T09:10:02+09:00"),
+            }, {(row["ref"], row["kind"], row["fid"], row["observed_at"]) for row in result["vi"]["observations"]})
+            self.assertEqual(history, store.load_market_event_history("vi", code="005930", limit=6))
+        self.assertIs(collector._ram_observation_owner, retention_owner)
+        self.assertEqual(10, collector._ram_trade_retention_seconds)
+        self.assertEqual({("005930", "KRX"), ("005930", "NXT")}, collector._approved_trade_sources)
+
+    def test_missing_or_different_cut_cannot_use_book_like_fields_or_require_vi_for_scalp(self):
+        collector = CentralRealtimeCollector(lambda: "unused", "mock", RealtimeHub(), lambda: _START)
+        snapshot = collector.ram_observation_snapshot(("005930",), seconds=10)
+        snapshot["orderbook"] = {"source": "0B_execution_flow", "bids": [[101, 100]], "asks": [[102, 100]]}
+        for cut, expected in ((_START, "trade_source_not_approved"),
+                              (_START + timedelta(seconds=1), "collector_cut_unconfirmed")):
+            with self.subTest(cut=cut):
+                result = assess_micro_shadow_inputs(symbol="005930", venue="KRX", variant="BOOK_SCALP",
+                                                   decision_at=cut, trading_date=cut.date(), trade_snapshot=snapshot)
+                self.assertEqual(("UNKNOWN", None, None), (result["status"], result["candidate"], result["vi"]))
+                self.assertEqual(expected, result["trade"]["reason"])
+                self.assertEqual([
+                    "native_quote_depth", "native_instrument_tradability", "native_cross_stream_order",
+                    "native_0b_observation",
+                ], result["missing_inputs"])

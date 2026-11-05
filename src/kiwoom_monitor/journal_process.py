@@ -273,6 +273,7 @@ class JournalWindow(QMainWindow):
             self._selected_history_focus: datetime | None = None
             self._selected_history_range: tuple[date, date] | None = None
             self._visible_fills: tuple[TradeFill, ...] = ()
+            self._visible_execution_plans = {}
             self._visible_costs: tuple[DailyTradeCost, ...] = ()
             self._episodes: tuple[TradeEpisode, ...] = ()
             self._all_episodes: tuple[TradeEpisode, ...] = ()
@@ -897,7 +898,8 @@ class JournalWindow(QMainWindow):
         if self._history_worker is not None: return
         self._history_expected_scope = self._selected_account_scope()
         worker = HistoryWorker(self._history_service, self._cost_service, start, end,
-            account_client=self._query_client, account_scope=self._history_expected_scope)
+            account_client=self._query_client, account_scope=self._history_expected_scope,
+            execution_projection_repository=self._repo)
         worker.setParent(self if isinstance(self, QObject) else None)
         worker.progress.connect(self._history_progress); worker.failed.connect(self._history_enrichment_failed)
         worker.completed.connect(self._history_received); worker.finished.connect(self._history_finished)
@@ -1050,6 +1052,7 @@ class JournalWindow(QMainWindow):
         self._loaded_history_scope = account_scope
         self._visible_fills = result.fills
         self._visible_costs = result.costs
+        self._visible_execution_plans = result.execution_plans
         self._all_episodes = result.episodes
         self._apply_history_filters()
         if not self._episodes:
@@ -1120,6 +1123,9 @@ class JournalWindow(QMainWindow):
                 self._account_filter.blockSignals(blocked)
             raise
         scope = self._selected_account_scope()
+        worker = getattr(self, "_history_worker", None)
+        if worker is not None and scope != self._history_expected_scope:
+            worker.cancel_execution_projection()
         self._journal_settings.setValue(
             "selected_account_scope",
             f"{scope.broker}|{scope.environment.value}|{scope.account_ref}",
@@ -1375,6 +1381,11 @@ class JournalWindow(QMainWindow):
                       f"{fill.quantity:,}", f"{fill.price:,}", f"{amount:,}", fill.order_type, fill.market, fill.order_no)
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value)); item.setData(Qt.ItemDataRole.UserRole, fill)
+                if column == 8 and (plan := self._visible_execution_plans.get(fill)) is not None:
+                    item.setToolTip(
+                        f"<qt>모의 실행 계획 {html.escape(plan.plan_id)}<br>"
+                        f"정책 {html.escape(plan.policy_ref)} · 승인 판본 {plan.expected_revision}</qt>"
+                    )
                 self._fills_table.setItem(row, column, item)
         self._fills_table.blockSignals(False)
         self._fills_table.resizeColumnsToContents()

@@ -1453,8 +1453,10 @@ def execute_process_request(
             dataset, repository, request.runs_dir, configs, request.execution, request.evaluation,
             cancelled, request.session_profile, resource_guard, strategy_references=strategy_references,
         )
+        context = _section12_minute_result(repository, runs[0].run_id, tuple(config.policy.variant for config in configs))
         return {
             "status": "ok", "kind": BREAKOUT_COMPARISON_MODE, "order_authorized": False,
+            "section12": context,
             "runs": [{"variant": config.policy.variant, "run_id": run.run_id,
                       "candidate_count": run.candidate_count, "manifest": str(run.output_manifest)}
                      for config, run in zip(configs, runs)],
@@ -1477,6 +1479,8 @@ def execute_process_request(
         "report": repository.load_research_report(result.run_id),
         "market_regime": result.market_regime,
     }
+    if isinstance(request.strategy, MinuteExperiment):
+        document["section12"] = _section12_minute_result(repository, result.run_id, (request.strategy.policy.variant,))
     if request.shadow_only:
         document.update(shadow_only=True, order_authorized=False)
     if reported_result_target is not None:
@@ -1484,6 +1488,31 @@ def execute_process_request(
         document = attach_result_delivery(document, request.database, request.runs_dir, result.run_id,
                                           reported_result_target, cancel_requested=cancelled)
     return document
+
+
+def _section12_minute_result(repository: ResearchRepository, run_id: str, variants: tuple[str, ...]) -> dict[str, Any]:
+    """Project only display metadata from the completed run, without loading its events."""
+    saved = repository.load_run(run_id)
+    if saved is None:
+        return {}
+    spec, manifest = saved["spec"], saved["input_manifest"]
+    fields = {
+        "family": spec["family"],
+        "source_kind": spec["mode"],
+        "source_clock": spec.get("observation_clock_basis", spec["clock"]),
+        "execution_scope": "shadow_only" if spec.get("observation_mode") == "shadow-replay/v1" else "paper",
+        "input_dataset_id": manifest.get("dataset_id"),
+        "input_revision_ids_hash": manifest.get("revision_ids_hash"),
+    }
+    if len(variants) == 1:
+        fields["variant"] = variants[0]
+    else:
+        fields["variants"] = list(variants)
+    if "captured_range" in manifest:
+        fields["source_range"] = manifest["captured_range"]
+    if "strategy_references" in spec:
+        fields["strategy_reference_sha256"] = spec["strategy_references"]["sha256"]
+    return fields
 
 
 def _execute_evidence_experiment(request, guard, cancelled) -> dict[str, Any]:
@@ -1524,8 +1553,12 @@ def _execute_evidence_experiment(request, guard, cancelled) -> dict[str, Any]:
         "spec": spec, "logical_result_hash": result_hash, "result": result, "order_authorized": False,
     })
     repository.finish_run(run_id, result_hash)
+    context = {"family": spec["family"], "source_kind": spec["source_kind"],
+               "dataset_sha256": spec["dataset_sha256"], "execution_scope": "synthetic_evidence"}
+    if isinstance(result.get("variant"), str):
+        context["variant"] = result["variant"]
     return {"status": "ok", "kind": request.mode, "run_id": run_id, "manifest": str(manifest),
-            "result": result, "order_authorized": False}
+            "result": result, "order_authorized": False, "section12": context}
 
 
 def execute_campaign_cycle(

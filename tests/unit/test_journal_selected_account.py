@@ -284,6 +284,7 @@ class JournalSelectedAccountTests(unittest.TestCase):
         )
         window = JournalWindow.__new__(JournalWindow); QMainWindow.__init__(window)
         window._history_worker = None
+        window._repo = None
         window._history_service = SimpleNamespace(
             load_day_batch=lambda _day: SimpleNamespace(fills=(), context=legacy_context),
         )

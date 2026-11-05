@@ -7,7 +7,7 @@ from contextlib import closing
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.persistence.journal_schema import (
-    JOURNAL_SCHEMA_INDEXES, JOURNAL_SCHEMA_TABLES, initialize_journal_database,
+    JOURNAL_SCHEMA_INDEXES, JOURNAL_SCHEMA_TABLES, JOURNAL_SCHEMA_VERSION, initialize_journal_database,
 )
 
 
@@ -48,6 +48,7 @@ class JournalSchemaTests(unittest.TestCase):
                 connection.execute("DROP TABLE trade_setup_cycle_overrides")
                 connection.execute("CREATE TABLE trade_setup_cycle_overrides(group_id TEXT NOT NULL,cycle_index INTEGER NOT NULL,manual_type TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL,origin_broker TEXT NOT NULL DEFAULT 'legacy',origin_environment TEXT NOT NULL DEFAULT 'unknown',origin_account_ref TEXT NOT NULL DEFAULT 'legacy-unassigned',canonical_account_ref TEXT NOT NULL DEFAULT 'legacy-unassigned',PRIMARY KEY(group_id,cycle_index))")
                 connection.execute("DROP TABLE journal_selected_settings_receipts")
+                connection.execute("ALTER TABLE journal_execution_event_projections DROP COLUMN order_plan_json")
                 connection.execute("DELETE FROM journal_schema_migrations WHERE version>=10")
                 connection.execute("INSERT INTO trade_setup_classifications VALUES(?,?,?,?,?,?,?,?,?,?)", ("same", "기타", 7, '[ "원문" ]', "상따", "2026-09-01T09:00:00", "legacy", "unknown", "legacy-unassigned", "legacy-unassigned"))
                 connection.execute("INSERT INTO trade_setup_cycle_overrides VALUES(?,?,?,?,?,?,?,?)", ("same", 0, "돌파", "2026-09-01T09:00:01", "legacy", "unknown", "legacy-unassigned", "legacy-unassigned"))
@@ -123,7 +124,7 @@ class JournalSchemaTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as connection:
                 connection.execute("DROP TABLE journal_execution_event_projections")
                 connection.execute("DROP TABLE journal_execution_projection_states")
-                connection.execute("DELETE FROM journal_schema_migrations WHERE version=9")
+                connection.execute("DELETE FROM journal_schema_migrations WHERE version IN (9,12)")
                 connection.commit()
 
             initialize_journal_database(path)
@@ -137,7 +138,7 @@ class JournalSchemaTests(unittest.TestCase):
                         "SELECT name FROM sqlite_master WHERE type='table'"
                     )
                 }
-            self.assertEqual(11, version)
+            self.assertEqual(JOURNAL_SCHEMA_VERSION, version)
             self.assertIn("journal_execution_event_projections", tables)
             self.assertIn("journal_execution_projection_states", tables)
 
@@ -151,7 +152,7 @@ class JournalSchemaTests(unittest.TestCase):
                 row = ("personal_trade_rules", b"\x00original\xff", "unmodified-original-time")
                 connection.execute("INSERT INTO journal_settings VALUES(?,?,?)", row)
                 ddl = connection.execute("SELECT sql FROM sqlite_master WHERE name='journal_settings'").fetchone()[0]
-                previous = connection.execute("SELECT * FROM journal_schema_migrations ORDER BY version").fetchall()
+                previous = connection.execute("SELECT * FROM journal_schema_migrations WHERE version<=10 ORDER BY version").fetchall()
             initialize_journal_database(path)
             with closing(sqlite3.connect(path)) as connection:
                 self.assertEqual([row], connection.execute("SELECT * FROM journal_settings").fetchall())

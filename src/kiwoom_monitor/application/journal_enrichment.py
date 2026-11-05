@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Mapping, Protocol
 from zoneinfo import ZoneInfo
 
-from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE, OrderPlanRef
 
 
 ENRICHMENT_STATES = (
@@ -192,6 +192,7 @@ class JournalExecutionProjectionEvent:
     broker_as_of: datetime | None
     fill_identity: str | None
     content_hash: str
+    plan: OrderPlanRef | None = None
 
 
 @dataclass(frozen=True)
@@ -581,6 +582,7 @@ def sync_journal_execution_projection(
     page_limit: int = 500,
     max_pages: int = 20,
     now: datetime | None = None,
+    cancel_requested: Callable[[], bool] = lambda: False,
 ) -> JournalExecutionProjectionResult:
     """Pull bounded account pages and atomically advance the local projection cursor."""
     if not 1 <= page_limit <= 1000 or not 1 <= max_pages <= 100:
@@ -591,9 +593,13 @@ def sync_journal_execution_projection(
     inserted = detailed = aggregate = 0
     unresolved: dict[str, int] = {}
     for _ in range(max_pages):
+        if cancel_requested():
+            break
         source_page = source.load_mock_execution_events(
             after_sequence=cursor, limit=page_limit,
         )
+        if cancel_requested():
+            break
         page = journal_execution_projection_page(
             source_page,
             from_cursor=cursor,
@@ -607,12 +613,12 @@ def sync_journal_execution_projection(
         aggregate += result.aggregate_event_count
         unresolved.update(result.unresolved_quantity_by_intent)
         if not page.has_more:
-            return JournalExecutionProjectionResult(
-                cursor, inserted, detailed, aggregate, unresolved,
-            )
+            break
         if page.next_cursor == page.from_cursor:
             raise RuntimeError("execution projection source did not advance its cursor")
-    raise RuntimeError("execution projection exceeded the bounded page count")
+    else:
+        raise RuntimeError("execution projection exceeded the bounded page count")
+    return JournalExecutionProjectionResult(cursor, inserted, detailed, aggregate, unresolved)
 
 
 def _journal_execution_projection_event(
@@ -631,6 +637,12 @@ def _journal_execution_projection_event(
         raise ValueError("execution projection identity is incomplete")
     if event_type == "FILL" and not broker_execution_id:
         raise ValueError("detailed fill requires a broker execution id")
+    plan = None
+    if "plan" in source:
+        try:
+            plan = OrderPlanRef(**source["plan"])
+        except (TypeError, ValueError) as error:
+            raise ValueError("invalid execution projection plan reference") from error
     occurred_at = datetime.fromisoformat(str(source.get("occurred_at") or ""))
     received_at = datetime.fromisoformat(str(source.get("received_at") or ""))
     broker_as_of_value = source.get("broker_as_of")
@@ -689,6 +701,7 @@ def _journal_execution_projection_event(
         broker_as_of,
         fill_identity,
         content_hash,
+        plan,
     )
 
 

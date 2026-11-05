@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from kiwoom_monitor.domain.strategy_contract import MINUTE_SHADOW_VERSION
+
 if TYPE_CHECKING:
     from .candidate_monitor import CandidateMonitor
     from fastapi import APIRouter
@@ -191,6 +193,15 @@ def create_operational_settings_routers(
                 "shadow_candidate_poll_seconds",
                 "shadow_candidate_universe_max_age_seconds",
             }
+            shadow_config = proposed["shadow_candidate_config"]
+            if ("shadow_candidate_config" in changes and isinstance(shadow_config, dict)
+                    and shadow_config.get("version") == MINUTE_SHADOW_VERSION):
+                from kiwoom_monitor.application.section12_minute_research import MinuteShadowConfig
+
+                try:
+                    proposed["shadow_candidate_config"] = MinuteShadowConfig.from_document(shadow_config).to_dict()
+                except (TypeError, ValueError) as error:
+                    raise HTTPException(status_code=422, detail=str(error)) from error
             recovery_required = int(operational["revision"]) != state.applied_revision
             external_changed = recovery_required or any(
                 name in changes and proposed[name] != operational[name] for name in external_fields)

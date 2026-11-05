@@ -37,6 +37,7 @@ from kiwoom_monitor.application.research_evaluation import DevelopmentEvidence
 from kiwoom_monitor.application.research_families import (
     get_research_family, RESEARCH_DIRECTION_NOTICE, RESEARCH_FAMILY_LABELS,
 )
+from kiwoom_monitor.application.section12_minute_research import MINUTE_EXPERIMENT_LABELS, MinuteExperiment
 from kiwoom_monitor.application.research_hypotheses import (
     DevelopmentEvidenceRef,
     HypothesisGenerationRequest,
@@ -44,6 +45,15 @@ from kiwoom_monitor.application.research_hypotheses import (
     generate_research_hypotheses,
 )
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
+from kiwoom_monitor.infrastructure.time_display import format_kst_time
+
+
+_SECTION12_SCOPES = {
+    "paper": "동결 연구 · Paper 체결 모의",
+    "shadow_only": "동결 Shadow 재생 · 판단만 기록",
+    "synthetic_evidence": "합성 증거 재생",
+}
+_SECTION12_MINUTE_COLUMNS = ("구간·역할", "평가 상태", "순손익", "제출/체결", "미완료·거절", "무거래", "사유")
 
 
 def _research_process_environment(environment: Mapping[str, str]) -> dict[str, str]:
@@ -1014,6 +1024,7 @@ class ResearchDialog(QDialog):
         if self._startup_pending or self._campaign_suspended:
             return False
         path = Path(self._request_path.text().strip())
+        self._summary.setToolTip("")
         try:
             request = load_research_process_request(path)
         except (OSError, TypeError, ValueError) as exc:
@@ -1033,12 +1044,18 @@ class ResearchDialog(QDialog):
         if isinstance(request, EvidenceExperimentRequest):
             label = {"micro_experiment": "MICRO", "daily_decline_experiment": "DD",
                      "account_risk_experiment": "계좌 자금·위험"}[request.mode]
-            self._summary.setText(f"{label} · 해시로 고정한 합성 입력 · {request.dataset.name}")
+            family = EVIDENCE_EXPERIMENT_FAMILIES[request.mode]
+            self._summary.setText(f"{label} ({family}) · 합성 증거 재생 · 계좌 주문 없음 · {request.dataset.name}")
+            self._summary.setToolTip(f"요청 자료 SHA256 {request.dataset_sha256}")
             self._run.setText("합성 자료 재생")
             self._run.setEnabled(not self._manager.is_running and self._registration is None)
             self._settings.setValue("request_path", str(path))
             return True
-        self._table.setHorizontalHeaderLabels(("구간", "상태", "기준 손익", "필터 손익", "차이", "회피 손실", "놓친 이익"))
+        minute_experiment = isinstance(request.strategy, MinuteExperiment)
+        self._table.setHorizontalHeaderLabels(
+            _SECTION12_MINUTE_COLUMNS if minute_experiment and request.mode == "single_run" else
+            ("구간", "상태", "기준 손익", "필터 손익", "차이", "회피 손실", "놓친 이익")
+        )
         folds = ", ".join(f"{fold.name}({fold.role})" for fold in request.evaluation.folds)
         cost = request.execution.cost_model
         search = request.search
@@ -1047,12 +1064,16 @@ class ResearchDialog(QDialog):
             f" · CPU 목표 {request.resource_limits.cpu_duty_percent}%"
             if search is not None else ""
         )
-        self._summary.setText(
-            f"{request.mode} · {RESEARCH_FAMILY_LABELS.get(request.family, request.family)} ({request.family})"
-            f" · 데이터 {request.dataset.name} · 구간 {folds}"
-            f"{search_text} · "
-            f"비용 {cost.rate_basis if cost else '없음'} / {cost.source if cost else ''}"
-        )
+        identity = f"{request.mode} · {RESEARCH_FAMILY_LABELS.get(request.family, request.family)} ({request.family})"
+        if minute_experiment:
+            variants = " → ".join(config.policy.variant for config in (request.strategy, *request.breakout_variants))
+            scope = _SECTION12_SCOPES["shadow_only" if request.shadow_only else "paper"]
+            identity = f"{MINUTE_EXPERIMENT_LABELS[request.family]} ({request.family}) · {variants} · {scope} · 계좌 주문 없음"
+            if request.strategy_references is not None:
+                reference_path, digest = request.strategy_references
+                self._summary.setToolTip(f"요청 근거 {reference_path.name} · SHA256 {digest}")
+        self._summary.setText(f"{identity} · 데이터 {request.dataset.name} · 구간 {folds}{search_text}"
+                              f" · 비용 {cost.rate_basis if cost else '없음'} / {cost.source if cost else ''}")
         labels = {
             "rank_comparison": "기준선 비교 실행",
             BREAKOUT_COMPARISON_MODE: "돌파 B0~B3 비교 실행",
@@ -1214,6 +1235,9 @@ class ResearchDialog(QDialog):
     def _apply_result(self, result: Mapping[str, Any]) -> None:
         status = str(result.get("status", "unknown"))
         kind = result.get("kind")
+        context = result.get("section12")
+        has_context = isinstance(context, Mapping) and bool(context)
+        minute_result = kind == "single_run" and (has_context or result.get("shadow_only") is True)
         if kind in {"leader_breakout", "leader_breakout_campaign"}:
             self._table.setHorizontalHeaderLabels(("분 종료·종목", "상태", "기준가격", "분봉 종가", "판단", "자료", "사유"))
             self._table.setColumnWidth(0,250)
@@ -1224,7 +1248,23 @@ class ResearchDialog(QDialog):
         elif kind == "account_risk_experiment":
             self._table.setHorizontalHeaderLabels(("실험", "평가 상태", "현금", "예약", "평가 자산", "최대 낙폭", "낙폭 하한"))
         elif kind in EVIDENCE_EXPERIMENT_FAMILIES:
-            self._table.setHorizontalHeaderLabels(("실험", "재생 상태", "보유 수량", "", "", "자료", "사유"))
+            self._table.setHorizontalHeaderLabels(("전략·변형", "재생 상태", "보유 수량", "미완료 주문", "증거 상태", "자료", "사유"))
+        elif minute_result:
+            self._table.setHorizontalHeaderLabels(_SECTION12_MINUTE_COLUMNS)
+        elif kind == "single_run":
+            self._table.setHorizontalHeaderLabels(("구간", "상태", "기준 손익", "필터 손익", "차이", "회피 손실", "놓친 이익"))
+        if has_context:
+            self._summary.setText(_section12_result_summary(context, result.get("report")))
+            references = [f"{label} {value}" for key, label in (
+                ("input_dataset_id", "자료 ID"), ("input_revision_ids_hash", "자료 판본 SHA256"),
+                ("strategy_reference_sha256", "근거 SHA256"), ("dataset_sha256", "합성 자료 SHA256"),
+            ) if (value := context.get(key))]
+            if result.get("run_id"):
+                references.append(f"실행 ID {result['run_id']}")
+            self._summary.setToolTip("\n".join(references))
+        elif minute_result:
+            self._summary.setText(_SECTION12_SCOPES["shadow_only"] + " · 계좌 주문 없음")
+            self._summary.setToolTip("")
         if kind != "leader_breakout_performance" and (status == 'resource_blocked' or result.get('job_status') == 'resource_blocked'):
             self._status.setText('자원 한도 도달 · 메모리/CPU 예산을 확인한 뒤 다시 실행하세요')
             self._table.setRowCount(0)
@@ -1233,14 +1273,15 @@ class ResearchDialog(QDialog):
         job_status = str(result.get("job_status", ""))
         notification = "후보 변화 있음" if result.get("notification_proposed") else ""
         market = format_market_regime_summary(result.get("market_regime"))
-        details = tuple(value for value in (reason, job_status, notification, market) if value)
+        evaluation_status = str(result.get("report_status", "")) if minute_result else ""
+        details = tuple(value for value in (reason, job_status, evaluation_status, notification, market) if value)
         self._status.setText(status + (f" · {' · '.join(details)}" if details else ""))
         rows = format_research_result_rows(result)
         self._table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             for column, value in enumerate(row):
                 item = QTableWidgetItem(value)
-                if kind in {'leader_breakout','leader_breakout_campaign'}:
+                if minute_result or kind in EVIDENCE_EXPERIMENT_FAMILIES or kind in {'leader_breakout','leader_breakout_campaign'}:
                     item.setToolTip(value)
                 self._table.setItem(row_index, column,item)
 
@@ -1301,6 +1342,34 @@ class ResearchDialog(QDialog):
             QTimer.singleShot(1100, self._restore_campaign)
 
 
+def _section12_result_summary(context: Mapping[str, Any], report: object) -> str:
+    family = context.get("family")
+    variants = context.get("variants")
+    variant = " → ".join(variants) if isinstance(variants, (list, tuple)) else context.get("variant")
+    scope = _SECTION12_SCOPES.get(context.get("execution_scope"))
+    source = {"historical_reconstruction": "역사 자료 재구성", "historical_replay": "동결 관측 자료"}.get(context.get("source_kind"))
+    clock = {"reconstructed_completed_bar_end_proxy": "재구성 완료봉 종료시각 기준",
+             "observation_available_at": "기록된 관측 가용시각 기준"}.get(context.get("source_clock"))
+    range_text = ""
+    source_range = context.get("source_range")
+    if isinstance(source_range, Mapping):
+        start = format_kst_time(source_range.get("start"), missing="")
+        end = format_kst_time(source_range.get("end"), missing="")
+        if start and end:
+            range_text = f"자료 범위 {start} ~ {end}"
+    quality = report.get("data_quality") if isinstance(report, Mapping) else None
+    quality_text = ""
+    if isinstance(quality, Mapping):
+        quality_text = f"자료 품질 {quality.get('status', '미확인')} · 재현성 {quality.get('reproducibility', '미확인')}"
+    return " · ".join(str(value) for value in (
+        family, variant, scope, "계좌 주문 없음", source, clock, range_text, quality_text,
+    ) if value)
+
+
+def _section12_count(value: object) -> str:
+    return str(value) if type(value) is int and value >= 0 else "N/A"
+
+
 def format_research_result_rows(result: Mapping[str, Any]) -> tuple[tuple[str, ...], ...]:
     kind = result.get("kind")
     if kind == BREAKOUT_COMPARISON_MODE:
@@ -1323,9 +1392,17 @@ def format_research_result_rows(result: Mapping[str, Any]) -> tuple[tuple[str, .
             return ()
         setup = trace.get("setup", {})
         setup_status = setup.get("status", "") if isinstance(setup, Mapping) else ""
-        return ((str(kind), str(summary.get("status", setup_status)),
-                 str(summary.get("position_quantity", summary.get("owned_quantity", ""))),
-                 "", "", "합성", str(summary.get("reason", ""))),)
+        variant = trace.get("variant")
+        identity = EVIDENCE_EXPERIMENT_FAMILIES[kind] + (f" · {variant}" if isinstance(variant, str) else "")
+        pending = summary.get("pending_order")
+        if isinstance(pending, Mapping):
+            pending_label = str(pending.get("order_id", "미확인"))
+        else:
+            pending_label = summary.get("pending_action_id") or ("없음" if "pending_order" in summary or "pending_action_id" in summary else "N/A")
+        evidence = " · ".join(str(trace[key]) for key in ("market_issue", "broker_issue") if trace.get(key))
+        return ((identity, str(summary.get("status") or setup_status or "미확인"),
+                 _section12_count(summary.get("position_quantity", summary.get("owned_quantity"))),
+                 str(pending_label), evidence, "합성", str(summary.get("reason") or summary.get("exit_reason") or "")),)
     if result.get("kind") == "leader_breakout_performance" and result.get("status") == "blocked":
         return tuple(("실행 준비", "BLOCKED", "미산출", "미산출", "", "분봉", str(reason))
                      for reason in result.get("configuration_missing", ()))
@@ -1372,6 +1449,34 @@ def format_research_result_rows(result: Mapping[str, Any]) -> tuple[tuple[str, .
     if not isinstance(report, Mapping):
         return ()
     folds = report.get("fold_reports", ())
+    context = result.get("section12")
+    has_context = isinstance(context, Mapping) and bool(context)
+    shadow = result.get("shadow_only") is True or (has_context and context.get("execution_scope") == "shadow_only")
+    if kind == "single_run" and (has_context or shadow):
+        rows = []
+        for fold in folds:
+            if not isinstance(fold, Mapping):
+                continue
+            name = " · ".join(str(fold[key]) for key in ("name", "role") if fold.get(key))
+            status = str(fold.get("status", "미확인"))
+            reasons = ", ".join(str(value) for value in fold.get("reasons", ()))
+            if status == "SEALED":
+                rows.append((name, status, "N/A", "N/A", "N/A", "N/A", reasons))
+                continue
+            no_trade = fold.get("no_trade_reasons")
+            no_trade_text = ", ".join(f"{reason} {_section12_count(count)}" for reason, count in no_trade.items()) if isinstance(no_trade, Mapping) else "N/A"
+            if shadow:
+                rows.append((name, status, "N/A", "N/A", "N/A", no_trade_text, reasons))
+                continue
+            submitted = _section12_count(fold.get("submitted_order_count"))
+            filled = _section12_count(fold.get("filled_order_count"))
+            disposition = " · ".join(f"{label} {_section12_count(fold.get(key))}" for key, label in (
+                ("censored_order_count", "미완료"), ("rejected_order_count", "거절"),
+                ("unsupported_order_count", "미지원"), ("partial_fill_count", "부분 체결"),
+            ))
+            rows.append((name, status, _won(fold.get("net_realized_pnl_won")), f"{submitted}/{filled}",
+                         disposition, no_trade_text, reasons))
+        return tuple(rows)
     return tuple((
         str(row.get("name", "")), str(row.get("status", "")), "",
         _won(row.get("net_realized_pnl_won")), "", "", "",

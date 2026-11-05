@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import ClassVar
 
+from kiwoom_monitor.domain.market_data_contract import TradingVenue, trading_venue
 from kiwoom_monitor.domain.time_basis import KST, aware_iso_kst
 
 
@@ -76,10 +77,128 @@ def _receipt_time(value: object) -> datetime | None:
 MICRO_EVIDENCE_VERSION = "micro-synthetic-evidence/v1"
 MICRO_POLICY_VERSION = "micro-policy/v1"
 MICRO_RESULT_VERSION = "micro-execution-result/v1"
+MICRO_SHADOW_INPUT_VERSION = "micro-native-shadow-input/v1"
 MICRO_VARIANTS = frozenset({"VI_GAP_UP", "VI_FLAT_DOWN_RISE", "VI_DOWNSIDE_REBOUND", "BOOK_SCALP"})
 _MARKET_KINDS = frozenset({"VI_ACTIVATED", "VI_RELEASED", "BOOK", "TRADE", "GAP"})
 _BROKER_KINDS = frozenset({"ORDER_ARRIVED", "FILL", "CANCELLED"})
 _BPS = 10_000
+
+
+def assess_micro_shadow_inputs(
+    *, symbol: str, venue: str, variant: str, decision_at: datetime, trading_date: date | None,
+    trade_snapshot: Mapping[str, object] | None = None,
+    vi_history: Sequence[Mapping[str, object]] | None = None,
+) -> dict[str, object]:
+    """Report the current native inputs without granting a signal or execution.
+
+    Callers supply one collector RAM cut and, for VI variants, the bounded
+    native VI history read. Their independent orders cannot be joined here.
+    """
+    if len(symbol) != 6 or not symbol.isascii() or not symbol.isalnum():
+        raise ValueError("MICRO Shadow requires a six-character stock code")
+    if venue not in {TradingVenue.KRX, TradingVenue.NXT} or variant not in MICRO_VARIANTS:
+        raise ValueError("unsupported MICRO Shadow venue or variant")
+    if decision_at.utcoffset() is None:
+        raise ValueError("MICRO Shadow decision time must include its timezone")
+    cut = decision_at.astimezone(KST)
+    trade = _native_0b_observation(trade_snapshot, symbol, venue, cut)
+    missing = ["native_quote_depth", "native_instrument_tradability", "native_cross_stream_order"]
+    if trade["state"] != "OBSERVED":
+        missing.append("native_0b_observation")
+
+    vi = None
+    if variant != "BOOK_SCALP":
+        vi = _native_vi_observations(vi_history, symbol, venue, cut, trading_date)
+        missing.append("native_vi_release_execution_price")
+        if {event["kind"] for event in vi["observations"]} != {"ACTIVATED", "RELEASED"}:
+            missing.append("native_vi_activation_release_observations")
+    return {
+        "version": MICRO_SHADOW_INPUT_VERSION, "source_kind": "native",
+        "symbol": symbol, "venue": venue, "variant": variant, "decision_at": cut.isoformat(),
+        "status": "UNKNOWN", "candidate": None, "missing_inputs": missing,
+        "trade": trade, "vi": vi,
+    }
+
+
+def _native_0b_observation(snapshot: Mapping[str, object] | None, symbol: str, venue: str, cut: datetime) -> dict:
+    if snapshot is None:
+        return {"state": "UNKNOWN", "reason": "collector_cut_unavailable"}
+    if (snapshot.get("input_resolution") != "0B" or snapshot.get("durable") is not False
+            or _offset_clock(snapshot.get("decision_time")) != cut):
+        return {"state": "UNKNOWN", "reason": "collector_cut_unconfirmed"}
+    approved = snapshot.get("approved_sources")
+    if not isinstance(approved, tuple) or (symbol, venue) not in approved:
+        return {"state": "UNKNOWN", "reason": "trade_source_not_approved"}
+    if snapshot.get("retention_since") is None:
+        return {"state": "UNKNOWN", "reason": "trade_retention_unavailable"}
+    source_id, generation, rows = snapshot.get("source_id"), snapshot.get("generation"), snapshot.get("rows")
+    if not isinstance(source_id, str) or not source_id or not _integer(generation, minimum=0) or not isinstance(rows, tuple):
+        return {"state": "UNKNOWN", "reason": "trade_source_unconfirmed"}
+
+    count, latest = 0, None
+    for row in rows:
+        if (row.get("code"), row.get("market"), row.get("source"), row.get("input_resolution")) != (
+            symbol, venue, "kiwoom-websocket-0B", "0B",
+        ):
+            continue
+        sequence = row.get("sequence")
+        ref = row.get("input_ref")
+        observed = _offset_clock(row.get("observed_at"))
+        available = _receipt_time(row.get("available_at"))
+        if (not _integer(sequence) or ref != f"ram-0B:{source_id}:{generation}:{sequence}"
+                or observed is None or available is None or not observed <= available <= cut
+                or not _integer(row.get("price_won"))):
+            continue
+        if latest is not None and sequence <= latest["sequence"]:
+            return {"state": "UNKNOWN", "reason": "collector_sequence_unconfirmed"}
+        count += 1
+        latest = {"ref": ref, "sequence": sequence, "observed_at": observed.isoformat(), "available_at": available.isoformat()}
+    if latest is None:
+        return {"state": "UNKNOWN", "reason": "no_scoped_retained_trade"}
+    gap = snapshot.get("gap_at")
+    return {
+        "state": "OBSERVED", "source": "kiwoom-websocket-0B", "source_id": source_id,
+        "generation": generation, "count": count, "latest": latest,
+        "collector_gap_at": gap.isoformat() if isinstance(gap, datetime) else None,
+    }
+
+
+def _native_vi_observations(
+    history: Sequence[Mapping[str, object]] | None, symbol: str, venue: str, cut: datetime,
+    trading_date: date | None,
+) -> dict:
+    observations = []
+    if history is None:
+        return {"state": "UNKNOWN", "reason": "vi_history_unavailable", "observations": observations}
+    if trading_date != cut.date():
+        return {"state": "UNKNOWN", "reason": "unconfirmed_trading_date", "observations": observations}
+    for receipt in history:
+        ref = receipt.get("event_id")
+        if (receipt.get("stock_code") != symbol or trading_venue(receipt.get("exchange")) != venue
+                or not isinstance(ref, str) or not ref):
+            continue
+        projection = project_vi_clock(receipt, trading_date=trading_date, decision_at=cut)
+        if projection.observed_at is not None:
+            observations.append({
+                "ref": ref, "kind": receipt["event_kind"], "fid": projection.fid,
+                "observed_at": projection.observed_at.isoformat(),
+                "available_at": projection.available_at.isoformat(),
+            })
+    return {
+        "state": "OBSERVED" if observations else "UNKNOWN",
+        "reason": "" if observations else "no_scoped_live_vi_clock_in_history",
+        "selection": "bounded_native_vi_receipts", "clock_version": ViClockProjection.version,
+        "observations": observations,
+    }
+
+
+def _offset_clock(value: object) -> datetime | None:
+    if isinstance(value, str):
+        try:
+            return aware_iso_kst(value)
+        except (ValueError, OverflowError):
+            pass
+    return None
 
 
 def _integer(value: object, *, minimum: int = 1) -> bool:

@@ -83,6 +83,7 @@ class AccountExecutionEvent:
     price: int = 0
     reason: str = ""
     broker_as_of: datetime | None = None
+    plan: OrderPlanRef | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -106,6 +107,7 @@ class AccountExecutionEvent:
             "price": self.price,
             "reason": self.reason,
             "broker_as_of": self.broker_as_of.isoformat() if self.broker_as_of else None,
+            **({"plan": asdict(self.plan)} if self.plan is not None else {}),
         }
 
 
@@ -475,4 +477,5 @@ def _account_event_from_document(
         price=int(event.get("price") or 0),
         reason=str(event.get("reason") or ""),
         broker_as_of=broker_as_of,
+        plan=OrderPlanRef(**intent["plan"]) if "plan" in intent else None,
     )

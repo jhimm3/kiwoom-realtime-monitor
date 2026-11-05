@@ -659,7 +659,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
         calls: list[object] = []
         selected_day = date(2026, 9, 13)
         scope = LEGACY_ACCOUNT_SCOPE
-        result = SimpleNamespace(fills=(), costs=(), episodes=())
+        result = SimpleNamespace(fills=(), costs=(), episodes=(), execution_plans={})
         owner = SimpleNamespace(
             _from_date=SimpleNamespace(date=lambda: SimpleNamespace(toPython=lambda: selected_day)),
             _to_date=SimpleNamespace(date=lambda: SimpleNamespace(toPython=lambda: selected_day)),
@@ -682,6 +682,28 @@ class JournalDetachedFlowTests(unittest.TestCase):
         )
         JournalWindow._run_history_followups(owner)
         self.assertEqual(["backfill", "enrichment"], calls[-2:])
+
+    def test_existing_order_cell_shows_exact_plan_without_labeling_legacy_fill(self) -> None:
+        from PySide6.QtWidgets import QApplication, QTableWidget
+        from kiwoom_monitor.domain.order_contract import OrderPlanRef
+
+        type(self)._application = QApplication.instance() or QApplication([])
+        scope = AccountScope("kiwoom", AccountEnvironment.MOCK, "11111111-1111-4111-8111-111111111111")
+        at = datetime(2026, 9, 16, 10)
+        planned = TradeFill("plan-order", "005930", "삼성전자", "매수", at, 1, 70000, origin_scope=scope)
+        legacy = TradeFill("old-order", "005930", "삼성전자", "매수", at, 1, 70000)
+        owner = SimpleNamespace(
+            _fills_table=QTableWidget(0, 9), _select_journal_cell=lambda *_: None,
+            _visible_execution_plans={planned: OrderPlanRef("close<a>", "close_confirm/v1", 3)},
+        )
+
+        JournalWindow._render_fills(owner, (planned, legacy))
+
+        item = owner._fills_table.item(0, 8)
+        self.assertEqual("plan-order", item.text())
+        self.assertIn("close&lt;a&gt;", item.toolTip())
+        self.assertIn("승인 판본 3", item.toolTip())
+        self.assertEqual("", owner._fills_table.item(1, 8).toolTip())
 
     def test_loaded_legacy_review_is_not_autosaved_and_edits_use_legacy_write_contract(self) -> None:
         saved: list[tuple[TradeReview, AccountScope | None]] = []

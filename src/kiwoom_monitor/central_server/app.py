@@ -35,6 +35,7 @@ from .historical_news_archive import HistoricalNewsArchiveReader
 from .account_query import AccountQuerySessionManager
 from .market_query_routes import _stored_market_response, _archived_chart_response
 from kiwoom_monitor.domain.strategy_contract import (
+    MINUTE_SHADOW_VERSION,
     BreakoutStrategyConfig,
     default_shadow_breakout_config,
 )
@@ -274,14 +275,19 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                 # Only the entirely unconfigured implicit draft changes in memory.
                 # Original stored and explicitly configured comparison policies stay intact.
                 shadow_document = document_leader_breakout_policy().to_dict()
-            operational["shadow_candidate_config"] = (
-                LeaderBreakoutPolicy.from_dict(shadow_document) if "policy_id" in shadow_document
-                else BreakoutStrategyConfig(**shadow_document)
-            ).to_dict()
+            if shadow_document.get("version") != MINUTE_SHADOW_VERSION:
+                config = (LeaderBreakoutPolicy.from_dict(shadow_document) if "policy_id" in shadow_document
+                          else BreakoutStrategyConfig(**shadow_document))
+                operational["shadow_candidate_config"] = config.to_dict()
+            elif operational["shadow_candidate_enabled"]:
+                from kiwoom_monitor.application.section12_minute_research import MinuteShadowConfig
+
+                operational["shadow_candidate_config"] = MinuteShadowConfig.from_document(shadow_document).to_dict()
         except (TypeError, ValueError):
             logger.warning("invalid saved shadow candidate settings disabled", exc_info=True)
             operational["shadow_candidate_enabled"] = False
-            operational["shadow_candidate_config"] = document_leader_breakout_policy().to_dict()
+            if not isinstance(shadow_document, dict) or shadow_document.get("version") != MINUTE_SHADOW_VERSION:
+                operational["shadow_candidate_config"] = document_leader_breakout_policy().to_dict()
         if active.mock_account_monitor_enabled and not active.kiwoom_mock_configured:
             raise ValueError("모의계좌 모니터에는 별도 모의투자 앱 키와 시크릿 키가 필요합니다.")
         if active.mock_order_transport_enabled and not active.mock_account_monitor_enabled:

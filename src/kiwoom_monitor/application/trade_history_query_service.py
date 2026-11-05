@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Mapping, Protocol
 from zoneinfo import ZoneInfo
@@ -14,7 +14,7 @@ from kiwoom_monitor.application.trade_journal_summary import (
     TradeReview,
     group_trade_episodes,
 )
-from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, OrderPlanRef
 
 
 class TradeHistoryQueryRepository(Protocol):
@@ -44,6 +44,7 @@ class TradeHistoryQueryResult:
     fills: tuple[TradeFill, ...]
     costs: tuple[DailyTradeCost, ...]
     episodes: tuple[TradeEpisode, ...]
+    execution_plans: Mapping[TradeFill, OrderPlanRef] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,7 @@ class ExecutionFillEvidence:
     run_id: str
     decision_id: str
     fill: TradeFill
+    plan: OrderPlanRef | None = None
 
 
 @dataclass(frozen=True)
@@ -189,7 +191,17 @@ class TradeHistoryQueryService:
             episode for episode in grouped
             if any(start <= fill.filled_at < end for fill in episode.fills)
         )
-        return TradeHistoryQueryResult(fills, costs, episodes)
+        plans = {}
+        if fills and account_scope is not None and account_scope.environment is AccountEnvironment.MOCK:
+            details = self._repository.load_execution_fill_projections(account_scope, start, end)
+            if any("plan" in row for row in details):
+                visible = tuple(fill for fill in fills if start <= fill.filled_at < end)
+                for group in reconcile_trade_fills(visible, details, account_scope).groups:
+                    if group.status == "EXACT":
+                        plan, *other = (evidence.plan for evidence in group.detailed_fills)
+                        if plan is not None and all(value == plan for value in other):
+                            plans.update((fill, plan) for fill in group.summary_fills)
+        return TradeHistoryQueryResult(fills, costs, episodes, plans)
 
     def load_reconciled(
         self, start: datetime, end: datetime, account_scope: AccountScope,
@@ -487,6 +499,7 @@ def _execution_fill_evidence(
         run_id=str(row.get("run_id") or ""),
         decision_id=str(row.get("decision_id") or ""),
         fill=fill,
+        plan=OrderPlanRef(**row["plan"]) if "plan" in row else None,
     )
 
 

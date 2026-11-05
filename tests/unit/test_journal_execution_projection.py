@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 import uuid
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,7 +13,9 @@ from kiwoom_monitor.application.journal_enrichment import (
     journal_execution_projection_page,
     sync_journal_execution_projection,
 )
-from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+from kiwoom_monitor.application.trade_history_query_service import TradeHistoryQueryService
+from kiwoom_monitor.application.trade_history_service import TradeFill
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, OrderPlanRef
 from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
 
 
@@ -260,6 +263,49 @@ class JournalExecutionProjectionTests(unittest.TestCase):
         self.assertEqual("fill-a", restarted.load_execution_fill_projections(
             self.scope,
         )[0]["broker_execution_id"])
+
+    def test_v11_projection_preserves_legacy_row_and_shows_only_matched_plan(self) -> None:
+        self.repository.project_execution_event_page(_page(self.scope, 0, [
+            _event(self.scope, 1, "FILL", order_id="legacy-order", execution_id="legacy-fill"),
+        ]), NOW)
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("ALTER TABLE journal_execution_event_projections DROP COLUMN order_plan_json")
+            connection.execute("DELETE FROM journal_schema_migrations WHERE version=12")
+        journal = JournalRepository(self.path)
+        self.assertEqual(1, journal.load_execution_projection_cursor(JOURNAL_EXECUTION_PROJECTION, self.scope))
+        self.assertNotIn("plan", journal.load_execution_fill_projections(self.scope)[0])
+
+        plan = {"plan_id": "close-plan", "policy_ref": "close_confirm/v1", "expected_revision": 3}
+        new = _page(self.scope, 1, [{
+            **_event(self.scope, 2, "FILL", execution_id="planned-fill"), "plan": plan,
+        }])
+        journal.project_execution_event_page(new, NOW)
+        journal.project_execution_event_page(new, NOW)
+        [legacy, planned] = JournalRepository(self.path).load_execution_fill_projections(self.scope)
+        self.assertNotIn("plan", legacy)
+        self.assertEqual(plan, planned["plan"])
+
+        query = TradeHistoryQueryService(journal)
+        fill_at = NOW.replace(tzinfo=None)
+        summary = TradeFill("order-1", "005930", "삼성전자", "매수", fill_at, 1, 70_000, origin_scope=self.scope)
+        self.assertEqual({}, query.load(fill_at, fill_at + timedelta(hours=1), self.scope).execution_plans)
+        journal.upsert_fills((summary,), account_scope=self.scope)
+        visible = query.load(fill_at, fill_at + timedelta(hours=1), self.scope)
+        self.assertEqual((summary,), visible.fills)
+        self.assertEqual({summary: OrderPlanRef(**plan)}, visible.execution_plans)
+
+    def test_cancellation_after_page_fetch_keeps_last_committed_cursor(self) -> None:
+        source = _Source([
+            {"events": [_event(self.scope, 1, "FILL", execution_id="fill-a")], "next_cursor": 1, "has_more": True},
+            {"events": [_event(self.scope, 2, "FILL", execution_id="fill-b")], "next_cursor": 2, "has_more": False},
+        ])
+
+        result = sync_journal_execution_projection(
+            source, self.repository, self.scope, now=NOW, cancel_requested=lambda: len(source.calls) == 2,
+        )
+
+        self.assertEqual((1, 1), (result.cursor, result.inserted_event_count))
+        self.assertEqual(["fill-a"], [row["broker_execution_id"] for row in self.repository.load_execution_fill_projections(self.scope)])
 
     def test_bounded_sync_resumes_from_repository_cursor_across_source_pages(self) -> None:
         source = _Source([

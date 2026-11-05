@@ -12,12 +12,12 @@ from pathlib import Path
 from typing import Any, Protocol, Callable, Mapping
 
 from kiwoom_monitor.application.market_session_schedule import (
-    KST, MarketPhase, MarketSession, SessionSupport, SessionWindow, TradingDayEvidence,
+    KST, TradingDayEvidence, decode_strategy_references,
     research_session_profile_document, research_session_profile_contract_matches,
 )
 from kiwoom_monitor.application.research_splits import DevelopmentPartitionSpec, ResearchEvaluationSpec, FinalHoldoutBatchSpec, warmup_start
 from kiwoom_monitor.application.research_resources import ResearchResourceBlocked
-from kiwoom_monitor.domain.market_data_contract import DataCompleteness, ListingEvidence, ListingType
+from kiwoom_monitor.domain.market_data_contract import ListingEvidence
 from kiwoom_monitor.domain.research_contract import RESEARCH_OBSERVATION_KINDS
 from kiwoom_monitor.infrastructure.research_storage import (
     write_research_storage_marker, research_storage_remaining_bytes, research_storage_text_bytes,
@@ -58,42 +58,10 @@ def load_frozen_strategy_references(path: Path, *, expected_sha256: str) -> Froz
     if digest != expected_sha256:
         raise ValueError("strategy reference artifact hash does not match")
     try:
-        document = json.loads(encoded)
-        if document["version"] != "strategy-reference/v1":
-            raise ValueError("unsupported strategy reference version")
-        if not isinstance(document["calendar"], list) or not isinstance(document["listings"], list):
-            raise ValueError("strategy reference collections must be arrays")
-        calendar = tuple(_read_trading_day_evidence(row) for row in document["calendar"])
-        listings = tuple(ListingEvidence(
-            symbol=row["symbol"],
-            listing_date=date.fromisoformat(row["listing_date"]) if row["listing_date"] is not None else None,
-            listing_type=ListingType(row["listing_type"]),
-            available_at=datetime.fromisoformat(row["available_at"]) if row["available_at"] is not None else None,
-            source=row["source"], revision=row["revision"], evidence_id=row["evidence_id"],
-            completeness=DataCompleteness(row["completeness"]),
-        ) for row in document["listings"])
+        calendar, listings = decode_strategy_references(json.loads(encoded))
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise ValueError("strategy reference artifact has invalid evidence") from exc
     return FrozenStrategyReferences(digest, calendar, listings)
-
-
-def _read_trading_day_evidence(row: dict[str, Any]) -> TradingDayEvidence:
-    venue = row["venue"]
-    trading_date = date.fromisoformat(row["trading_date"])
-    raw_windows = row["sessions"]
-    if raw_windows is not None and not isinstance(raw_windows, list):
-        raise ValueError("calendar sessions must be an array or null")
-    windows = None if raw_windows is None else tuple(SessionWindow(
-        venue=venue, trading_date=trading_date,
-        session=MarketSession(window["session"]), phase=MarketPhase(window["phase"]),
-        starts_at=datetime.fromisoformat(window["starts_at"]), ends_at=datetime.fromisoformat(window["ends_at"]),
-        schedule_version=window["schedule_version"], support=SessionSupport(window["support"]),
-        reason=window.get("reason", ""),
-    ) for window in raw_windows)
-    return TradingDayEvidence(
-        venue, trading_date, datetime.fromisoformat(row["available_at"]),
-        row["revision_id"], row["evidence_ref"], windows,
-    )
 
 
 BUNDLE_VERSION = "research_dataset_bundle/v1"

@@ -107,9 +107,10 @@ class SelectedAccountClientTests(unittest.TestCase):
 
     def test_selected_mock_account_reads_validated_incremental_execution_events(self):
         selected = self.selected()
+        plan = {"plan_id": "s12-close-plan", "policy_ref": "close_confirm/v1", "expected_revision": 3}
         self.responses = [{
             "context": self.b,
-            "events": [{"accepted_sequence": 4, "source_event_id": "event-4"}],
+            "events": [{"accepted_sequence": 4, "source_event_id": "event-4", "plan": plan}],
             "next_cursor": 4,
             "has_more": False,
         }]
@@ -117,6 +118,7 @@ class SelectedAccountClientTests(unittest.TestCase):
         page = selected.load_mock_execution_events(after_sequence=3, limit=20)
 
         self.assertEqual(4, page["next_cursor"])
+        self.assertEqual(plan, page["events"][0]["plan"])
         self.assertIn("/execution-events?", self.requests[-1].full_url)
         self.assertIn("after_sequence=3", self.requests[-1].full_url)
         self.assertIn("limit=20", self.requests[-1].full_url)

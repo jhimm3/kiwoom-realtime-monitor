@@ -11,7 +11,7 @@ from enum import StrEnum
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any, Mapping, Protocol
 
-from kiwoom_monitor.domain.strategy_contract import StrategyDecision
+from kiwoom_monitor.domain.strategy_contract import LEADER_BREAKOUT_FAMILY_ID, StrategyDecision
 from kiwoom_monitor.application.market_session_schedule import mock_order_entry_decision
 from kiwoom_monitor.application.mock_automation_admission import (
     MockAutomationAdmission,
@@ -427,6 +427,12 @@ def mock_automation_intent_id(spec_id: str, strategy_decision_id: str) -> str:
         raise ValueError("spec_id and strategy_decision_id are required")
     digest = hashlib.sha256(f"{spec_id}:{strategy_decision_id}".encode("utf-8")).hexdigest()
     return f"mock_auto_intent_{digest}"
+
+
+def mock_automation_order_policy_version(family_id: str | None, session_profile: str | None) -> str:
+    if family_id == LEADER_BREAKOUT_FAMILY_ID:
+        return "leader_execution_adapter/v1"
+    return f"{MOCK_AUTOMATION_DECISION_GATE_VERSION}:{session_profile}"
 
 
 def _decision_safety_context(spec, admission, recovery_decision, decision, recovery, metrics, *,
@@ -1545,7 +1551,7 @@ def _intent_for_decision(
         limit_price=decision.signal_reference_price,
         created_at=decided_at,
         expires_at=decided_at + timedelta(seconds=validity_seconds),
-        policy_version="leader_execution_adapter/v1" if family_id == "leader_breakout/v1" else f"{MOCK_AUTOMATION_DECISION_GATE_VERSION}:{spec.session_profile}",
+        policy_version=mock_automation_order_policy_version(family_id, spec.session_profile),
     )
 
 

@@ -839,6 +839,7 @@ O1의 mock 계좌 대조는 일반 `/api/v1/kiwoom/query`와 분리된 내부 br
 event의 상태·발생/수신시각·broker 주문/체결 ID·수량·가격을 함께 가진다. 커서는 계좌 전체 원장을
 기준으로 하며 run이 바뀌어도 이어진다. 다른 계좌나 오래된 binding으로 읽을 수 없고 이 API는
 Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_read_v1`이다.
+원주문이 계획에 귀속된 행은 원래 `plan_id`, `policy_ref`, `expected_revision`을 선택 필드 `plan`으로 전달한다. 일지는 상세 체결과 주문을 정확히 대조한 경우 해당 참조를 표시한다.
 
 신규 주문은 인증된 수동 KRX 지정가만 받는다. `09:00~15:20`은 검증된 정규장 정책이며 `16:00~20:00`은 키움 모의투자의 새 KRX 애프터 지원 여부를 broker 응답으로 확인하는 `manual-mock-krx-after-limit-probe/v1`이다. probe 허용은 지원 확정이 아니며 접수·거절 결과를 원장과 응답의 `policy_version`으로 구분한다. NXT·시장가·15:20~16:00 신규 주문은 허용하지 않는다.
 
@@ -1089,3 +1090,5 @@ R3c 로컬 소스의 `/health.mock_account_available`은 실제 모의 bundle �
 ## D4 shadow 후보 조회
 
 `GET /api/v1/research/candidates?after_sequence=0&limit=100`은 인증된 읽기 전용 API다. 응답은 `high_watermark`, 불변 `events[]`, `next_cursor`, `has_more`, 생성기의 `quality`를 반환한다. event에는 서버 `accepted_sequence`, `event_id`, 종목, 감지·만료 시각, 판단 기준가와 입력 근거가 있다. `status=ACTIVE/EXPIRED`는 조회 시각의 표시값이며 원장을 수정하지 않는다. 생성 기능이 꺼져 있어도 HTTP 200과 `quality.status=DISABLED`를 반환한다. 앱의 Shadow 창에서 감지 여부와 조건을 저장하면 같은 서버 실행 중 즉시 이 상태가 바뀐다. 이 경로는 주문이나 체결을 만들지 않는다.
+
+Section 12 완료봉 Shadow는 `PUT /api/v1/settings/operations`의 `shadow_candidate_config`에 `version: "section12-minute-shadow/v1"`, `strategy`, 양의 정수 `signal_valid_seconds`를 전달해 선택한다. `family` 생략 시 `breakout_study/v1`이며, 종가베팅과 신규주 두 조합은 `references`에 `strategy-reference/v1` 문서를 요구한다. `symbols`를 명시하면 해당 목록의 종목만 보고, 생략하면 당시 가용한 TOP20을 사용한다. 후보는 `shadow_scope`, `strategy_variant`, `observation_key`, `input_cutoff`, `input_revision_refs`를 보존한다. 조회는 현재 모니터 교체·비활성, 입력 복구, 마감 판본 정정을 각각 `SUPERSEDED`, `WARMUP`, `INVALIDATED`로 표시할 수 있다.

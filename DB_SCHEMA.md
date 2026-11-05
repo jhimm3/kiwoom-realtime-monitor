@@ -250,7 +250,7 @@ NAS `central_dataset_snapshots(kind='top20_statistics_day')`는 완료된 날짜
 | 파생 분석 이력 | `journal_analysis_revisions` | 사용자 복기와 분리한 입력 지문·분석 버전별 기계 판정 revision. 같은 입력과 버전은 중복 저장하지 않음 |
 | 연구 근거 연결 | `journal_research_links` | 실제 체결 참조와 연구 run/decision/snapshot/진입가설 ID의 불변 연결. 과거·수동 거래는 decision ID가 없을 수 있음 |
 | 실행 projection 상태 | `journal_execution_projection_states` | 중앙 mock 실행 원장의 계좌별 마지막 `accepted_sequence` cursor. projection 행과 같은 트랜잭션으로만 전진 |
-| 실행 체결 근거 | `journal_execution_event_projections` | 상세 `FILL`과 수량만 가진 `BROKER_FILL_AGGREGATE`의 불변 파생 원장. source event ID와 계좌·KST 거래일·broker 주문/체결 ID를 각각 멱등 키로 사용 |
+| 실행 체결 근거 | `journal_execution_event_projections` | 상세 `FILL`과 수량만 가진 `BROKER_FILL_AGGREGATE`의 불변 파생 원장. source event ID와 계좌·KST 거래일·broker 주문/체결 ID를 각각 멱등 키로 사용. v12의 nullable `order_plan_json`은 원주문 계획 ID·정책 참조·예상 판본을 저장한다. |
 
 매매 묶음/회차 자체는 체결과 `trade_group_overrides`에서 계산되며 별도 고정 테이블이 아니다. 자동 분류는 재계산 가능한 파생값이지만 수동 수정은 사용자 원본이므로 보존해야 한다. 매매일지 v4는 기존 사용자 행을 변경하지 않고 자동보완 원장·파생 revision·연구 근거 링크를 추가했다. v5 `account_scoped_trade_ledger`는 기존 체결·비용을 `legacy-unassigned`로 옮기고 기존 `fill_key`와 수동 묶음 참조를 보존한다. v6 `account_scoped_journal_artifacts`는 계좌 scope를 추가한다. v7은 legacy 수입 원장을 만들고 v8은 owner/content hash와 관측·수정 시각 및 충돌 상태를 추가한다. v9는 중앙 실행 원장의 상세 체결과 누적 수량 표시를 분리해 저장하고 계좌별 cursor를 원자 확정한다. A5c read projection은 새 표 없이 v9 상세 FILL과 `trade_fills`를 canonical 계좌·거래일·주문·종목·매수/매도로 대조하며, 상세가 있으면 요약을 더하지 않는다. `SUMMARY_ONLY`·`PARTIAL`·`CONFLICT`는 미확인이라 후속 확정 손익에서 제외해야 한다. 이 두 v9 표는 중앙 원장에서 다시 만들 수 있는 파생 자료라 `journal_v2_*` 콘텐츠 동기화에는 추가하지 않으며 전체 SQLite 백업에는 포함된다. filled/captured 시각은 수정 revision으로 사용하지 않는다.
 

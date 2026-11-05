@@ -77,6 +77,17 @@ class PanicSetup:
     trigger_revision_id: str
     input_refs: tuple[str, ...]
 
+    def to_dict(self) -> dict[str, object]:
+        return {**vars(self), "trigger_bar_start": self.trigger_bar_start.isoformat(),
+                "trigger_available_at": self.trigger_available_at.isoformat()}
+
+    @classmethod
+    def from_dict(cls, document: Mapping[str, object]) -> PanicSetup:
+        return cls(**{**document,
+                      "trigger_bar_start": aware_iso_kst(document["trigger_bar_start"]),
+                      "trigger_available_at": aware_iso_kst(document["trigger_available_at"]),
+                      "input_refs": tuple(document["input_refs"])})
+
 
 @dataclass(frozen=True)
 class PanicReboundDecision:

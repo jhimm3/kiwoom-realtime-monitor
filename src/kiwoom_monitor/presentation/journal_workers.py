@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from kiwoom_monitor.domain.time_basis import as_kst
 
+import logging
 from datetime import date, datetime, time, timedelta
+from threading import Event
 from typing import Callable
 
 from PySide6.QtCore import QThread, Signal
 
+from kiwoom_monitor.application.journal_enrichment import sync_journal_execution_projection
 from kiwoom_monitor.application.market_index_chart_service import MarketIndexChartService
 from kiwoom_monitor.application.minute_chart_service import MinuteChartService
 from kiwoom_monitor.application.minute_trade_value import MinuteOhlcv
@@ -90,15 +93,24 @@ class HistoryWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, service: TradeHistoryService, cost_service: TradeCostService, start: date, end: date,
-                 *, account_client=None, account_scope=None) -> None:
+                 *, account_client=None, account_scope=None, execution_projection_repository=None) -> None:
         super().__init__()
         self._service, self._cost_service, self._start, self._end = service, cost_service, start, end
         self._account_client, self._expected_scope = account_client, account_scope
+        self._execution_projection_repository = execution_projection_repository
+        self._projection_cancelled = Event()
+
+    def cancel_execution_projection(self) -> None:
+        self._projection_cancelled.set()
+
+    def _execution_projection_cancelled(self) -> bool:
+        return self.isInterruptionRequested() or self._projection_cancelled.is_set()
 
     def run(self) -> None:
         try:
             fills: list[TradeFill] = []
             fills_context = None
+            client = None
             service, cost_service = self._service, self._cost_service
             if self._account_client is not None:
                 selector = getattr(self._account_client, "for_account_scope", None)
@@ -132,6 +144,20 @@ class HistoryWorker(QThread):
                 # 계좌별 예상 비용률을 사용한다.
                 costs = ()
                 self.progress.emit("모의투자 체결 확인 완료 · 비용은 예상값 사용")
+                if (
+                    self._execution_projection_repository is not None
+                    and fills_context is not None and fills_context.transport == "nas"
+                    and fills_context.binding_revision > 0
+                    and callable(getattr(client, "load_mock_execution_events", None))
+                    and not self._execution_projection_cancelled()
+                ):
+                    try:
+                        sync_journal_execution_projection(
+                            client, self._execution_projection_repository, self._expected_scope,
+                            now=as_kst(client.server_now()), cancel_requested=self._execution_projection_cancelled,
+                        )
+                    except Exception as error:
+                        logging.getLogger(__name__).warning("모의 실행 원장 보완 실패: %s", type(error).__name__)
             else:
                 self.progress.emit("실제 수수료·세금 확인 중…")
                 try:

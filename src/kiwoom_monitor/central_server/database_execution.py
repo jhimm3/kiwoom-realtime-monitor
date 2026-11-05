@@ -68,7 +68,7 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
             now_provider=now_provider)
     if ownership.get('protection_claim') is not None and 'intent_id' in value:
         _require_mock_protection_claim(cursor, ownership, value, p, now_provider=now_provider,new_intent_claim=new_intent_claim)
-    if new_intent_claim and value.get('policy_version') == 'leader_execution_adapter/v1':
+    if (new_intent_claim or (submission_claim and "plan" in value)) and value.get('policy_version') == 'leader_execution_adapter/v1':
         _require_leader_execution_claim(cursor, ownership, value, p, now_provider=now_provider)
     if "intent_id" in value:
         plan_projection = "document_json->'plan'" if p == "%s" else "json_extract(document_json,'$.plan')"
@@ -113,6 +113,7 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
         MockAutomationGateStatus,
         mock_automation_decision_gate_from_dict,
         mock_automation_intent_id,
+        mock_automation_order_policy_version,
     )
     from kiwoom_monitor.application.mock_automation_recovery import (
         MockAutomationRecoveryStatus,
@@ -120,7 +121,7 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
         mock_automation_recovery_decision_from_dict,
     )
     from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
-    from kiwoom_monitor.domain.execution_activation import mock_automation_spec_from_dict
+    from kiwoom_monitor.domain.execution_activation import forward_spec_from_dict, mock_automation_spec_from_dict
     from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
 
     recovery = ownership.get("plan_recovery") if ownership is not None else None
@@ -156,6 +157,16 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
     if spec_doc is None or risk_doc is None or recovery_doc is None:
         raise RuntimeError("PLANNED_EXECUTION_RISK_OR_RECOVERY_MISSING")
     spec = mock_automation_spec_from_dict(spec_doc)
+    profile_doc = _plan_document(cursor, p, "execution_forward_profiles", spec.strategy_ref, spec.forward_profile_id)
+    if profile_doc is None:
+        raise RuntimeError("PLANNED_EXECUTION_FORWARD_PROFILE_MISSING")
+    profile = forward_spec_from_dict(profile_doc)
+    if (
+        (profile.profile_id, profile.account_ref, profile.strategy_ref, profile.environment, profile.session_profile)
+        != (spec.forward_profile_id, account_ref, spec.strategy_ref, value["environment"], spec.session_profile)
+        or value["policy_version"] != mock_automation_order_policy_version(profile.family_version, spec.session_profile)
+    ):
+        raise RuntimeError("PLANNED_EXECUTION_FORWARD_PROFILE_CHANGED")
     risk = mock_automation_risk_snapshot_from_dict(risk_doc)
     current = mock_automation_recovery_decision_from_dict(recovery_doc)
     now = kst_now() if now_provider is None else now_provider()
@@ -168,7 +179,6 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
     if (
         spec.account_scope.account_ref != account_ref or spec.spec_id != gate.spec_id
         or spec.strategy_ref != gate.strategy_ref or value["venue"] != spec.supported_venue
-        or value["policy_version"] != f"{gate.version}:{spec.session_profile}"
         or risk.binding_revision != spec.binding_revision or not risk.reconciliation_complete
         or (risk.account_ref, risk.execution_run_id) != (account_ref, value["run_id"])
         or (risk.snapshot_id, risk.reconciliation_revision) != (gate.risk_snapshot_id, gate.risk_reconciliation_revision)
@@ -346,6 +356,12 @@ def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider
         raise RuntimeError('LEADER_EXECUTION_RULES_CHANGED')
     proof = record['position_proof']
     context = validate_leader_position_proof(proof, config, spec, ownership['run_id'])
+    plan = value.get("plan")
+    if plan is not None and (
+        plan["plan_id"] != proof["entry_intent_id"] or plan["policy_ref"] != proof["proof_id"]
+        or (value["side"] == "BUY" and plan["expected_revision"] != 0)
+    ):
+        raise RuntimeError("LEADER_EXECUTION_PLAN_PROOF_CHANGED")
     saved = document('execution_leader_position_context', account, proof['entry_intent_id'])
     if saved != proof:
         raise RuntimeError('LEADER_PINNED_CONTEXT_CHANGED')

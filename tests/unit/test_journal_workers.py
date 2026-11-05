@@ -7,11 +7,12 @@ from types import SimpleNamespace
 
 from PySide6.QtCore import QCoreApplication
 
+from kiwoom_monitor.application.journal_enrichment import JournalExecutionProjectionResult
 from kiwoom_monitor.presentation.journal_workers import (
     AnalysisEnrichmentWorker, BackfillWorker, ConfirmWorker, DailyChartWorker, HistoryWorker,
     MarketIndexBackfillWorker,
 )
-from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountQueryContext
+from kiwoom_monitor.infrastructure.kiwoom_rest.account_query import AccountQueryBatch, AccountQueryContext
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope, LEGACY_ACCOUNT_SCOPE
 
 
@@ -166,6 +167,41 @@ class JournalWorkerTests(unittest.TestCase):
 
         costs.load_period_batch.assert_not_called()
         self.assertEqual(((), (), ""), received[0][0])
+
+    def test_history_worker_projects_only_current_nas_bound_mock_scope(self) -> None:
+        scope = AccountScope("kiwoom", AccountEnvironment.MOCK, "11111111-1111-4111-8111-111111111111")
+        other = AccountScope("kiwoom", AccountEnvironment.MOCK, "22222222-2222-4222-8222-222222222222")
+        for actual_scope, transport, revision, cancelled, projected in (
+            (scope, "nas", 2, False, True),
+            (scope, "nas", 2, True, False),
+            (other, "nas", 2, False, False),
+            (scope, "direct", 2, False, False),
+            (scope, "nas", 0, False, False),
+        ):
+            with self.subTest(scope=actual_scope, transport=transport, revision=revision, cancelled=cancelled):
+                context = AccountQueryContext(actual_scope, "mock-profile", revision, transport)
+                client = SimpleNamespace(
+                    query_account_pages=mock.Mock(return_value=AccountQueryBatch(({},), context, 1, True)),
+                    load_mock_execution_events=mock.Mock(return_value={"events": [], "next_cursor": 2, "has_more": False}),
+                    server_now=lambda: datetime(2026, 9, 21, 20),
+                )
+                repository = SimpleNamespace(
+                    load_execution_projection_cursor=mock.Mock(return_value=2),
+                    project_execution_event_page=mock.Mock(return_value=JournalExecutionProjectionResult(2, 0, 0, 0, {})),
+                )
+                worker = HistoryWorker(None, None, date(2026, 9, 21), date(2026, 9, 21),
+                    account_client=SimpleNamespace(for_account_scope=lambda _scope: client), account_scope=scope,
+                    execution_projection_repository=repository)
+                if cancelled:
+                    worker.cancel_execution_projection()
+                completed, failed = [], []
+                worker.completed.connect(lambda *args: completed.append(args))
+                worker.failed.connect(failed.append)
+                worker.run()
+                self.assertEqual(int(projected), client.load_mock_execution_events.call_count)
+                self.assertEqual(int(projected), repository.project_execution_event_page.call_count)
+                self.assertEqual(bool(actual_scope == scope), bool(completed))
+                self.assertEqual(bool(actual_scope != scope), bool(failed))
 
     def test_backfill_worker_counts_success_and_failure(self) -> None:
         class Service:

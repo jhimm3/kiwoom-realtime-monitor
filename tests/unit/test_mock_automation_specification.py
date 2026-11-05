@@ -301,7 +301,7 @@ def mock_specification_inputs(store, *, scientific_hash="a" * 64, publish_candid
     return value
 
 
-def _planned_execution_fixture(case, store, inputs, *, cash=145_000):
+def _planned_execution_fixture(case, store, inputs, *, cash=145_000, requested_at=None):
     from kiwoom_monitor.central_server.database_execution import PLAN_POSITION_COLLECTION
 
     repository, spec = inputs.repository, inputs.spec
@@ -309,7 +309,7 @@ def _planned_execution_fixture(case, store, inputs, *, cash=145_000):
         repository, profile=inputs.profile, stage_revisions=inputs.stages, spec=spec,
         shadow_event=inputs.shadow_event, current_binding=inputs.binding,
     )
-    clock = [inputs.profile.evaluation_start + timedelta(minutes=1)]
+    clock = [requested_at or inputs.profile.evaluation_start + timedelta(minutes=1)]
     case.enterContext(patch.object(store, "_execution_wall_now", lambda: clock[0], create=True))
     transport = _FakeBrokerTransport(lambda: clock[0])
     run_id = execution_run_id_for_spec(spec.spec_id)
@@ -448,6 +448,21 @@ def verify_native_planned_execution(case, store, inputs):
     events = ExecutionRepository(store).account_events("mock", ACCOUNT_REF).events
     fill = next(event for event in events if event.broker_execution_id == "late-planned-fill")
     case.assertEqual(fill.accepted_sequence, projected["fill_cursor"])
+    case.assertEqual(first.intent.plan, fill.plan)
+    plan_document = {"plan_id": "a", "policy_ref": "synthetic-same-symbol/v1", "expected_revision": 0}
+    case.assertEqual(plan_document, fill.to_dict()["plan"])
+    scope = AccountScope("kiwoom", AccountEnvironment.MOCK, ACCOUNT_REF)
+    with tempfile.TemporaryDirectory() as directory:
+        journal_path = Path(directory) / "journal.sqlite3"
+        journal = JournalRepository(journal_path)
+        result = sync_journal_execution_projection(
+            _ExecutionPageSource(ExecutionRepository(store), ACCOUNT_REF), journal, scope, now=clock[0],
+        )
+        case.assertEqual(1, result.detailed_fill_count)
+        [journal_fill] = JournalRepository(journal_path).load_execution_fill_projections(scope)
+        case.assertEqual((fill.run_id, fill.decision_id, fill.broker_execution_id, plan_document), (
+            journal_fill["run_id"], journal_fill["decision_id"], journal_fill["broker_execution_id"], journal_fill["plan"],
+        ))
     restored.reconcile(first.intent.intent_id, replace(late, as_of=clock[0] + timedelta(seconds=1)))
     case.assertEqual(projected, head("a"))
     case.assertEqual(0, head("b")["quantity"])
@@ -1184,6 +1199,62 @@ class MockAutomationSpecificationTests(unittest.TestCase):
     def test_planned_sell_isolation_preserves_manual_shares_in_sqlite(self):
         verify_native_planned_sell_isolation(self, self.store, self)
 
+    def test_section12_close_candidate_does_not_authorize_a_native_planned_order(self):
+        from datetime import time
+
+        from kiwoom_monitor.application.breakout_strategy import StrategyState
+        from kiwoom_monitor.application.market_session_schedule import KST
+        from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
+        from kiwoom_monitor.application.section12_minute_research import CLOSE_FAMILY, build_minute_evaluation
+        from tests.unit.test_close_and_ipo import CloseAndIpoTests
+
+        example = CloseAndIpoTests()
+        example.friday = self.profile.evaluation_start.astimezone(KST).date()
+        example.tuesday = example.friday + timedelta(days=4)
+        example.published = datetime.combine(example.friday, time(8), KST)
+        example.setUp()
+        decision = example.decide(example.close)
+        self.assertEqual(("ENTER", 4), (decision.action, decision.quantity))
+        cut = datetime.fromisoformat(example.signal.available_at)
+        fixture = _planned_execution_fixture(self, self.store, self, requested_at=cut)
+        evaluation = build_minute_evaluation(
+            CLOSE_FAMILY, "synthetic-frozen-close", example.signal, "", StrategyState(),
+            decision.action, decision.reason, decision.quantity, decision.setup, decision.evidence_refs,
+        )
+        candidate = evaluation.candidate_event
+        self.assertIsNotNone(candidate)
+        self.assertEqual("close_betting", candidate.strategy_id)
+        self.store.save_shadow_evaluation(
+            candidate.run_id, evaluation.decision.to_dict(), candidate.to_dict(),
+        )
+        self.assertEqual(candidate.event_id, self.store.load_shadow_candidates()["events"][-1]["event_id"])
+
+        spec = fixture.spec
+        revision = self.repository.load_mock_automation_control(ACCOUNT_REF).control_revision
+        intent = PlannedOrderIntent(
+            mock_automation_intent_id(spec.spec_id, evaluation.decision.decision_id),
+            fixture.run_id, evaluation.decision.decision_id, ACCOUNT_REF, "mock",
+            candidate.symbol, "KRX", OrderSide.BUY, candidate.quantity, OrderType.LIMIT,
+            candidate.signal_reference_price, cut, cut + timedelta(seconds=spec.maximum_data_gap_seconds),
+            f"mock_automation_decision_gate/v2:{spec.session_profile}",
+            plan=OrderPlanRef("close-plan", CLOSE_FAMILY, 0),
+        )
+        legacy = assess_mock_automation_decision_from_risk(
+            self.repository, fixture.runtime, _automation_decision(fixture.run_id, "ENTER", cut),
+            fixture.recovery, fixture.risk, **fixture.scope,
+        )
+        self.assertEqual(MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION, legacy.status, legacy.reasons)
+        with self.assertRaisesRegex(RuntimeError, "PLANNED_EXECUTION_APPROVAL_REQUIRED"):
+            fixture.runtime.submit_automation_intent(
+                intent, fixture.account, spec_id=spec.spec_id, control_revision=revision,
+                plan_recovery=fixture.recovery,
+            )
+        self.assertIsNone(self.repository.load_mock_automation_approved_gate(ACCOUNT_REF, intent.intent_id))
+        self.assertIsNone(fixture.runtime.load_intent(intent.intent_id))
+        self.assertIsNone(fixture.head("close-plan"))
+        self.assertEqual(((), True), fixture.runtime.load_account_active_intents())
+        self.assertEqual([], fixture.transport.calls)
+
     def test_candidate_publication_list_returns_complete_account_scoped_lineage(self) -> None:
         publications = self.repository.load_mock_automation_candidate_publications(ACCOUNT_REF)
 
@@ -1399,7 +1470,9 @@ class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
     """Actual breakout evaluator and order lifecycle, with isolated broker inputs."""
 
     def setUp(self):
-        self.store = SQLiteQueryStore(Path(":memory:"))
+        self.store = getattr(self, "_native_fixture_store", None)
+        if self.store is None:
+            self.store = SQLiteQueryStore(Path(":memory:"))
         self.store.initialize()
         self.addCleanup(self.store.close)
         inputs = mock_specification_inputs(self.store, unfilled_execution_policy=getattr(self, 'unfilled_execution_policy', None))
@@ -1771,6 +1844,138 @@ class MockAutomationWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("STOPPED", self.runner.episode.status["state"])
         self.assertEqual("open", self.runner.episode.status["strategy_state"])
         self.assertEqual(1, len(self.transport.calls))
+
+
+class PlannedLeaderNativeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from tests.unit.test_leader_breakout import LeaderBreakoutAutomationTests
+
+        LeaderBreakoutAutomationTests.setUp(self)
+        self.deliver = LeaderBreakoutAutomationTests.deliver.__get__(self)
+
+    def _dispatch_with_plan(self, repository, runtime, decision, recovery, risk, **scope):
+        from kiwoom_monitor.central_server.database_execution import PLAN_POSITION_COLLECTION
+
+        proof = self.runner.episode._leader_position_proof
+        plan_id = proof["entry_intent_id"]
+        row = self.store.load_document(PLAN_POSITION_COLLECTION, ACCOUNT_REF, plan_id)
+        revision = row["document"]["revision"] if row is not None else 0
+        return dispatch_mock_automation_decision_from_risk(
+            repository, runtime, decision, recovery, risk,
+            plan=OrderPlanRef(plan_id, proof["proof_id"], revision), **scope,
+        )
+
+    async def test_explicit_leader_plan_replays_pinned_0b_proof_and_protects_the_fill_after_restart(self):
+        from kiwoom_monitor.central_server.database_execution import PLAN_POSITION_COLLECTION
+
+        def head(plan_id):
+            row = self.store.load_document(PLAN_POSITION_COLLECTION, ACCOUNT_REF, plan_id)
+            return row["document"] if row is not None else None
+
+        with patch("kiwoom_monitor.central_server.mock_automation_episode.dispatch_mock_automation_decision_from_risk",
+                   side_effect=self._dispatch_with_plan):
+            await self.deliver(990)
+            await self.deliver(1001)
+            self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
+            buy = self.execution.load(self.runner.episode.status["pending_intent_id"])
+            self.assertIsInstance(buy.intent, PlannedOrderIntent)
+            self.assertEqual(buy.intent.intent_id, buy.intent.plan.plan_id)
+            self.assertEqual(self.runner.episode._leader_position_proof["proof_id"], buy.intent.plan.policy_ref)
+            plan_id = buy.intent.plan.plan_id
+            self.assertEqual((0, 1), (head(plan_id)["quantity"], head(plan_id)["revision"]))
+            self._fill_pending("BUY", 1001)
+            self.assertEqual((1, 2), (head(plan_id)["quantity"], head(plan_id)["revision"]))
+
+            await self.runner.close()
+            self.assertTrue(self.runtime.stop())
+            self.execution = ExecutionRepository(self.store)
+            self.runtime = ExecutionRuntime(
+                OrderLifecycle(self.execution, self.transport, now_provider=lambda: self.clock),
+                self.execution, account_ref=ACCOUNT_REF, run_id=self.run_id,
+                owner_token="explicit-planned-leader-restart", now_provider=lambda: self.clock,
+            )
+            self.addCleanup(self.runtime.stop)
+            admit_mock_automation(
+                self.repository, self.repository, self.runtime,
+                account_ref=ACCOUNT_REF, spec_id=self.spec.spec_id, requested_at=self.clock,
+            )
+            self.bundle.repository = self.execution
+            self.bundle.runtime = self.runtime
+            self.live = None
+            self.runner = _prepared_runner(
+                self.store, self.bundle, self.spec, now_provider=lambda: self.clock,
+                leader_context_source=lambda: self.live,
+            )
+            self.addAsyncCleanup(self.runner.close)
+            await self.deliver(990, source="planned-restart:1")
+            self.assertEqual(["BUY"], [call[1] for call in self.transport.calls])
+            await self.deliver(940, source="planned-restart:1")
+            self.assertEqual(["BUY", "SELL"], [call[1] for call in self.transport.calls])
+            sell = self.execution.load(self.runner.episode.status["pending_intent_id"])
+            self.assertEqual(replace(buy.intent.plan, expected_revision=2), sell.intent.plan)
+            self._fill_pending("SELL", 940)
+            await self.runner.episode.advance_once()
+
+        self.assertEqual((0, 4), (head(plan_id)["quantity"], head(plan_id)["revision"]))
+        fills = [event for event in self.execution.account_events("mock", ACCOUNT_REF).events
+                 if event.event_type == "FILL"]
+        self.assertEqual([(buy.intent.intent_id, 1), (sell.intent.intent_id, 1)],
+                         [(event.intent_id, event.quantity) for event in fills])
+        self.assertEqual(fills[-1].accepted_sequence, head(plan_id)["fill_cursor"])
+        self.assertEqual(["BUY", "SELL"], [call[1] for call in self.transport.calls])
+
+    async def test_admitted_leader_plan_rejects_wrong_proof_and_generic_policy(self):
+        original_submit = self.runtime.submit_automation_intent
+
+        def attempt_tampering(intent, account, **kwargs):
+            with self.assertRaisesRegex(RuntimeError, "LEADER_EXECUTION_PLAN_PROOF_CHANGED"):
+                original_submit(replace(intent, plan=replace(intent.plan, policy_ref="different-proof")),
+                                account, **kwargs)
+            return original_submit(
+                replace(intent, policy_version=f"mock_automation_decision_gate/v2:{self.spec.session_profile}"),
+                account, **kwargs,
+            )
+
+        with patch("kiwoom_monitor.central_server.mock_automation_episode.dispatch_mock_automation_decision_from_risk",
+                   side_effect=self._dispatch_with_plan), patch.object(
+                       self.runtime, "submit_automation_intent", side_effect=attempt_tampering,
+                   ):
+            await self.deliver(990)
+            with self.assertRaisesRegex(RuntimeError, "PLANNED_EXECUTION_FORWARD_PROFILE_CHANGED"):
+                await self.deliver(1001)
+
+        proof = self.runner.episode._leader_position_proof
+        self.assertIsNotNone(self.repository.load_mock_automation_approved_gate(ACCOUNT_REF, proof["entry_intent_id"]))
+        self.assertIsNone(self.execution.load(proof["entry_intent_id"]))
+        self.assertEqual(((), True), self.runtime.load_account_active_intents())
+        self.assertEqual([], self.transport.calls)
+
+    async def test_planned_leader_rechecks_native_proof_after_claim_before_transport(self):
+        original_create = self.store.create_execution_intent
+
+        def change_observation_after_claim(intent, **kwargs):
+            accepted = original_create(intent, **kwargs)
+            decision_id = intent["decision_id"]
+            row = self.store.load_document("execution_leader_decisions", ACCOUNT_REF, decision_id)
+            document = row["document"]
+            document["observation"]["approved"] = False
+            self.store.upsert_documents("execution_leader_decisions", [
+                {"owner": ACCOUNT_REF, "key": decision_id, "document": document},
+            ])
+            return accepted
+
+        with patch("kiwoom_monitor.central_server.mock_automation_episode.dispatch_mock_automation_decision_from_risk",
+                   side_effect=self._dispatch_with_plan), patch.object(
+                       self.store, "create_execution_intent", side_effect=change_observation_after_claim,
+                   ):
+            await self.deliver(990)
+            with self.assertRaisesRegex(RuntimeError, "LEADER_INPUT_AUTHORITY_MISSING"):
+                await self.deliver(1001)
+
+        intent_id = self.runner.episode._leader_position_proof["entry_intent_id"]
+        self.assertEqual(OrderState.QUEUED, self.execution.load(intent_id).state)
+        self.assertEqual(["QUEUED"], [event["event_type"] for event in self.execution.events(intent_id)])
+        self.assertEqual([], self.transport.calls)
 
 
 class MockUnfilledPurposeGateTests(unittest.IsolatedAsyncioTestCase):

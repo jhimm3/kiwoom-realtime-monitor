@@ -16,7 +16,7 @@ from kiwoom_monitor.infrastructure.persistence.schema_migrations import (
 )
 
 
-JOURNAL_SCHEMA_VERSION = 11
+JOURNAL_SCHEMA_VERSION = 12
 # Only an interrupted initialization belonging to this native schema may be
 # resumed by the one-time selected-settings command. Normal legacy migrations
 # keep their existing compatibility path and do not use this catalog boundary.
@@ -132,6 +132,10 @@ def _create_execution_projection_ledger_v9(connection: sqlite3.Connection) -> No
         "journal_execution_event_projections(origin_broker,origin_environment,"
         "origin_account_ref,intent_id,accepted_sequence)"
     )
+
+
+def _add_execution_projection_order_plan(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE journal_execution_event_projections ADD COLUMN order_plan_json TEXT")
 
 
 def _create_journal_enrichment_tables(connection: sqlite3.Connection) -> None:
@@ -474,6 +478,11 @@ def initialize_journal_database(path: Path) -> None:
                         11,
                         "selected_journal_settings_receipts",
                         _create_selected_settings_receipts,
+                    ),
+                    SQLiteMigration(
+                        12,
+                        "execution_projection_order_plan",
+                        _add_execution_projection_order_plan,
                     ),
                 )
             )

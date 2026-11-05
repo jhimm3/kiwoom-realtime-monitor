@@ -1324,6 +1324,54 @@ class LeaderBreakoutSelectionTests(unittest.TestCase):
             self.dialog._save_operational_settings()
         self.assertEqual(policy().to_dict(), save.call_args.args[0]["shadow_candidate_config"])
 
+    def test_tagged_section12_shadow_keeps_explicit_settings_and_variant(self):
+        from kiwoom_monitor.application.section12_minute_research import MINUTE_SHADOW_VERSION
+
+        self.dialog._apply_operational_settings(self.legacy_settings())
+        selector = self.dialog._strategy_selector
+        minute_index = selector.findData(MINUTE_SHADOW_VERSION)
+        selector.setCurrentIndex(minute_index)
+        draft = json.loads(self.dialog._leader_policy_editor.toPlainText())
+        self.assertIsNone(draft["strategy"]["capital_won"])
+        self.assertIsNone(draft["strategy"]["policy"]["variant"])
+        self.assertIsNone(draft["signal_valid_seconds"])
+        self.assertTrue(self.dialog._lookback_bars.isHidden())
+        self.assertFalse(self.dialog._leader_policy_editor.isHidden())
+        with patch.object(self.dialog, "_start_settings_request") as save:
+            self.dialog._save_operational_settings()
+        save.assert_not_called()
+
+        config = {"version": MINUTE_SHADOW_VERSION, "signal_valid_seconds": 31, "strategy": {
+            "capital_won": 101_000, "policy": {
+                "variant": "B0", "quantity": 2, "exit_at_kst": "15:18", "theme_id": None,
+                "theme_role": None, "exit_on_dependency_loss": False,
+            },
+        }}
+        self.dialog._leader_policy_editor.setPlainText(json.dumps(config))
+        self.dialog._candidate_enabled.setChecked(True)
+        selector.setCurrentIndex(1)
+        selector.setCurrentIndex(minute_index)
+        with patch.object(self.dialog, "_start_settings_request") as save:
+            self.dialog._save_operational_settings()
+        save.assert_called_once_with({"expected_revision": 12, "shadow_candidate_config": config,
+                                      "shadow_candidate_enabled": True})
+
+        saved = {"revision": 13, "applied_revision": 12, "apply_status": "RECOVERY_REQUIRED",
+                 "shadow_candidate_config": config, "shadow_candidate_enabled": False}
+        selector.setCurrentIndex(0)
+        self.dialog._apply_operational_settings(saved)
+        self.assertEqual(MINUTE_SHADOW_VERSION, selector.currentData())
+        self.assertFalse(self.dialog._candidate_enabled.isChecked())
+        self.assertEqual(config, json.loads(self.dialog._leader_policy_editor.toPlainText()))
+        status = self.dialog._server_policy_status.text()
+        self.assertIn("서버 저장 #13", status)
+        self.assertIn("서버 적용 #12", status)
+        self.assertIn("적용 복구 필요", status)
+        self.assertIn("B0", status)
+
+        self.dialog._append_event({"strategy_id": "breakout_study", "strategy_variant": "B1", "symbol": "005930"})
+        self.assertEqual("Section 12 완료봉 돌파 · B1", self.dialog._table.item(0, 6).text())
+
     def test_missing_server_config_uses_unconfigured_new_policy(self):
         self.dialog._apply_operational_settings({"revision": 5})
         from kiwoom_monitor.application.leader_breakout import document_leader_breakout_policy

@@ -14,7 +14,7 @@ from kiwoom_monitor.domain.time_basis import KST, aware_iso_kst
 
 
 _MINUTE = timedelta(minutes=1)
-_PRIOR_BARS = 10  # EX-BR B0 protocol.
+BREAKOUT_PRIOR_BARS = 10  # EX-BR B0 protocol.
 
 
 class ThemeRole(StrEnum):
@@ -344,7 +344,7 @@ def _filter_entry(filters, bar, prior, end, cutoff, evidence, refs):
     turnover = sum(row.trade_value_million_won for row in prior)
     if turnover <= 0:
         return "breakout_symbol_turnover_baseline_unavailable", None, refs
-    if bar.trade_value_million_won * _PRIOR_BARS * 10_000 < turnover * filters.minimum_symbol_relative_turnover_bps:
+    if bar.trade_value_million_won * BREAKOUT_PRIOR_BARS * 10_000 < turnover * filters.minimum_symbol_relative_turnover_bps:
         return "breakout_symbol_relative_turnover_below_threshold", None, refs
     if not isinstance(filters, MarketBreakoutFilters):
         return "", (turnover, ()), refs
@@ -461,7 +461,7 @@ def _theme_at(proofs, symbol, theme_id, cutoff):
 
 
 def _scoped_rows(bar, start, cutoff, history):
-    first = start - (_PRIOR_BARS + 1) * _MINUTE
+    first = start - (BREAKOUT_PRIOR_BARS + 1) * _MINUTE
     slots = {}
     for row in history:
         if (row.code, row.research_session, row.schedule_version) != (bar.code, bar.research_session, bar.schedule_version):
@@ -477,9 +477,9 @@ def _scoped_rows(bar, start, cutoff, history):
 
 
 def _window(slots, start, cutoff):
-    first = start - _PRIOR_BARS * _MINUTE
+    first = start - BREAKOUT_PRIOR_BARS * _MINUTE
     result = []
-    for offset in range(_PRIOR_BARS):
+    for offset in range(BREAKOUT_PRIOR_BARS):
         expected = first + offset * _MINUTE
         rows = [(available, row) for available, row in slots.get(expected, ()) if available <= cutoff]
         if not rows:

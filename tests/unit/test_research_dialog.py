@@ -59,6 +59,79 @@ class ResearchDialogTests(unittest.TestCase):
         }})
         self.assertEqual(("PARTIAL", "70원", "10원", "N/A", "N/A", "20원"), risk[0][1:])
 
+    def test_section12_request_and_completed_result_keep_frozen_identity_and_scope(self) -> None:
+        import hashlib
+        import json
+
+        from kiwoom_monitor.research_process import execute_process_request, load_research_process_request
+        from research_test_support import research_request_document, write_empty_dataset
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_empty_dataset(root)
+            path = root / "dataset/manifest.json"
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            manifest["captured_range"] = {"start": "2026-09-12T00:00:00+00:00", "end": "2026-09-12T01:00:00+00:00"}
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            references = b'{"version":"strategy-reference/v1","listings":[],"calendar":[]}'
+            digest = hashlib.sha256(references).hexdigest()
+            (root / "references.json").write_bytes(references)
+            document = research_request_document()
+            document.update(mode="single_run", family="breakout_study/v1", session_profile="krx-regular/v1",
+                            strategy_references={"path": "references.json", "sha256": digest})
+            document["strategy"] = {"capital_won": 1000, "policy": {
+                "variant": "B0", "quantity": 1, "exit_at_kst": "15:18", "theme_id": None,
+                "theme_role": None, "exit_on_dependency_loss": False,
+            }}
+            document["execution"].update(version="completed_close_then_next_open/v1", same_bar_path_version="no_intrabar_fill/v1")
+            request_path = root / "request.json"
+            dialog = ResearchDialog(root)
+            try:
+                dialog.activate_startup()
+                for shadow, scope, label in ((False, "paper", "Paper 체결 모의"), (True, "shadow_only", "Shadow 재생")):
+                    with self.subTest(scope=scope):
+                        request_path.write_text(json.dumps({**document, "shadow_only": shadow}), encoding="utf-8")
+                        dialog._request_path.setText(str(request_path))
+                        self.assertTrue(dialog._preview_request())
+                        self.assertIn("breakout_study/v1", dialog._summary.text())
+                        self.assertIn("B0", dialog._summary.text())
+                        self.assertIn(label, dialog._summary.text())
+                        self.assertIn(digest, dialog._summary.toolTip())
+                        result = execute_process_request(load_research_process_request(request_path))
+                        context = result["section12"]
+                        self.assertEqual(("breakout_study/v1", "B0", scope, "empty", manifest["revision_ids_hash"], digest), (
+                            context["family"], context["variant"], context["execution_scope"], context["input_dataset_id"],
+                            context["input_revision_ids_hash"], context["strategy_reference_sha256"],
+                        ))
+                        dialog._apply_result(result)
+                        self.assertIn(label, dialog._summary.text())
+                        self.assertIn("기록된 관측 가용시각", dialog._summary.text())
+                        self.assertIn("2026-09-12 09:00:00 KST", dialog._summary.text())
+                        self.assertIn("자료 품질 INELIGIBLE", dialog._summary.text())
+                        self.assertIn(manifest["revision_ids_hash"], dialog._summary.toolTip())
+                        self.assertIn(result["run_id"], dialog._summary.toolTip())
+                        self.assertEqual("미완료·거절", dialog._table.horizontalHeaderItem(4).text())
+            finally:
+                dialog.stop()
+                dialog.deleteLater()
+
+    def test_section12_rows_do_not_turn_sealed_or_shadow_counts_into_fills(self) -> None:
+        report = {"fold_reports": [
+            {"name": "train", "role": "TRAIN", "status": "INELIGIBLE", "submitted_order_count": 3,
+             "filled_order_count": 1, "censored_order_count": 2, "rejected_order_count": 0,
+             "no_trade_reasons": {"candidate_universe_stale": 2}, "reasons": ["sample_insufficient"]},
+            {"name": "final", "role": "OOS", "status": "SEALED", "submitted_order_count": 0},
+        ]}
+        paper = {"kind": "single_run", "section12": {"execution_scope": "paper"}, "report": report}
+        rows = format_research_result_rows(paper)
+        self.assertEqual(("train · TRAIN", "INELIGIBLE", "N/A", "3/1"), rows[0][:4])
+        self.assertIn("미완료 2 · 거절 0 · 미지원 N/A", rows[0][4])
+        self.assertEqual(("candidate_universe_stale 2", "sample_insufficient"), rows[0][5:])
+        self.assertEqual(("N/A",) * 4, rows[1][2:6])
+        shadow = {**paper, "section12": {"execution_scope": "shadow_only"}}
+        rows = format_research_result_rows(shadow)
+        self.assertEqual(("N/A", "N/A", "N/A", "candidate_universe_stale 2"), rows[0][2:6])
+
     def test_evidence_request_preview_and_result_keep_partial_holding_visible(self) -> None:
         import hashlib
         import json
@@ -78,11 +151,16 @@ class ResearchDialogTests(unittest.TestCase):
                 dialog._request_path.setText(str(request))
                 self.assertTrue(dialog._preview_request())
                 self.assertIn("micro.json", dialog._summary.text())
+                self.assertIn("micro_execution/v1", dialog._summary.text())
                 self.assertTrue(dialog._run.isEnabled())
                 dialog._apply_result({"status": "ok", "kind": "micro_experiment",
-                                      "result": {"status": "OPEN", "position_quantity": 2, "reason": "partial"}})
+                                      "result": {"status": "OPEN", "position_quantity": 2, "reason": "partial",
+                                                 "variant": "VI_FLAT_DOWN_RISE", "pending_order": {"order_id": "fixture-pending"},
+                                                 "broker_issue": "missing_terminal_receipt"}})
                 self.assertEqual("보유 수량", dialog._table.horizontalHeaderItem(2).text())
                 self.assertEqual(("OPEN", "2"), tuple(dialog._table.item(0, index).text() for index in (1, 2)))
+                self.assertEqual(("micro_execution/v1 · VI_FLAT_DOWN_RISE", "fixture-pending", "missing_terminal_receipt"),
+                                 tuple(dialog._table.item(0, index).text() for index in (0, 3, 4)))
             finally:
                 dialog.stop()
                 dialog.deleteLater()

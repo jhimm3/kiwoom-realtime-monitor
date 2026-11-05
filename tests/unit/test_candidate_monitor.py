@@ -6,7 +6,7 @@ import tempfile
 import threading
 import unittest
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import sqlite3
@@ -60,10 +60,10 @@ def _rank(sequence: int, at: str = "2026-09-12T00:00:00+00:00") -> dict:
     }
 
 
-def _bar(sequence: int, minute: int, close: int, high: int) -> dict:
-    start = f"2026-09-12T00:{minute:02d}:00+00:00"
-    end = f"2026-09-12T00:{minute + 1:02d}:00+00:00"
-    available = f"2026-09-12T00:{minute + 1:02d}:02+00:00"
+def _bar(sequence: int, minute: int, close: int, high: int, *, day: str = "2026-09-12") -> dict:
+    start = f"{day}T00:{minute:02d}:00+00:00"
+    end = f"{day}T00:{minute + 1:02d}:00+00:00"
+    available = f"{day}T00:{minute + 1:02d}:02+00:00"
     return {
         "accepted_sequence": sequence, "revision_id": f"bar-{sequence}",
         "kind": "minute_bar", "subject": "005930:KRX", "venue": "KRX",
@@ -108,6 +108,123 @@ class FakeStore:
 
 
 class CandidateMonitorTests(unittest.TestCase):
+    def test_section12_close_and_ipo_use_only_calendar_and_listing_available_at_cut(self):
+        from kiwoom_monitor.application.section12_minute_research import (
+            CLOSE_FAMILY, IPO_BREAKOUT_FAMILY, IPO_CLOSE_FAMILY, MINUTE_SHADOW_VERSION,
+        )
+        from tests.unit.test_close_and_ipo import CloseAndIpoTests
+
+        fixture = CloseAndIpoTests()
+        fixture.setUp()
+        rows = []
+        for sequence, frame in enumerate((*fixture.prior, fixture.signal), 2):
+            payload = {
+                "code": frame.code, "market": "KRX", "bar_start": frame.bar_start, "bar_end": frame.bar_end,
+                "open": frame.open, "high": frame.high, "low": frame.low, "close": frame.close,
+                "volume": frame.volume, "trade_value_million_won": frame.trade_value_million_won,
+                "window_closed": True, "capture_quality": "complete", "finalization_source": "timer",
+                "session": frame.market_session, "phase": frame.market_phase, "schedule_version": frame.schedule_version,
+            }
+            rows.append({
+                "kind": "minute_bar", "subject": "123456:KRX", "venue": "KRX", "accepted_sequence": sequence,
+                "revision_id": frame.revision_id, "observation_key": frame.observation_key,
+                "available_at": frame.available_at, "value_kind": "actual", "completeness": "complete",
+                "origin": "realtime", "source_id": "kiwoom-websocket-0B", "payload": payload,
+            })
+        for family, policy, blocked in (
+            (CLOSE_FAMILY, fixture.close, False),
+            (CLOSE_FAMILY, fixture.close, True),
+            (IPO_CLOSE_FAMILY, fixture.ipo_close, False),
+            (IPO_CLOSE_FAMILY, fixture.ipo_close, True),
+            (IPO_BREAKOUT_FAMILY, fixture.ipo_breakout, False),
+            (IPO_BREAKOUT_FAMILY, fixture.ipo_breakout, True),
+        ):
+            with self.subTest(family=family, missing_evidence=blocked):
+                calendar = fixture.calendar[:-1] if blocked and family == CLOSE_FAMILY else fixture.calendar
+                listing = asdict(fixture.listing)
+                if blocked:
+                    listing["available_at"] = datetime.fromisoformat(fixture.signal.available_at) + timedelta(seconds=1)
+                config = {
+                    "version": MINUTE_SHADOW_VERSION, "family": family, "signal_valid_seconds": 30,
+                    "symbols": ["123456"],
+                    "strategy": {"capital_won": 100_000, "policy": asdict(policy)},
+                    "references": {"version": "strategy-reference/v1",
+                                   "calendar": [asdict(day) for day in calendar], "listings": [listing]},
+                }
+                store = FakeStore(rows)
+                monitor = CandidateMonitor.from_json(
+                    store, json.dumps(config, default=lambda value: value.isoformat()), poll_seconds=2,
+                    universe_max_age_seconds=180,
+                )
+                monitor.run_once()
+                monitor.run_once()
+                signal = [value for value in store.candidates if value["signal_reference_price"] == fixture.signal.close]
+                self.assertEqual(0 if blocked else 1, len(signal), monitor.quality)
+                self.assertEqual("explicit_symbols", monitor.quality["candidate_universe_scope"])
+                if not blocked:
+                    self.assertEqual(policy.variant, signal[0]["strategy_variant"])
+                    self.assertIn(fixture.signal.revision_id, signal[0]["input_revision_refs"])
+                    if family != CLOSE_FAMILY:
+                        self.assertIn(fixture.listing.evidence_id, signal[0]["input_revision_refs"])
+                else:
+                    reason = "close_or_next_open_evidence_unavailable" if family == CLOSE_FAMILY else "listing_unknown"
+                    self.assertEqual(reason, monitor.quality["reason"])
+
+    def test_section12_panic_confirmation_restores_armed_cut_and_rejects_partial_correction(self):
+        from kiwoom_monitor.application.section12_minute_research import MINUTE_SHADOW_VERSION, PANIC_FAMILY
+
+        proof = {
+            "symbol": "005930", "source": "fixture-reviewed-news", "assessment_id": "assessment",
+            "revision": "assessment-r1", "effective_at": "2026-09-14T00:02:00+00:00",
+            "available_at": "2026-09-14T00:03:00+00:00", "disposition": "supported_nonfundamental",
+            "evidence_refs": ["article-r1", "rule-r1"],
+        }
+        config = {
+            "version": MINUTE_SHADOW_VERSION, "family": PANIC_FAMILY, "signal_valid_seconds": 30,
+            "strategy": {"capital_won": 100_000, "quantity": 1, "news_proofs": [proof], "policy": {
+                "variant": "P1", "lookback_minutes": 3, "decline_bps": 1000, "minimum_turnover_won": 3_000_000,
+                "max_input_age_seconds": 10, "rebound_target_bps": 500, "max_hold_minutes": 5,
+            }},
+        }
+        rows = [_rank(1, "2026-09-14T00:00:00+00:00")]
+        for index, price in enumerate((1000, 990, 980, 900, 910)):
+            row = _bar(index + 2, index, price, price, day="2026-09-14")
+            rows.append({**row, "origin": "realtime", "source_id": "kiwoom-websocket-0B"})
+
+        for partial in (False, True):
+            with self.subTest(partial=partial):
+                store = FakeStore(rows[:-1])
+
+                def monitor():
+                    return CandidateMonitor.from_json(store, json.dumps(config), poll_seconds=2,
+                                                      universe_max_age_seconds=600)
+
+                first = monitor()
+                first.run_once()
+                first.run_once()
+                self.assertEqual("ARM", store.decisions[-1]["proposal"])
+                self.assertEqual([], store.candidates)
+                checkpoint = store.checkpoints[first.monitor_id]
+                self.assertEqual("bar-5", checkpoint["panic_armed"]["005930"]["trigger_revision_id"])
+                restarted = monitor()
+                restarted.run_once()
+                if partial:
+                    correction = deepcopy(rows[1])
+                    correction.update(accepted_sequence=6, revision_id="partial",
+                                      available_at="2026-09-14T00:04:30+00:00", completeness="partial")
+                    correction["payload"]["capture_quality"] = "partial"
+                    store.observations.append(correction)
+                store.observations.append({**rows[-1], "accepted_sequence": 7})
+                restarted.run_once()
+                reason = "panic_trigger_revised_or_unproven" if partial else "panic_next_completed_close_recovered"
+                self.assertEqual((reason,), store.decisions[-1]["reasons"])
+                self.assertNotIn("panic_armed", store.checkpoints[first.monitor_id])
+                self.assertEqual(0 if partial else 1, len(store.candidates))
+                if not partial:
+                    self.assertEqual(("panic_rebound", "P1"), (store.candidates[0]["strategy_id"],
+                                                                store.candidates[0]["strategy_variant"]))
+                    self.assertIn("assessment-r1", store.candidates[0]["input_revision_refs"])
+
     def test_operational_freshness_expires_without_changing_last_evaluation_or_storage(self):
         from datetime import datetime, timezone
         store = FakeStore([_rank(1), _bar(2, 0, 100, 110)])

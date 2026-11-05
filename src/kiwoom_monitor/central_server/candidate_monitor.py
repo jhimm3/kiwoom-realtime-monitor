@@ -23,11 +23,17 @@ from typing import Any, Callable, Mapping
 from kiwoom_monitor.application.market_session_schedule import (
     KRX_REGULAR_RESEARCH_PROFILE,
     SUPPORTED_RESEARCH_SESSION_PROFILES,
+    session_window_at,
 )
 from kiwoom_monitor.application.breakout_strategy import (
     BreakoutStrategyConfig,
     StrategyState,
 )
+from kiwoom_monitor.application.breakout_theme_research import (
+    BREAKOUT_PRIOR_BARS, evaluate_breakout_theme,
+)
+from kiwoom_monitor.application.close_and_ipo import evaluate_close_and_ipo
+from kiwoom_monitor.application.panic_rebound import PanicSetup, evaluate_panic_rebound
 from kiwoom_monitor.application.leader_breakout import (
     LeaderBreakoutPolicy, evaluate_leader_breakout_trade, _id,
     document_breakout_reference, document_breakout_observation,
@@ -46,6 +52,10 @@ from kiwoom_monitor.application.research_replay import (
     replay_krx_minute_bars,
     trim_bar_frames, trim_universe_frames,
 )
+from kiwoom_monitor.application.section12_minute_research import (
+    BREAKOUT_STUDY_FAMILIES, MINUTE_SHADOW_VERSION, PANIC_FAMILY, MinuteShadowConfig, build_minute_evaluation,
+)
+from kiwoom_monitor.domain.ranking import normalize_stock_code
 from kiwoom_monitor.infrastructure.market_data_metadata_codec import market_metadata_from_document
 
 
@@ -54,13 +64,23 @@ INPUT_KINDS = ("top20_membership", "minute_bar")
 SUPPORTED_INPUTS = ("minute_bar/KRX/closed/complete", "top20_membership/as_available")
 
 
+def parse_candidate_monitor_config(document, family_id=BREAKOUT_FAMILY_ID):
+    if not isinstance(document, dict):
+        raise ValueError("strategy config must be an object")
+    if document.get("version") == MINUTE_SHADOW_VERSION:
+        return MinuteShadowConfig.from_document(document)
+    if "policy_id" in document:
+        return LeaderBreakoutPolicy.from_dict(document)
+    return parse_strategy_config(family_id, document)
+
+
 class CandidateMonitor:
     """Consumes immutable central observations without creating fills or orders."""
 
     def __init__(
         self,
         store: Any,
-        config: BreakoutStrategyConfig | PullbackReaccelerationConfig | LeaderBreakoutPolicy,
+        config: BreakoutStrategyConfig | PullbackReaccelerationConfig | LeaderBreakoutPolicy | MinuteShadowConfig,
         *,
         poll_seconds: float,
         universe_max_age_seconds: int,
@@ -76,6 +96,9 @@ class CandidateMonitor:
         self._workload_paused = workload_paused or (lambda _workload: False)
         self._capture_scope = capture_scope
         self._config = config
+        self._minute_shadow = config if isinstance(config, MinuteShadowConfig) else None
+        self._minute_symbols = frozenset(self._minute_shadow.symbols) if self._minute_shadow else frozenset()
+        self._input_kinds = ("minute_bar",) if self._minute_symbols else INPUT_KINDS
         self._leader_policy = config if isinstance(config, LeaderBreakoutPolicy) else None
         if self._leader_policy is not None:
             self.monitor_id = _id("leader-breakout-monitor", config.to_dict())
@@ -97,20 +120,39 @@ class CandidateMonitor:
                 "reason": ";".join("unconfigured:"+key for key in config.missing("0B")) or "awaiting_0B",
                 "input_mode": "0B", "last_processed_sequence": 0}
             return
-        self._family = family_for_config(config)
-        if tuple(self._family.contract["required_inputs"]) != SUPPORTED_INPUTS:
+        self._family = family_for_config(config) if self._minute_shadow is None else None
+        if self._family is not None and tuple(self._family.contract["required_inputs"]) != SUPPORTED_INPUTS:
             raise ValueError("unsupported shadow candidate input contract")
         self._poll_seconds = max(0.5, float(poll_seconds))
         self._universe_max_age_seconds = int(universe_max_age_seconds)
         if session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES:
             raise ValueError(f"unsupported research session profile: {session_profile}")
         self._session_profile = session_profile
-        self.monitor_id = shadow_monitor_id_for_config(
-            self._family.family_id, config, session_profile,
-        )
+        if self._minute_shadow is not None:
+            self.monitor_id = _id("section12-minute-shadow", {
+                "config": config.to_dict(), "session_profile": session_profile,
+                "universe_max_age_seconds": self._universe_max_age_seconds,
+            })
+            strategy = config.strategy
+            if strategy.family in BREAKOUT_STUDY_FAMILIES:
+                self._bar_history_limit = BREAKOUT_PRIOR_BARS + 2
+            elif strategy.family == PANIC_FAMILY:
+                self._bar_history_limit = strategy.policy.lookback_minutes + 3
+            else:
+                self._bar_history_limit = strategy.policy.lookback_bars + 1
+            self._universe_history_seconds = self._universe_max_age_seconds
+        else:
+            self.monitor_id = shadow_monitor_id_for_config(self._family.family_id, config, session_profile)
+            self._bar_history_limit = config.lookback_bars + 2
+            self._universe_history_seconds = max(
+                self._universe_max_age_seconds,
+                int(config.rank_window_seconds or 0) + int(config.rank_max_gap_seconds or 0),
+            )
         self._cursor = 0
         self._state = StrategyState()
         self._bars: dict[tuple[str, str], KrxMinuteBarFrame] = {}
+        self._panic_armed: dict[str, PanicSetup] = {}
+        self._minute_signals: dict[tuple[str, str], tuple[str, str]] = {}
         self._universes: list[CandidateUniverseFrame] = []
         self._quality: dict[str, Any] = {
             "status": "WARMUP", "reason": "not_started", "last_processed_sequence": 0,
@@ -122,7 +164,11 @@ class CandidateMonitor:
         self._frame_recovery: ObservationFrameRecovery | None = None
         self._frame_recovery_receipt: dict[str, Any] | None = None
         self._iteration_lock = RLock()
-        self._restore_or_bootstrap()
+        # A replacement for the same policy reads the checkpoint only after
+        # the previous worker has drained.
+        self._checkpoint_loaded = self._minute_shadow is None
+        if self._checkpoint_loaded:
+            self._restore_or_bootstrap()
 
     @classmethod
     def from_json(
@@ -135,11 +181,7 @@ class CandidateMonitor:
         capture_scope=None,
     ) -> "CandidateMonitor":
         try:
-            document = json.loads(config_json)
-            if not isinstance(document, dict):
-                raise ValueError("strategy config must be an object")
-            config = (LeaderBreakoutPolicy.from_dict(document) if "policy_id" in document
-                      else parse_strategy_config(family_id, document))
+            config = parse_candidate_monitor_config(json.loads(config_json), family_id)
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError(f"invalid shadow candidate strategy config: {error}") from error
         return cls(
@@ -154,12 +196,20 @@ class CandidateMonitor:
     @property
     def required_inputs(self) -> tuple[str, ...]:
         """The registered strategy contract; this reader accepts complete KRX minute bars."""
-        return (("kiwoom-websocket-0B/KRX", "explicit_leader_structure_evidence") if self._leader_policy
-                else tuple(self._family.contract["required_inputs"]))
+        if self._leader_policy:
+            return "kiwoom-websocket-0B/KRX", "explicit_leader_structure_evidence"
+        if self._minute_symbols:
+            return SUPPORTED_INPUTS[0], "explicit_symbols"
+        return SUPPORTED_INPUTS
 
     @property
     def quality(self) -> dict[str, Any]:
         value = {**self._quality, "monitor_id": self.monitor_id}
+        if self._minute_shadow is not None:
+            value.update(input_mode="section12_completed_minute",
+                         candidate_universe_scope="explicit_symbols" if self._minute_symbols else "top20_membership",
+                         strategy_family=self._minute_shadow.strategy.family,
+                         strategy_variant=self._minute_shadow.strategy.policy.variant)
         if self._leader_policy is not None and self._leader_policy.reference_level is not None:
             with self._iteration_lock:
                 value['document_baseline_observations'] = deepcopy(tuple(self._document_observations.values()))
@@ -269,10 +319,11 @@ class CandidateMonitor:
         age = (at - latest).total_seconds() if latest is not None else None
         quality = dict(self._quality)
         return {
-            "scope": "shadow_candidate_inputs", "coverage": "partial",
+            "scope": "section12_completed_minute" if self._minute_shadow else "shadow_candidate_inputs",
+            "coverage": "partial",
             "checked_at": at.isoformat(),
             "universe": {
-                "state": "missing" if latest is None else
+                "state": "explicit" if self._minute_symbols else "missing" if latest is None else
                          "stale" if age > self._universe_max_age_seconds else "fresh",
                 "latest_available_at": latest.isoformat() if latest is not None else None,
                 "age_seconds": age, "max_age_seconds": self._universe_max_age_seconds,
@@ -307,6 +358,16 @@ class CandidateMonitor:
                 return "SUPERSEDED"
             state = self._leader_states.get(event.get("symbol"))
             return "ACTIVE" if self._leader_accepting and state and state.episode_id == event.get("event_id") else "INVALIDATED"
+
+    def project_minute_candidate_status(self, event):
+        if self._minute_shadow is None or event.get("run_id") != self.monitor_id:
+            return "SUPERSEDED"
+        if self._bootstrap_pending or not self._checkpoint_loaded:
+            return "WARMUP"
+        active = self._minute_signals.get((event.get("symbol"), event.get("observation_key")))
+        if active is None or active[0] != event.get("reference_revision_id"):
+            return "INVALIDATED"
+        return "ACTIVE"
 
     def observe_trade(self, payload, received_at, *, source, approved):
         """Pure bounded 0B judgment on the collector loop; persistence is deferred."""
@@ -436,6 +497,10 @@ class CandidateMonitor:
                 saved += 1
             return saved
         with self._iteration_lock:
+            if not self._checkpoint_loaded:
+                self._restore_or_bootstrap()
+                self._checkpoint_loaded = True
+                return 0
             if self._bootstrap_pending:
                 self._bootstrap()
                 return 0  # Initial history is seeded without historical decisions.
@@ -449,7 +514,7 @@ class CandidateMonitor:
                     self._frame_recovery = None
                 return 0  # Repair input frames only, never re-run historical strategy decisions.
             observations = self._store.load_observation_revisions_after(
-                self._cursor, INPUT_KINDS, limit,
+                self._cursor, self._input_kinds, limit,
             )
             return self._consume_observations(observations)
 
@@ -495,6 +560,12 @@ class CandidateMonitor:
                 self._consume(observation, _frame_cache=_frame_cache)
             self._cursor = max(self._cursor, int(observation.get("accepted_sequence", 0)))
         if observations or self._checkpoint_pending:
+            if self._minute_signals:
+                now = self._now()
+                self._minute_signals = {
+                    key: signal for key, signal in self._minute_signals.items()
+                    if datetime.fromisoformat(signal[1]) > now
+                }
             self._save_checkpoint(reason="processed" if observations else "retry")
         return len(observations)
 
@@ -502,8 +573,14 @@ class CandidateMonitor:
         # Only the shared native-page round supplies this cache. Its sequence keys
         # refer to that one validated page; immutable frames outlive no round.
         kind = observation.get("kind")
+        if kind not in self._input_kinds:
+            return
+        if self._minute_symbols and normalize_stock_code((observation.get("payload") or {}).get("code")) not in self._minute_symbols:
+            return
+        calendar = self._minute_shadow.calendar if self._minute_shadow is not None else ()
         key = (int(observation.get("accepted_sequence", 0)),
-               self._session_profile if kind != "top20_membership" else "top20_membership")
+               self._session_profile if kind != "top20_membership" else "top20_membership",
+               self.monitor_id if calendar and kind == "minute_bar" else None)
         if _frame_cache is not None and key in _frame_cache:
             frames = _frame_cache[key]
         elif kind == "top20_membership":
@@ -511,6 +588,7 @@ class CandidateMonitor:
         else:
             frames = tuple(replay_krx_minute_bars(
                 (observation,), strict=True, session_profile=self._session_profile,
+                **({"calendar_evidence": calendar} if calendar else {}),
             ))
         if _frame_cache is not None:
             _frame_cache[key] = frames
@@ -520,6 +598,15 @@ class CandidateMonitor:
                 self._trim_universes(frames[0].available_at)
             return
         if not frames:
+            if self._minute_shadow is not None and kind == "minute_bar":
+                payload = observation.get("payload") or {}
+                if observation.get("venue") == "KRX" and payload.get("window_closed"):
+                    key = (normalize_stock_code(payload.get("code")), str(observation.get("observation_key", "")))
+                    self._bars.pop(key, None)
+                    self._minute_signals.pop(key, None)
+                    self._quality.update(status="BLOCKED", reason="complete_regular_minute_unavailable",
+                                         last_processed_sequence=int(observation["accepted_sequence"]))
+                return
             if observation.get("kind") == "minute_bar":
                 self._quality = {
                     **self._quality,
@@ -533,9 +620,18 @@ class CandidateMonitor:
                 }
             return
         evaluation_bar = frames[0]
-        self._bars[(evaluation_bar.code, evaluation_bar.observation_key)] = evaluation_bar
+        bar_key = (evaluation_bar.code, evaluation_bar.observation_key)
+        self._bars[bar_key] = evaluation_bar
         self._trim_bars(evaluation_bar.code)
-        usable_universes, freshness = self._fresh_universes(evaluation_bar.available_at)
+        usable_universes, freshness = (
+            ((), "explicit") if self._minute_symbols else self._fresh_universes(evaluation_bar.available_at)
+        )
+        if self._minute_shadow is not None:
+            active = self._minute_signals.get(bar_key)
+            if active is not None and active[0] != evaluation_bar.revision_id:
+                self._minute_signals.pop(bar_key)
+            self._consume_minute_shadow(observation, evaluation_bar, usable_universes, freshness)
+            return
         evaluation = self._family.evaluate_bar(
             run_id=self.monitor_id,
             evaluation_bar=evaluation_bar,
@@ -544,17 +640,88 @@ class CandidateMonitor:
             config=self._config,
             state=self._state,
         )
+        self._save_evaluation(observation, evaluation, freshness)
+
+    def _consume_minute_shadow(self, observation, bar, universes, freshness):
+        if (observation.get("origin") != "realtime" or observation.get("source_id") != "kiwoom-websocket-0B"
+                or bar.finalization_source not in {"timer", "realtime_flush"}):
+            return  # Query/archived history may supply context, never a live trigger.
+        strategy = self._minute_shadow.strategy
+        universe = universes[-1] if universes else None
+        expires_at = ""
+        action, quantity, setup, refs = "WAIT", 0, None, ()
+        bar_start = datetime.fromisoformat(bar.bar_start)
+        bar_end = datetime.fromisoformat(bar.bar_end)
+        cutoff = datetime.fromisoformat(bar.available_at)
+        deadline = None
+        if not self._minute_symbols and (universe is None or bar.code not in universe.codes):
+            reason = freshness if universe is None else "symbol_outside_candidate_universe"
+        elif strategy.family in BREAKOUT_STUDY_FAMILIES:
+            result = evaluate_breakout_theme(strategy.policy, bar=bar, history=self._bars.values(),
+                                             proofs=strategy.theme_proofs, entry_proofs=strategy.breakout_entry_proofs,
+                                             position=None, setup=None)
+            action, reason, quantity, setup, refs = (
+                result.action, result.reason, result.quantity, result.setup, result.evidence_refs)
+            if action == "ENTER":
+                deadline = min(setup.exit_at, session_window_at(bar_start, venue="KRX").ends_at)
+        elif strategy.family == PANIC_FAMILY:
+            result = evaluate_panic_rebound(
+                evaluation_bar=bar, bar_history=self._bars.values(), rules=strategy.policy,
+                news_proofs=strategy.news_proofs, setup=self._panic_armed.get(bar.code),
+            )
+            action, reason, setup, refs = result.action, result.reason, result.setup, result.input_refs
+            if action == "ENTER":
+                quantity = strategy.quantity
+                deadline = session_window_at(bar_start, venue="KRX").ends_at
+        else:
+            result = evaluate_close_and_ipo(
+                strategy.policy, bar=bar, history=self._bars.values(), calendar=self._minute_shadow.calendar,
+                listings=self._minute_shadow.listings, position=None,
+            )
+            action, reason, quantity, setup, refs = (
+                result.action, result.reason, result.quantity, result.setup, result.evidence_refs)
+            if action == "ENTER":
+                deadline = setup.entry_deadline
+        if deadline is not None:
+            seconds = min(self._minute_shadow.signal_valid_seconds, (deadline - bar_end).total_seconds())
+            deadline = bar_end + timedelta(seconds=seconds)
+            if cutoff >= deadline:
+                action, reason, quantity, setup = "WAIT", "minute_signal_window_elapsed", 0, None
+            else:
+                expires_at = deadline.astimezone(timezone.utc).isoformat()
+        evaluation = build_minute_evaluation(
+            strategy.family, self.monitor_id, bar,
+            self.monitor_id if self._minute_symbols else universe.revision_id if universe else "",
+            self._state, action, reason, quantity, setup, refs,
+        )
+        self._save_evaluation(observation, evaluation, freshness, expires_at=expires_at, bar=bar)
+        if strategy.family == PANIC_FAMILY:
+            if action == "ARM":
+                self._panic_armed[bar.code] = setup
+            else:
+                self._panic_armed.pop(bar.code, None)
+
+    def _save_evaluation(self, observation, evaluation, freshness, *, expires_at=None, bar=None):
         candidate = evaluation.candidate_event.to_dict() if evaluation.candidate_event else None
         if candidate is not None:
             candidate["decision_reasons"] = list(evaluation.decision.reasons)
-        expires_at = evaluation.state.candidate_expires_at if candidate is not None else ""
+            if bar is not None:
+                candidate.update(strategy_variant=self._minute_shadow.strategy.policy.variant,
+                                 shadow_scope=MINUTE_SHADOW_VERSION,
+                                 observation_key=bar.observation_key,
+                                 input_cutoff=evaluation.snapshot.input_cutoff,
+                                 input_revision_refs=list(evaluation.snapshot.input_revision_refs))
+        if expires_at is None:
+            expires_at = evaluation.state.candidate_expires_at if candidate is not None else ""
         self._store.save_shadow_evaluation(
             self.monitor_id, evaluation.decision.to_dict(), candidate, expires_at,
         )
+        if candidate is not None and bar is not None:
+            self._minute_signals[(bar.code, bar.observation_key)] = (bar.revision_id, expires_at)
         self._state = evaluation.state
         self._quality = {
-            "status": "READY" if freshness == "fresh" else "STALE",
-            "reason": freshness if freshness != "fresh" else ";".join(evaluation.decision.reasons),
+            "status": "READY" if freshness in {"fresh", "explicit"} else "STALE",
+            "reason": (";".join(evaluation.decision.reasons) if freshness in {"fresh", "explicit"} else freshness),
             "last_processed_sequence": int(observation.get("accepted_sequence", 0)),
             "last_decision_at": evaluation.decision.decided_at,
             "last_symbol": evaluation.decision.symbol,
@@ -580,7 +747,7 @@ class CandidateMonitor:
         age = (cutoff - datetime.fromisoformat(latest.available_at).astimezone(timezone.utc)).total_seconds()
         if age > self._universe_max_age_seconds:
             return (), f"candidate_universe_stale:{int(age)}s"
-        return tuple(eligible), "fresh"
+        return ((latest,) if self._minute_shadow is not None else tuple(eligible)), "fresh"
 
     def _restore_or_bootstrap(self) -> None:
         document = self._store.load_shadow_monitor_state(self.monitor_id)
@@ -600,15 +767,18 @@ class CandidateMonitor:
                     for frame in (KrxMinuteBarFrame(**value) for value in document.get("bars", []))
                 }
                 self._quality = dict(document.get("quality", self._quality))
+                if self._minute_shadow is not None:
+                    self._panic_armed = {code: PanicSetup.from_dict(value)
+                                         for code, value in document.get("panic_armed", {}).items()}
+                    self._minute_signals = {(code, key): (revision, expires_at)
+                                            for code, key, revision, expires_at in document.get("minute_signals", [])}
                 self._delivery_protocol = document.get("delivery_protocol")
                 self._frame_recovery_receipt = document.get("input_recovery")
                 self._bootstrap_pending = False
                 if self._delivery_protocol is None:
                     self._frame_recovery = ObservationFrameRecovery(
-                        self._cursor, self._session_profile, self._config.lookback_bars + 2,
-                        max(self._universe_max_age_seconds,
-                            int(self._config.rank_window_seconds or 0)
-                            + int(self._config.rank_max_gap_seconds or 0)), True,
+                        self._cursor, self._session_profile, self._bar_history_limit,
+                        self._universe_history_seconds, True,
                     )
                 return
             except (TypeError, ValueError):
@@ -616,7 +786,7 @@ class CandidateMonitor:
         self._bootstrap()
 
     def _bootstrap(self) -> bool:
-        page = self._store.load_observation_bootstrap(INPUT_KINDS, per_kind_limit=5000)
+        page = self._store.load_observation_bootstrap(self._input_kinds, per_kind_limit=5000)
         if not page.ready:
             self._quality = {
                 **self._quality, "status": "WARMUP",
@@ -627,11 +797,16 @@ class CandidateMonitor:
         self._cursor = max((int(value.get("accepted_sequence", 0)) for value in seed), default=0)
         self._universes = list(replay_candidate_universe(seed))
         self._bars = {}
+        self._panic_armed = {}
+        self._minute_signals = {}
         if seed:
+            calendar = self._minute_shadow.calendar if self._minute_shadow is not None else ()
             for frame in replay_krx_minute_bars(
                 seed, strict=True, session_profile=self._session_profile,
+                **({"calendar_evidence": calendar} if calendar else {}),
             ):
-                self._bars[(frame.code, frame.observation_key)] = frame
+                if not self._minute_symbols or frame.code in self._minute_symbols:
+                    self._bars[(frame.code, frame.observation_key)] = frame
             for code in {frame.code for frame in self._bars.values()}:
                 self._trim_bars(code)
             if self._universes:
@@ -650,14 +825,12 @@ class CandidateMonitor:
         return True
 
     def _trim_bars(self, code: str) -> None:
-        self._bars = trim_bar_frames(self._bars, code, self._config.lookback_bars + 2)
+        self._bars = trim_bar_frames(self._bars, code, self._bar_history_limit)
 
     def _trim_universes(self, latest_at: str) -> None:
-        horizon = max(
-            self._universe_max_age_seconds,
-            int(self._config.rank_window_seconds or 0) + int(self._config.rank_max_gap_seconds or 0),
+        self._universes = trim_universe_frames(
+            self._universes, latest_at, self._universe_history_seconds, use_maximum=True,
         )
-        self._universes = trim_universe_frames(self._universes, latest_at, horizon, use_maximum=True)
 
     def _save_checkpoint(self, *, reason: str = "manual", recovery=None) -> None:
         from .postgres_access import db_call_source
@@ -682,6 +855,10 @@ class CandidateMonitor:
                      (recovery.bars if recovery is not None else self._bars).values()],
             "quality": self._quality,
         }
+        if self._panic_armed:
+            document["panic_armed"] = {code: setup.to_dict() for code, setup in self._panic_armed.items()}
+        if self._minute_signals:
+            document["minute_signals"] = [(*key, *signal) for key, signal in self._minute_signals.items()]
         if recovery is not None:
             document["delivery_protocol"] = OBSERVATION_DELIVERY_PROTOCOL
             document["input_recovery"] = recovery.receipt()

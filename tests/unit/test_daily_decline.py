@@ -1,6 +1,9 @@
 from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, timedelta
+import hashlib
 import json
+from pathlib import Path
+import tempfile
 import unittest
 
 from kiwoom_monitor.application.daily_decline import (
@@ -14,6 +17,7 @@ from kiwoom_monitor.application.daily_decline import (
     DailyDeclineState,
     apply_daily_decline_fill,
     apply_daily_decline_order,
+    evaluate_daily_decline_shadow,
     finish_daily_decline_order,
     propose_daily_decline_action,
     replay_daily_decline,
@@ -97,6 +101,74 @@ def quote_receipt(raw):
 
 
 class DailyDeclineTests(unittest.TestCase):
+    def test_native_shadow_setup_uses_committed_daily_revisions_and_pinned_calendar(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+        from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
+        from kiwoom_monitor.infrastructure.research_data_source import load_frozen_strategy_references
+
+        days = (date(2026, 9, 17), date(2026, 9, 18), date(2026, 9, 21))
+        signal_day = days[-1]
+        cut = datetime(2026, 9, 21, 20, 2, tzinfo=KST)
+        now = cut
+        calendar = []
+        for day_number in range(17, 22):
+            day = date(2026, 9, day_number)
+            windows = [{"session": "KRX_REGULAR", "phase": "CONTINUOUS", "support": "SUPPORTED",
+                        "starts_at": f"{day}T09:00:00+09:00", "ends_at": f"{day}T15:20:00+09:00",
+                        "schedule_version": "fixture-session/v1"},
+                       {"session": "KRX_AFTER_MARKET", "phase": "CONTINUOUS", "support": "SUPPORTED",
+                        "starts_at": f"{day}T16:00:00+09:00", "ends_at": f"{day}T20:00:00+09:00",
+                        "schedule_version": "fixture-session/v1"}] if day in days else []
+            calendar.append({"venue": VENUE, "trading_date": day.isoformat(), "sessions": windows,
+                             "available_at": "2026-09-01T09:00:00+09:00", "revision_id": f"calendar-{day}",
+                             "evidence_ref": "calendar-fixture"})
+        basis = DailyDeclineBasis(SYMBOL, VENUE, days[0], signal_day, cut, "admitted-adjusted-basis", "1")
+        benchmark = DailyDeclineBenchmark(VENUE, signal_day, cut, "admitted-benchmark", -200)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SQLiteQueryStore(root / "native.sqlite3", now_provider=lambda: now)
+            store.initialize()
+            self.addCleanup(store.close)
+            ingest = MarketDataIngestor(store, now_provider=lambda: now)
+            reference_path = root / "references.json"
+            encoded = json.dumps({"version": "strategy-reference/v1", "calendar": calendar,
+                                  "listings": []}).encode()
+            reference_path.write_bytes(encoded)
+            references = load_frozen_strategy_references(reference_path, expected_sha256=hashlib.sha256(encoded).hexdigest())
+
+            def write(day, row, mode="1"):
+                payload = {"dt": day.strftime("%Y%m%d"), "open_pric": str(row["open"]),
+                           "high_pric": str(row["high"]), "low_pric": str(row["low"]), "cur_prc": str(row["close"])}
+                ingest.ingest("ka10081", {"stk_cd": SYMBOL, "upd_stkpc_tp": mode}, {"stk_dt_pole_chart_qry": [payload]})
+
+            def evaluate(**changes):
+                supplied = dict(spec=SINGLE, symbol=SYMBOL, venue=VENUE, signal_day=signal_day,
+                                cut=cut, calendar=references.calendar, basis=basis, benchmark=benchmark)
+                observations = store.load_observation_revisions("daily_bar", f"{SYMBOL}:{VENUE}")
+                return evaluate_daily_decline_shadow(observations, **{**supplied, **changes})
+
+            for day, row in zip(days, BARS, strict=True):
+                now = datetime(day.year, day.month, day.day, 20, 1, tzinfo=KST)
+                write(day, row["payload"])
+            result = evaluate()
+            self.assertEqual("QUALIFIED", result.status)
+            self.assertEqual((2_500, 1_618), (result.setup.drawdown_bps, result.setup.relative_decline_bps))
+            self.assertIn("calendar-2026-09-20", result.setup.evidence_ids)
+            self.assertEqual("signal_session_still_open", evaluate(cut=cut - timedelta(minutes=3)).reason)
+            incomplete = tuple(day for day in references.calendar if day.trading_date != date(2026, 9, 20))
+            self.assertEqual("session_window_unverified", evaluate(calendar=incomplete).reason)
+            self.assertEqual("adjusted_price_basis_unverified", evaluate(basis=None).reason)
+
+            signal = references.calendar[-1]
+            extended = replace(signal, sessions=(*signal.sessions[:-1], replace(signal.sessions[-1],
+                               ends_at=signal.sessions[-1].ends_at + timedelta(minutes=10))))
+            self.assertEqual("daily_window_unavailable", evaluate(
+                cut=cut + timedelta(minutes=10), calendar=(*references.calendar[:-1], extended)).reason)
+            now = cut + timedelta(minutes=1)
+            write(signal_day, BARS[-1]["payload"], mode="0")
+            self.assertEqual(result, evaluate())
+            self.assertEqual("daily_window_unavailable", evaluate(cut=now).reason)
+
     def test_selects_latest_visible_revision_before_quality_and_holds_fixed_evidence(self):
         expected = select().setup
         self.assertEqual((2_500, 1_618, 909), (expected.drawdown_bps, expected.relative_decline_bps,

@@ -9,6 +9,8 @@ from enum import Enum
 from typing import Mapping
 from zoneinfo import ZoneInfo
 
+from kiwoom_monitor.domain.market_data_contract import DataCompleteness, ListingEvidence, ListingType
+
 
 KST = ZoneInfo("Asia/Seoul")
 # KRX notices:
@@ -150,6 +152,42 @@ def _calendar_instant(value: datetime) -> datetime:
     if value.utcoffset() is None:
         raise ValueError("calendar evidence and decision times require a timezone")
     return value.astimezone(timezone.utc)
+
+
+def decode_strategy_references(document) -> tuple[tuple[TradingDayEvidence, ...], tuple[ListingEvidence, ...]]:
+    """Read the versioned calendar/listing document at its declared cuts."""
+    try:
+        if document["version"] != "strategy-reference/v1":
+            raise ValueError("unsupported strategy reference version")
+        if not isinstance(document["calendar"], list) or not isinstance(document["listings"], list):
+            raise ValueError("strategy reference collections must be arrays")
+        calendar = []
+        for row in document["calendar"]:
+            venue = row["venue"]
+            day = date.fromisoformat(row["trading_date"])
+            windows = row["sessions"]
+            if windows is not None and not isinstance(windows, list):
+                raise ValueError("calendar sessions must be an array or null")
+            calendar.append(TradingDayEvidence(
+                venue, day, datetime.fromisoformat(row["available_at"]),
+                row["revision_id"], row["evidence_ref"],
+                None if windows is None else tuple(SessionWindow(
+                    venue, day, MarketSession(window["session"]), MarketPhase(window["phase"]),
+                    datetime.fromisoformat(window["starts_at"]), datetime.fromisoformat(window["ends_at"]),
+                    window["schedule_version"], SessionSupport(window["support"]), window.get("reason", ""),
+                ) for window in windows),
+            ))
+        listings = tuple(ListingEvidence(
+            symbol=row["symbol"],
+            listing_date=date.fromisoformat(row["listing_date"]) if row["listing_date"] is not None else None,
+            listing_type=ListingType(row["listing_type"]),
+            available_at=datetime.fromisoformat(row["available_at"]) if row["available_at"] is not None else None,
+            source=row["source"], revision=row["revision"], evidence_id=row["evidence_id"],
+            completeness=DataCompleteness(row["completeness"]),
+        ) for row in document["listings"])
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise ValueError("strategy reference artifact has invalid evidence") from error
+    return tuple(calendar), listings
 
 
 def _latest_calendar_revision(rows: list[TradingDayEvidence]) -> TradingDayEvidence | None:

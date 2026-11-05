@@ -2914,6 +2914,19 @@
         "db|src/kiwoom_monitor/central_server/database_execution.py|_require_plan_approval|cursor.execute": 1,
         "db|src/kiwoom_monitor/central_server/database_execution.py|_save_plan_position|cursor.execute": 1
       }
+    },
+    {
+      "id": "S12-05-journal-plan-reference-v12-20261105",
+      "reason": "Journal schema v12 adds one nullable planned-order reference to the existing broker-event projection.",
+      "connection": "The installed journal's existing SQLite migration runner applies one ALTER TABLE inside its migration transaction. This statement is outside the ongoing history worker and broker order path.",
+      "validation": "The v11 fixture reopens with its original unlabelled row. A native planned fill survives the authenticated event projection and journal reopen with the same plan, policy and expected revision.",
+      "evidence": [
+        "tests/unit/test_journal_schema.py",
+        "tests/unit/test_journal_execution_projection.py"
+      ],
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_schema.py|_add_execution_projection_order_plan|connection.execute": 1
+      }
     }
   ]
 }

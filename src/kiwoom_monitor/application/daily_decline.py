@@ -123,7 +123,8 @@ def _catalyst_state(catalyst: DailyDeclineCatalyst | None, cut: datetime):
 
 
 def _daily_window(observations: Iterable[Mapping[str, object]], symbol: str, venue: str,
-                  days: tuple[date, ...], cut: datetime, adjustment_mode: str):
+                  days: tuple[date, ...], cut: datetime, adjustment_mode: str,
+                  session_closed_at: Mapping[date, datetime] | None):
     keys = {day.isoformat() for day in days}
     latest = {}
     subject = f"{symbol}:{venue}"
@@ -152,8 +153,10 @@ def _daily_window(observations: Iterable[Mapping[str, object]], symbol: str, ven
             return None
         (available, sequence, revision), row = latest[key]
         payload = row.get("payload")
+        close_at = session_closed_at.get(day) if session_closed_at is not None else None
         # The most recent visible revision can invalidate an earlier complete bar.
         if (not revision or sequence < 0 or available.astimezone(KST).date() < day
+                or (session_closed_at is not None and (close_at is None or available < close_at))
                 or row.get("venue") != venue or row.get("source_id") != "kiwoom-ka10081"
                 or row.get("completeness") != "complete" or row.get("value_kind") != "actual"
                 or not isinstance(payload, Mapping) or payload.get("version") != "daily_bar/v1"
@@ -177,6 +180,7 @@ def select_daily_decline_setup(
     basis: DailyDeclineBasis | None, benchmark: DailyDeclineBenchmark | None,
     catalyst: DailyDeclineCatalyst | None = None,
     session_evidence_ids: tuple[str, ...] = (),
+    session_closed_at: Mapping[date, datetime] | None = None,
 ) -> DailyDeclineSetupResult:
     """Read only the declared verified session window, including its final signal bar."""
     if not _aware(cut):
@@ -193,7 +197,8 @@ def select_daily_decline_setup(
             or not _visible(benchmark.available_at, benchmark.evidence_id, cut)
             or type(benchmark.return_bps) is not int):
         return DailyDeclineSetupResult("UNKNOWN", "benchmark_unavailable")
-    window = _daily_window(observations, symbol, venue, (*history, signal_day), cut, basis.adjustment_mode)
+    window = _daily_window(observations, symbol, venue, (*history, signal_day), cut,
+                           basis.adjustment_mode, session_closed_at)
     if window is None:
         return DailyDeclineSetupResult("UNKNOWN", "daily_window_unavailable")
     rows, revisions = window
@@ -222,6 +227,45 @@ def select_daily_decline_setup(
         plan_id, spec, symbol, venue, signal_day, cut, drawdown_bps, relative_decline_bps,
         volatility, volatility_base, catalyst_state, evidence_ids,
     ))
+
+
+def evaluate_daily_decline_shadow(
+    observations: Iterable[Mapping[str, object]], *, spec: DailyDeclineSpec, symbol: str,
+    venue: str, signal_day: date, cut: datetime, calendar: Iterable[TradingDayEvidence],
+    basis: DailyDeclineBasis | None, benchmark: DailyDeclineBenchmark | None,
+    catalyst: DailyDeclineCatalyst | None = None,
+) -> DailyDeclineSetupResult:
+    """Evaluate a setup using native daily revisions and an admitted calendar window."""
+    if not _aware(cut):
+        raise ValueError("DD cutoff must be timezone-aware")
+    calendar_by_day: dict[date, list[TradingDayEvidence]] = {}
+    for revision in calendar:
+        if revision.venue == venue and revision.trading_date <= signal_day:
+            calendar_by_day.setdefault(revision.trading_date, []).append(revision)
+
+    current = signal_day
+    witnessed: list[TradingDayEvidence] = []
+    closes: dict[date, datetime] = {}
+    while len(closes) <= spec.lookback_sessions:
+        day = trading_day_as_of(current, venue=venue, as_of=cut, evidence=calendar_by_day.get(current, ()))
+        if day is None or day.sessions is None or (current == signal_day and not day.sessions):
+            return DailyDeclineSetupResult("UNKNOWN", "session_window_unverified")
+        if current == signal_day and cut < day.sessions[-1].ends_at:
+            return DailyDeclineSetupResult("UNKNOWN", "signal_session_still_open")
+        if day.sessions:
+            closes[current] = day.sessions[-1].ends_at
+        witnessed.append(day)
+        if len(closes) > spec.lookback_sessions:
+            break
+        if current == date.min:
+            return DailyDeclineSetupResult("UNKNOWN", "session_window_unverified")
+        current -= timedelta(days=1)
+    prior_days = tuple(sorted(day for day in closes if day < signal_day))
+    return select_daily_decline_setup(
+        observations, spec=spec, symbol=symbol, venue=venue, signal_day=signal_day,
+        prior_days=prior_days, cut=cut, basis=basis, benchmark=benchmark, catalyst=catalyst,
+        session_evidence_ids=tuple(day.revision_id for day in reversed(witnessed)), session_closed_at=closes,
+    )
 
 
 @dataclass(frozen=True)
@@ -560,6 +604,7 @@ def replay_daily_decline(scenario: Mapping[str, object], policy: Mapping[str, ob
             observations(), spec=spec, symbol=symbol, venue=venue, signal_day=signal_day,
             prior_days=prior_days, cut=cut, basis=basis, benchmark=benchmark, catalyst=catalyst,
             session_evidence_ids=tuple(day.revision_id for day in setup_days),
+            session_closed_at={day.trading_date: day.sessions[-1].ends_at for day in trading_days},
         )
     setup = setup_result.setup
     setup_document = {"status": setup_result.status, "reason": setup_result.reason}

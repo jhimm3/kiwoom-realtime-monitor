@@ -331,3 +331,20 @@ class ObservationBootstrapPostgresTests(unittest.TestCase):
 
     def test_legacy_mock_native_repair_commit_survives_lost_ack_and_restart(self):
         self._exercise(mock=True, bootstrap_during_gap=False, legacy=True, recovery_ack_loss=True)
+
+
+class PlannedLeaderPostgresTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from tests.unit.test_mock_automation_specification import PlannedLeaderNativeTests
+
+        url = os.environ.get("KIWOOM_DIAGNOSTIC_TEST_DATABASE_URL", "")
+        if not url:
+            raise unittest.SkipTest("dedicated diagnostic PostgreSQL URL is required")
+        self._native_fixture_store = PostgresQueryStore(self.enterContext(isolated_observation_schema(url)))
+        PlannedLeaderNativeTests.setUp(self)
+        self._dispatch_with_plan = PlannedLeaderNativeTests._dispatch_with_plan.__get__(self)
+
+    async def test_planned_leader_replays_pinned_0b_and_protects_fill_after_native_restart(self):
+        from tests.unit.test_mock_automation_specification import PlannedLeaderNativeTests
+
+        await PlannedLeaderNativeTests.test_explicit_leader_plan_replays_pinned_0b_proof_and_protects_the_fill_after_restart(self)

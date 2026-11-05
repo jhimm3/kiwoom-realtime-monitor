@@ -603,6 +603,8 @@ S1 PC Top20 표시창 geometry는 명시 role INI를 사용한다. NAS index/out
 <a id="shadow"></a>
 ## 공유 판단과 Shadow — F11/F12/F13
 
+**S12-04 완료봉 Shadow.** 기존 관측 원장과 `CandidateMonitor`가 마감·판본·커서·재시작을 소유한다. Section 12 설정은 명시 선택 후 적용되고 연구 판단과 입력 계약을 재사용한다. 원본 실시간 마감은 새 후보, 과거 조회봉은 확보한 문맥에 사용한다. 후보 생성과 계좌 주문 승인은 분리한다. [설정과 검증 범위](app-target-20261023.md#section12-native-shadow-and-journal).
+
 **S12-04 동결 전략 연구.** 기존 연구 실행기가 시점별 자료 판본을 공급하고 Paper 실행기가 후속 시가·비용·보유량을 처리한다. 동결 Shadow 재생은 같은 판단의 후보와 근거를 저장한다. 실시간 Shadow 및 승인 모의 실행으로의 연결은 별도다. [정본](app-target-20261023.md#section12-frozen-strategy-research).
 
 **S12-02 F13 0B 가격·대금 창 분류.** 기존 시장 계산에서 승인 관측을 정렬한 뒤 종목과 두 창에 한 번 나눈다. 개별 같은 초 체결·원래 증거 순서·시장 범위·결측 판정과 기존 가격/대금 계산을 보존한다. 합성 동일 입력 비교와 관련 413건의 범위를 확인했다. [비교 근거](app-target-20261023.md#section12-library-comparison).

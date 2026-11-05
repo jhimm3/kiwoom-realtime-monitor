@@ -11,9 +11,9 @@ from typing import Any, Mapping
 from kiwoom_monitor.application.breakout_strategy import (
     CandidateEvent, FeatureSnapshot, StrategyEvaluation,
 )
-from kiwoom_monitor.application.market_session_schedule import KST
-from kiwoom_monitor.domain.market_data_contract import ListingPhase
-from kiwoom_monitor.domain.strategy_contract import StrategyDecision
+from kiwoom_monitor.application.market_session_schedule import KST, TradingDayEvidence, decode_strategy_references
+from kiwoom_monitor.domain.market_data_contract import ListingEvidence, ListingPhase
+from kiwoom_monitor.domain.strategy_contract import MINUTE_SHADOW_VERSION, StrategyDecision
 
 
 CLOSE_FAMILY = "close_betting/v1"
@@ -31,6 +31,7 @@ MINUTE_EXPERIMENT_LABELS = {
     BREAKOUT_STUDY_FAMILY: "완료봉 돌파 기준선 · 격리 연구",
     THEME_STUDY_FAMILY: "테마 주도권 · 격리 연구",
 }
+MINUTE_SHADOW_STRATEGY_IDS = frozenset(family.split("/", 1)[0] for family in MINUTE_EXPERIMENT_LABELS)
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,58 @@ class MinuteExperiment:
             document["theme_proofs"] = [_wire_dataclass(row) for row in self.theme_proofs]
         if self.breakout_entry_proofs:
             document["entry_proofs"] = [_wire_dataclass(row) for row in self.breakout_entry_proofs]
+        return document
+
+@dataclass(frozen=True)
+class MinuteShadowConfig:
+    strategy: MinuteExperiment
+    signal_valid_seconds: int
+    reference_json: str = ""
+    calendar: tuple[TradingDayEvidence, ...] = ()
+    listings: tuple[ListingEvidence, ...] = ()
+    symbols: tuple[str, ...] = ()
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> MinuteShadowConfig:
+        required = {"version", "strategy", "signal_valid_seconds"}
+        if (not required <= set(document) <= required | {"family", "references", "symbols"}
+                or document["version"] != MINUTE_SHADOW_VERSION
+                or not isinstance(document["strategy"], Mapping)):
+            raise ValueError("invalid Section 12 minute Shadow fields")
+        validity = document["signal_valid_seconds"]
+        if type(validity) is not int or validity <= 0:
+            raise ValueError("Section 12 minute Shadow validity must be a positive integer")
+        symbols = document.get("symbols", [])
+        if (not isinstance(symbols, list) or ("symbols" in document and not symbols)
+                or any(not isinstance(code, str) or len(code) != 6 or not code.isascii()
+                       or not code.isalnum() or code != code.upper() for code in symbols)
+                or len(set(symbols)) != len(symbols)):
+            raise ValueError("Section 12 minute Shadow symbols must be distinct six-character stock codes")
+        scope = tuple(sorted(symbols))
+        family = document.get("family", BREAKOUT_STUDY_FAMILY)
+        if not isinstance(family, str) or family not in MINUTE_EXPERIMENT_LABELS:
+            raise ValueError("unsupported Section 12 minute Shadow family")
+        try:
+            strategy = MinuteExperiment.from_document(family, document["strategy"])
+        except (KeyError, AttributeError) as error:
+            raise ValueError("invalid Section 12 minute Shadow policy evidence") from error
+        uses_calendar = family in {CLOSE_FAMILY, IPO_CLOSE_FAMILY, IPO_BREAKOUT_FAMILY}
+        if uses_calendar != ("references" in document):
+            raise ValueError("CLOSE and IPO require their versioned calendar/listing reference document")
+        if uses_calendar:
+            calendar, listings = decode_strategy_references(document["references"])
+            return cls(strategy, validity, json.dumps(document["references"], sort_keys=True), calendar, listings, scope)
+        return cls(strategy, validity, symbols=scope)
+
+    def to_dict(self) -> dict[str, Any]:
+        document = {"version": MINUTE_SHADOW_VERSION, "strategy": self.strategy.to_dict(),
+                    "signal_valid_seconds": self.signal_valid_seconds}
+        if self.strategy.family != BREAKOUT_STUDY_FAMILY:
+            document["family"] = self.strategy.family
+        if self.reference_json:
+            document["references"] = json.loads(self.reference_json)
+        if self.symbols:
+            document["symbols"] = list(self.symbols)
         return document
 
 
@@ -195,36 +248,38 @@ class MinuteExperimentRun:
                 action, reason, quantity = "WAIT", "paper_slot_in_use", 0
         elif position is not None and setup is not None:
             self.setups[bar.code] = setup
-        return self._evaluation(run_id, bar, universe_ref, engine.strategy_state, action, reason, quantity, setup, refs)
+        return build_minute_evaluation(self.config.family, run_id, bar, universe_ref,
+                                       engine.strategy_state, action, reason, quantity, setup, refs)
 
-    def _evaluation(self, run_id, bar, universe_ref, state, action, reason, quantity, setup, refs) -> StrategyEvaluation:
-        at = datetime.fromisoformat(bar.available_at).astimezone(timezone.utc).isoformat()
-        strategy_id, version = self.config.family.rsplit("/", 1)
-        input_refs = tuple(dict.fromkeys(ref for ref in (bar.revision_id, universe_ref, *refs) if ref))
-        snapshot_body = {
-            "run_id": run_id, "decision_time": at, "input_cutoff": at, "symbol": bar.code,
-            "universe_ref": universe_ref, "input_revision_refs": input_refs, "strategy_id": strategy_id,
-            "strategy_version": version, "policy_version": self.config.family, "state_before": state.to_dict(),
-            "feature_values": ({"factor_id": self.config.family, "status": action, "reason": reason,
-                                "setup": _wire_dataclass(setup) if setup is not None else None},),
-        }
-        snapshot = FeatureSnapshot(_id("snapshot", snapshot_body), **snapshot_body)
-        final_action = "NO_TRADE" if action in {"WAIT", "ARM"} else action
-        body = dict(run_id=run_id, snapshot_id=snapshot.snapshot_id, symbol=bar.code, proposal=action,
-                    final_action=final_action, quantity=quantity, signal_reference_price=bar.close,
-                    required_capital_won=bar.close * quantity if action == "ENTER" else 0,
-                    reasons=(reason,), constraints=(), state_before=state.to_dict(), state_after=state.to_dict(),
-                    decided_at=at)
-        decision = StrategyDecision(_id("decision", body), **body)
-        candidate = None
-        if final_action == "ENTER":
-            fields = dict(run_id=run_id, dedup_key=decision.decision_id, symbol=bar.code,
-                          strategy_id=strategy_id, strategy_version=version, setup=strategy_id,
-                          reference_revision_id=bar.revision_id, transition="flat_to_candidate", quantity=quantity,
-                          signal_reference_price=bar.close, available_at=at,
-                          snapshot_id=snapshot.snapshot_id, decision_id=decision.decision_id)
-            candidate = CandidateEvent(_id("candidate", fields), **fields)
-        return StrategyEvaluation(snapshot, decision, candidate, state)
+
+def build_minute_evaluation(family, run_id, bar, universe_ref, state, action, reason, quantity, setup, refs) -> StrategyEvaluation:
+    at = datetime.fromisoformat(bar.available_at).astimezone(timezone.utc).isoformat()
+    strategy_id, version = family.rsplit("/", 1)
+    input_refs = tuple(dict.fromkeys(ref for ref in (bar.revision_id, universe_ref, *refs) if ref))
+    snapshot_body = {
+        "run_id": run_id, "decision_time": at, "input_cutoff": at, "symbol": bar.code,
+        "universe_ref": universe_ref, "input_revision_refs": input_refs, "strategy_id": strategy_id,
+        "strategy_version": version, "policy_version": family, "state_before": state.to_dict(),
+        "feature_values": ({"factor_id": family, "status": action, "reason": reason,
+                            "setup": _wire_dataclass(setup) if setup is not None else None},),
+    }
+    snapshot = FeatureSnapshot(_id("snapshot", snapshot_body), **snapshot_body)
+    final_action = "NO_TRADE" if action in {"WAIT", "ARM"} else action
+    body = dict(run_id=run_id, snapshot_id=snapshot.snapshot_id, symbol=bar.code, proposal=action,
+                final_action=final_action, quantity=quantity, signal_reference_price=bar.close,
+                required_capital_won=bar.close * quantity if action == "ENTER" else 0,
+                reasons=(reason,), constraints=(), state_before=state.to_dict(), state_after=state.to_dict(),
+                decided_at=at)
+    decision = StrategyDecision(_id("decision", body), **body)
+    candidate = None
+    if final_action == "ENTER":
+        fields = dict(run_id=run_id, dedup_key=decision.decision_id, symbol=bar.code,
+                      strategy_id=strategy_id, strategy_version=version, setup=strategy_id,
+                      reference_revision_id=bar.revision_id, transition="flat_to_candidate", quantity=quantity,
+                      signal_reference_price=bar.close, available_at=at,
+                      snapshot_id=snapshot.snapshot_id, decision_id=decision.decision_id)
+        candidate = CandidateEvent(_id("candidate", fields), **fields)
+    return StrategyEvaluation(snapshot, decision, candidate, state)
 
 
 def _wire_dataclass(value) -> dict[str, Any]:

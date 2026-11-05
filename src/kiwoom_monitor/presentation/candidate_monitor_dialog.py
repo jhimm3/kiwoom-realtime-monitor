@@ -24,8 +24,23 @@ from kiwoom_monitor.application.leader_breakout import LeaderBreakoutPolicy, doc
 from kiwoom_monitor.application.research_families import (
     BREAKOUT_FAMILY_ID, RESEARCH_DIRECTION_NOTICE, RESEARCH_FAMILY_LABELS,
 )
+from kiwoom_monitor.application.section12_minute_research import (
+    MINUTE_SHADOW_STRATEGY_IDS, MINUTE_SHADOW_VERSION, MinuteShadowConfig,
+)
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
 from kiwoom_monitor.infrastructure.central_operational_settings import CentralOperationalSettingsClient
+
+
+def _minute_shadow_label(variant: object = None) -> str:
+    if variant in ("B0", "B1", "B2", "B3"):
+        return f"Section 12 완료봉 돌파 · {variant}"
+    for variants, label in (
+        (("TH",), "테마 주도권"), (("CLOSE",), "종가베팅"),
+        (("IPO_CLOSE", "IPO_BREAKOUT"), "신규주"), (("P0", "P1"), "낙주"),
+    ):
+        if variant in variants:
+            return f"Section 12 {label} · {variant}"
+    return "Section 12 완료봉 전략"
 
 
 class CandidatePollWorker(QThread):
@@ -188,6 +203,15 @@ class CandidateMonitorDialog(QDialog):
         self._strategy_config = document_leader_breakout_policy().to_dict()
         self._legacy_candidate_settings = None
         self._leader_policy_text = json.dumps(self._strategy_config, ensure_ascii=False, indent=2)
+        self._minute_shadow_text = json.dumps({
+            "version": MINUTE_SHADOW_VERSION,
+            "strategy": {"capital_won": None, "policy": {
+                "variant": None, "quantity": None, "exit_at_kst": None,
+                "theme_id": None, "theme_role": None, "exit_on_dependency_loss": None,
+            }},
+            "signal_valid_seconds": None,
+        }, ensure_ascii=False, indent=2)
+        self._minute_shadow_enabled = False
         self._content_client = client
         self._ram_selection_loaded = False
         self._ram_supported = False
@@ -215,6 +239,7 @@ class CandidateMonitorDialog(QDialog):
         self._strategy_selector = QComboBox()
         self._strategy_selector.addItem("주도주 구조 돌파 · 실시간 0B", "leader_breakout/v1")
         self._strategy_selector.addItem("기존 완료봉 돌파 · 저장된 비교 설정", "legacy_comparison")
+        self._strategy_selector.addItem(_minute_shadow_label(), MINUTE_SHADOW_VERSION)
         self._strategy_selector.model().item(1).setEnabled(False)
         self._server_policy_status = QLabel("서버 적용 정책 확인 전 · 화면 선택만으로 서버 설정이 바뀌지 않습니다.")
         self._server_policy_status.setWordWrap(True)
@@ -278,7 +303,7 @@ class CandidateMonitorDialog(QDialog):
         candidate_layout.addWidget(self._baseline_table)
         candidate_layout.addWidget(self._table)
         self._tabs = QTabWidget()
-        self._tabs.addTab(candidate_page, "주도주 돌파 · 0B")
+        self._tabs.addTab(candidate_page, "Shadow 후보")
         self._tabs.addTab(self._build_ram_page(), "시장·테마 관찰")
         self._tabs.currentChanged.connect(self._tab_changed)
         layout = QVBoxLayout(self)
@@ -427,6 +452,13 @@ class CandidateMonitorDialog(QDialog):
         self._table.scrollToBottom()
 
     def _write_event(self, row: int, event: dict[str, Any]) -> None:
+        strategy_id = event.get("strategy_id")
+        if strategy_id == "leader_breakout":
+            policy = "주도주 구조 돌파 · 0B"
+        elif strategy_id in MINUTE_SHADOW_STRATEGY_IDS:
+            policy = _minute_shadow_label(event.get("strategy_variant"))
+        else:
+            policy = "기존 비교 · " + str(event.get("strategy_id", "출처 미확인"))
         values = (
             _display_time(event.get("available_at")),
             str(event.get("symbol", "")),
@@ -434,8 +466,7 @@ class CandidateMonitorDialog(QDialog):
             "미정" if event.get("quantity") is None else str(event["quantity"]),
             _display_time(event.get("expires_at")),
             str(event.get("status", "")),
-            ("주도주 구조 돌파 · 0B" if event.get("strategy_id") == "leader_breakout"
-             else "기존 비교 · " + str(event.get("strategy_id", "출처 미확인"))),
+            policy,
         )
         for column, value in enumerate(values):
             self._table.setItem(row, column, QTableWidgetItem(value))
@@ -463,15 +494,35 @@ class CandidateMonitorDialog(QDialog):
         self._operational_settings_loaded = True
         self._operational_revision = values.get("revision")
         config = values.get("shadow_candidate_config")
-        leader_mode = isinstance(config, dict) and "policy_id" in config
+        minute_mode = isinstance(config, dict) and config.get("version") == MINUTE_SHADOW_VERSION
+        leader_mode = isinstance(config, dict) and not minute_mode and "policy_id" in config
         implicit_draft = leader_mode and json.dumps(config,sort_keys=True) == json.dumps(LeaderBreakoutPolicy().to_dict(),sort_keys=True)
-        self._legacy_candidate_settings = deepcopy(values) if isinstance(config, dict) and not leader_mode else None
+        self._legacy_candidate_settings = (
+            deepcopy(values) if isinstance(config, dict) and not (leader_mode or minute_mode) else None
+        )
         self._strategy_selector.model().item(1).setEnabled(self._legacy_candidate_settings is not None)
         server_policy = "주도주 구조 돌파 · 0B" if leader_mode else "기존 완료봉 비교" if isinstance(config, dict) else "미확인"
+        if minute_mode:
+            strategy = config.get("strategy")
+            policy = strategy.get("policy") if isinstance(strategy, dict) else None
+            server_policy = _minute_shadow_label(policy.get("variant") if isinstance(policy, dict) else None)
+        applied = values.get("applied_revision")
+        apply_message = f" · 서버 적용 #{applied}" if type(applied) is int else ""
+        if values.get("apply_status") == "RECOVERY_REQUIRED":
+            apply_message += " · 적용 복구 필요"
         self._server_policy_status.setText(
             f"서버 저장 #{self._operational_revision}: {server_policy} · "
             + ("켜짐" if values.get("shadow_candidate_enabled") else "꺼짐")
+            + apply_message
             + " · 편집한 정책은 저장 후 서버에 적용됩니다.")
+        if minute_mode:
+            self._minute_shadow_text = json.dumps(config, ensure_ascii=False, indent=2)
+            self._minute_shadow_enabled = bool(values.get("shadow_candidate_enabled"))
+            blocked = self._strategy_selector.blockSignals(True)
+            self._strategy_selector.setCurrentIndex(self._strategy_selector.findData(MINUTE_SHADOW_VERSION))
+            self._strategy_selector.blockSignals(blocked)
+            self._render_candidate_settings(values)
+            return
         if leader_mode:
             self._leader_policy_text = json.dumps(document_leader_breakout_policy().to_dict() if implicit_draft else config,
                 ensure_ascii=False,indent=2)
@@ -489,9 +540,16 @@ class CandidateMonitorDialog(QDialog):
             self._settings_status.setText('00종합 초안 편집 중 · 서버의 기존 미정 설정은 저장 후 전환됩니다. '+self._settings_status.text())
 
     def _select_candidate_policy(self, _index: int) -> None:
-        if "policy_id" in self._strategy_config:
+        if self._strategy_config.get("version") == MINUTE_SHADOW_VERSION:
+            self._minute_shadow_text = self._leader_policy_editor.toPlainText()
+            self._minute_shadow_enabled = self._candidate_enabled.isChecked()
+        elif "policy_id" in self._strategy_config:
             self._leader_policy_text = self._leader_policy_editor.toPlainText()
-        if self._strategy_selector.currentData() == "legacy_comparison":
+        selected = self._strategy_selector.currentData()
+        if selected == MINUTE_SHADOW_VERSION:
+            self._render_candidate_settings({"shadow_candidate_enabled": self._minute_shadow_enabled,
+                "shadow_candidate_config": {"version": MINUTE_SHADOW_VERSION}})
+        elif selected == "legacy_comparison":
             if self._legacy_candidate_settings is not None:
                 self._render_candidate_settings(self._legacy_candidate_settings)
         else:
@@ -507,14 +565,28 @@ class CandidateMonitorDialog(QDialog):
 
     def _render_candidate_settings(self, values: dict[str, Any]) -> None:
         config = values.get("shadow_candidate_config")
-        leader_mode = isinstance(config, dict) and "policy_id" in config
-        self._leader_policy_editor.setVisible(leader_mode)
+        minute_mode = isinstance(config, dict) and config.get("version") == MINUTE_SHADOW_VERSION
+        leader_mode = isinstance(config, dict) and not minute_mode and "policy_id" in config
+        explicit_policy = leader_mode or minute_mode
+        self._leader_policy_editor.setVisible(explicit_policy)
         self._use_leader_policy.setVisible(leader_mode)
-        self._settings_form.labelForField(self._leader_policy_editor).setVisible(leader_mode)
+        editor_label = self._settings_form.labelForField(self._leader_policy_editor)
+        editor_label.setVisible(explicit_policy)
+        editor_label.setText("Section 12 명시 정책" if minute_mode else "주도주 돌파 명시 정책")
         for widget in (self._lookback_bars, self._buffer_percent, self._rank_persistence,
                 self._stop_loss_percent, self._target_percent, self._max_hold_minutes, self._universe_max_age):
-            widget.setVisible(not leader_mode)
-            self._settings_form.labelForField(widget).setVisible(not leader_mode)
+            widget.setVisible(not explicit_policy)
+            self._settings_form.labelForField(widget).setVisible(not explicit_policy)
+        if minute_mode:
+            self._strategy_config = deepcopy(config)
+            self._leader_policy_editor.setPlainText(self._minute_shadow_text)
+            self._candidate_enabled.setText("명시 정책으로 완료봉 후보 관찰")
+            self._candidate_enabled.setChecked(bool(values.get("shadow_candidate_enabled", False)))
+            self._strategy_name.setText(_minute_shadow_label() + " · 주문 승인 없음")
+            self._settings_group.setTitle(_minute_shadow_label())
+            self._settings_status.setText("전략 정책, 필요한 근거와 후보 유효시간을 명시하세요. 후보만 기록합니다.")
+            self._settings_group.setEnabled(True)
+            return
         if leader_mode:
             self._strategy_config = deepcopy(config)
             self._leader_policy_editor.setPlainText(self._leader_policy_text)
@@ -572,10 +644,15 @@ class CandidateMonitorDialog(QDialog):
         self._update_position_source_buttons()
 
     def _save_operational_settings(self) -> None:
-        if "policy_id" in self._strategy_config:
+        minute_mode = self._strategy_config.get("version") == MINUTE_SHADOW_VERSION
+        if minute_mode or "policy_id" in self._strategy_config:
             try:
-                config = LeaderBreakoutPolicy.from_dict(json.loads(self._leader_policy_editor.toPlainText())).to_dict()
-            except (TypeError, ValueError) as error:
+                document = json.loads(self._leader_policy_editor.toPlainText())
+                if minute_mode:
+                    config = MinuteShadowConfig.from_document(document).to_dict()
+                else:
+                    config = LeaderBreakoutPolicy.from_dict(document).to_dict()
+            except (TypeError, ValueError, KeyError) as error:
                 self._settings_status.setText("정책 확인 필요 · " + str(error))
                 return
             changes = {"shadow_candidate_enabled": self._candidate_enabled.isChecked(),
