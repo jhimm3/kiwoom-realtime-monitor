@@ -698,6 +698,17 @@ class ResearchProcessTests(unittest.TestCase):
                     self.assertFalse((root / request["database"]).exists())
                     self.assertFalse((root / request["runs_dir"]).exists())
 
+    def _verify_section12_shadow_request(self, path, request, repository) -> None:
+        path.write_text(json.dumps({**request, "shadow_only": True}), encoding="utf-8")
+        with patch("kiwoom_monitor.research_run.PaperExecutionEngine.process_decision", side_effect=AssertionError), \
+                patch("kiwoom_monitor.research_run.PaperExecutionEngine.process_bar", side_effect=AssertionError):
+            result = execute_process_request(load_research_process_request(path))
+        self.assertTrue(result["shadow_only"])
+        self.assertFalse(result["order_authorized"])
+        self.assertEqual((), repository.load_execution_events(result["run_id"]))
+        manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+        self.assertGreater(manifest["candidate_count"], 0)
+
     def test_section12_close_and_ipo_requests_preserve_actual_filled_quantity(self) -> None:
         import sqlite3
         from contextlib import closing
@@ -836,17 +847,7 @@ class ResearchProcessTests(unittest.TestCase):
                         self.assertIn("EXIT", {decision["final_action"] for decision in management})
                         for decision in management:
                             self.assertEqual(entry_setup, snapshots[decision["snapshot_id"]])
-            request["shadow_only"] = True
-            request.update(family="close_betting/v1", strategy={"capital_won": 1000, "policy": close})
-            path.write_text(json.dumps(request), encoding="utf-8")
-            with patch("kiwoom_monitor.research_run.PaperExecutionEngine.process_decision", side_effect=AssertionError), \
-                    patch("kiwoom_monitor.research_run.PaperExecutionEngine.process_bar", side_effect=AssertionError):
-                result = execute_process_request(load_research_process_request(path))
-            self.assertTrue(result["shadow_only"])
-            self.assertFalse(result["order_authorized"])
-            self.assertEqual((), repository.load_execution_events(result["run_id"]))
-            manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
-            self.assertGreater(manifest["candidate_count"], 0)
+                    self._verify_section12_shadow_request(path, request, repository)
 
     def test_section12_panic_request_uses_each_variant_entry_cut_and_completed_close_exit(self) -> None:
         from datetime import datetime, timedelta
@@ -918,6 +919,8 @@ class ResearchProcessTests(unittest.TestCase):
                     self.assertEqual(expected, [(event["side"], event["price"]) for event in events if event["event_type"] == "FILL"])
                     self.assertNotIn("RISK_FILL", {event["event_type"] for event in events})
                     self.assertEqual(allow_unknown, result["section12"].get("panic_allow_unresolved_news", False))
+                    if expected and not allow_unknown:
+                        self._verify_section12_shadow_request(path, request, repository)
                     if allow_unknown and expected:
                         decisions = repository.load_evaluations(result["run_id"])
                         entry, = [row for row in decisions if row["final_action"] == "ENTER"]
@@ -1177,6 +1180,14 @@ class ResearchProcessTests(unittest.TestCase):
                 ]), [("BUY", 105), ("SELL", 106)]),
             ):
                 self.assertEqual(expected, [(event["side"], event["price"]) for event in events if event["event_type"] == "FILL"])
+            for family, policy, data in (
+                ("breakout_study/v1", base, {}),
+                ("theme_leader_study/v1", theme, {"theme_proofs": [first_role, loss]}),
+            ):
+                shadow_request = {**request, "family": family,
+                                  "strategy": {"capital_won": 1000, "policy": policy, **data}}
+                with self.subTest(family=family, shadow_only=True):
+                    self._verify_section12_shadow_request(path, shadow_request, repository)
             rows[12]["payload"].update(open=100, low=100)
             write_rows()
             events = run("breakout_study/v1", base)

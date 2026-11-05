@@ -4,7 +4,7 @@
 
 전체 단계와 완료 기준은 이 문서 한 곳에서 관리한다. **S12-01 → S12-02 → S12-03 → S12-04 → S12-05** 순서로 통합한다. 각 단계는 실행할 코드, 직접 관련 검사, 검증 기록과 로컬 커밋을 남긴다. [정본 12절](app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [기능별 계약](r3-ownership.md) · [남은 작업](../OPEN_ITEMS.md) · [저장소 전체 로드맵](../../FUTURE_DEVELOPMENT_ROADMAP.md).
 
-**현재 상태.** S12-01~03 수락 · 완료 3/5 · S12-04 진행 중. 기존 실행기의 계획형 0B 모의 실행과 명시 재개, 종가베팅·신규주·낙주 후보 근거 조회를 연결했다. 낙주 일반 Paper에서 뉴스 미확인 표본을 분리해 비교할 수 있다. [낙주 후보](#s12-panic-shadow-readback) · [낙주 비교](#s12-paper-panic) · [계획형 실행](#s12-native-plan-runner) · [12.12 잔여 조건](#s12-acceptance-remaining).
+**현재 상태.** S12-01~04 수락 · 완료 4/5 · S12-05 진행 중. 다음 대조 대상은 12.12 항목 3의 종가베팅 장 종료·재시작·다음 거래 세션 모의 실행이다. [S12-04 완료 근거](#s12-04-stage-acceptance) · [12.12 잔여 조건](#s12-acceptance-remaining).
 
 ## 1. 착수 기준과 선행 작업
 
@@ -148,7 +148,7 @@ S12-01에서는 명시 해시로 고정한 별도 거래일·상장 근거를 �
 
 `daily_decline_experiment`, `micro_experiment`, `account_risk_experiment`는 `dataset` JSON 파일, `dataset_sha256`, `policy`, `database`, `runs_dir`를 명시한다. 자료·정책·구현 지문을 연구 실행 ID에 묶고, 상세 결과는 실행별 `manifest.json`에 보존한다. DD는 완료 일봉·시장 대비 낙폭·거래일·원주가 보호를 연결하고, MICRO는 순서가 입증된 VI·호가·체결과 명시 영수증을 사용한다. 계좌 위험 비교는 같은 총예산 아래 예약 경쟁과 체결 귀속을 기록한다. 자세한 요청과 기대 결과는 기존 연구 명령의 연결 검사로 재현할 수 있다. [분봉·합성 연구 요청 검사](../../tests/unit/test_research_process.py).
 
-8개 실험군의 합성 요청을 실행할 수 있다. 사건군을 분리한 실증 자료 비교와 전략별 실행 근거를 실제 Shadow와 단일 계좌 모의 승인·복구에 연결하는 작업이 남아 있다. S12-04와 S12-05는 진행률에 합산하지 않는다.
+이 시점에는 8개 실험군의 합성 요청을 실행할 수 있었고 S12-04와 S12-05의 수락은 보류했다. 후속 수락 범위와 남은 계좌 연결은 [S12-04 완료 근거](#s12-04-stage-acceptance)와 [12.12 잔여 조건](#s12-acceptance-remaining)에 기록한다.
 
 현재 소스 `2c3bcae3`에서 Windows 25모듈 633건과 격리 PostgreSQL 12건이 통과했다. 기존 Shadow 198건과 주도주 돌파 86건, 새 동결 Shadow의 주문 호출 0건을 포함한다. 구조와 증분 원장 대조를 통과했고 PostgreSQL 임시 프로세스와 포트 종료를 확인했다. [직접 회귀 542건](../../tmp/s12-04-strategy-wiring/related/run.json) · [기존 소비자 91건](../../tmp/s12-04-strategy-wiring/prior-dialog-fixtures/run.json) · [PostgreSQL 12건](../../tmp/s12-03-pg-baseline/s12-04-native-research/postgres-run.json) · [증분 실행 대조](../../tmp/s12-04-strategy-wiring/review-execution-final.json).
 
@@ -286,6 +286,19 @@ P1이 재시작 후 확인 봉에서 후보를 내면 최초 급락 봉의 판�
 명시한 종목과 기존 중앙 수집 대상이 겹칠 때 KRX 0D를 같은 WebSocket에서 등록한다. 승인된 종목당 최신 한 건을 수집기에 보관하고, 관리자 조회는 같은 가용 시각의 0B 컷과 함께 요청 범위의 0D를 읽는다. 등록 확인 전·해제 대기 중 메시지는 제외하며, 수집 단절이나 연결 종료 뒤에는 새 관측을 기다린다. 호가 원문 시각과 수집기 가용 시각을 분리하고, 실제 수량 0과 결측 수량을 구분한다. 예정 체결과 실제 체결은 각각의 입력에 둔다. 새 호가는 메모리에서만 사용한다. [관리자 조회 계약](../../API_CONTRACT.md).
 
 소스 `dd7b1f79`의 Windows 영향 검사 62건과 구조·저장소 호출·증분 원장 대조가 통과했다. 가짜 연결로 승인 전 제외, 승인 후 조회, 조회 범위 만료, 단절 후 새 관측, 해제 대기 중 폐기, 0D 등록 거절 후 0B 수신 복구를 확인했다. 관리자 조회는 결측·부분·양쪽 호가 및 0 수량을 구분했다. 실제 거래소에서의 호가 공급과 체결 순서는 별도 수락 조건이다. [영향 검사](../../tmp/s12-04-shadow/micro-native-book-acceptance/evidence.json) · [증분 대조](../../tmp/s12-04-shadow/micro-native-book-acceptance-review.json).
+
+<a id="s12-04-stage-acceptance"></a>
+
+### S12-04 네 전략·연구·Shadow 수락
+
+| 단계 완료 조건 | 현재 검증 |
+|---|---|
+| 4/4 운용군과 신규주 2/2 조합 | 돌파, 종가베팅, 신규주 돌파·종가베팅, 낙주 P0·P1의 고정 자료에서 후보와 진입·보유·종결을 검증했다. 새 신호 부재·자료 결측·보유 보호를 각 전략에서 확인했다. 신규주는 상장 첫날과 이후를 비교하고 나중에 정정된 상장 근거가 기존 보유를 재분류하지 않는지 대조했다. |
+| Shadow 주문 호출 0 | 동일 자료로 돌파·테마, 종가베팅·신규주 두 조합, 낙주 P0·P1의 Shadow 요청을 재생했다. 후보가 생성되고 Paper의 판단·봉 처리 진입점 호출과 원장의 체결·주문 이벤트가 모두 0이었다. 실제 중앙 Shadow의 최초 후보 근거 조회와 재시작은 별도 검사에서 확인했다. |
+| 8/8 직접·공통 실험 | BR·CLOSE·IPO·PANIC·DD·MICRO·TH·RISK의 명시적 합성 요청과 저장 결과를 검사했다. DD의 다일 보유·분할과 원주가, MICRO의 지연·순서·호가 결측과 상세 체결·늦은 체결을 검증했다. KRX 0D 조회, 실증 거래 가능 상태와 체결 순서의 경계는 위 항목에 구분했다. |
+| 자료 분할과 과거 성과의 범위 | 검토 사건의 교차 분할을 저장 전에 거절하고 최종평가 자료의 관측 읽기를 차단했다. 손실·무거래와 갭·결측·미완료의 구분을 합성 검사에서 대조했다. 과거 자료의 90/380분 범위와 낙주 단일 훈련 사례는 탐색 재생 결과로 별도 기록했다. [사건 분할](../../tmp/s12-05-verification-matrix/reviewed-halt-event-v2/evidence.json) · [복원 시장비율](../../tmp/s12-04-b2-index-proxy/partial-current-u001-train/result.json) · [낙주 탐색](../../tmp/s12-05-verification-matrix/panic-coverage-main/coverage.json). |
+
+현재 소스 `0fdb56f7`의 영향 및 수락 검사 72건과 증분 원장 대조가 통과했다. 단계의 합성·Shadow 범위를 수락한다. 제품의 전략별 계좌 승인·주문 원장·재시작·화면·일지 연결은 S12-05의 12.12 시나리오로 판정한다. [실행 증거](../../tmp/s12-04-shadow/s12-04-strategy-acceptance/evidence.json) · [증분 대조](../../tmp/s12-04-shadow/s12-04-strategy-acceptance-review.json).
 
 <a id="s12-acceptance-remaining"></a>
 

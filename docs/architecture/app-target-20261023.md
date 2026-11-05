@@ -10,7 +10,7 @@
 
 갱신. **2026-11-05 · S12-04 계획형 0B 모의 실행과 S12-05 후보 근거 복구**. AR 판정과 선행 개발은 11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~03을 수락했다. S12-04는 계획형 0B 돌파 모의 실행, 낙주 Paper 비교, 선택 KRX 0D 호가 조회를 연결했다. S12-05는 같은 계좌·계획의 명시 재개와 종가베팅·신규주·낙주 후보의 최초 근거 조회를 연결했다. 전략별 승인 모의 실행, 필수 입력·미정 정책과 12.12 통합 수락이 남아 완료율은 3/5다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [MICRO 호가](#section12-native-micro-book) · [낙주 후보](#section12-panic-shadow-readback) · [계획형 실행](#section12-native-plan-runner) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04를 수락했고 완료율은 4/5다. S12-05의 다음 검증은 종가베팅 장 종료·재시작·다음 거래 세션의 계획 모의 실행이다. 전략별 승인 모의 실행과 12.12 통합 수락은 진행 중이다. AR은 검사용 `6495993`의 C24 검증 수락과 C16 재발 시 이관 상태다. [승인 로드맵](section12-development-roadmap-20261105.md) · [S12-04 수락](#section12-strategy-shadow-acceptance) · [S12-05 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -4669,6 +4669,12 @@ source264의새CLI는type=Path가raw빈문자열을점(.)으로접어full owner�
 ### 11.253 S12-04 MICRO KRX 호가 관측 — 2026-11-05
 
 - 중앙 수집기에 명시한 종목을 기존 KRX 구독 대상과 교차해 0D를 요청한다. 등록 승인을 거친 종목의 최신 호가 한 건을 같은 수집기가 소유한다. 조회는 가용 시각과 원문 시각, 가격·수량·결측을 표시한다. 종목 거래 가능 상태·0B/0D/VI 교차 순서·VI 해제 체결가는 확인이 남아 있다. [MICRO 연결과 검증](section12-development-roadmap-20261105.md#s12-native-micro-book).
+
+<a id="section12-strategy-shadow-acceptance"></a>
+
+### 11.254 S12-04 네 전략·연구·Shadow 수락 — 2026-11-05
+
+- 같은 동결 자료에서 4/4 운용군, 신규주 2/2 조합, 8/8 연구군을 대조했다. 합성 재생은 보유·종결을 확인했고 Shadow 재생은 후보를 기록하면서 주문 호출 0건을 확인했다. 개발 자료의 교차 분할을 차단하고 최종평가 관측을 열지 않았다. 제품 계좌의 승인·복구와 실제 시장 실증은 각각의 남은 조건을 따른다. [완료 조건별 근거](section12-development-roadmap-20261105.md#s12-04-stage-acceptance).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 
