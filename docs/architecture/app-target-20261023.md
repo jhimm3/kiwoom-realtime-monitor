@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-06 · S12-05 대표1 돌파 추가 물량·부분 청산의 핵심 연결 검증**. AR 판정과 선행 개발은11절에 둔다.
+갱신. **2026-11-06 · S12-05 대표1 실제 동결 연구·최종평가→후보/Shadow→READY 연결 검증**. AR 판정과 선행 개발은11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04 수락·전체4/5, S12-05 대표3·4·5·7·9의5/11 개발 수락이다. 대표1의 명시 추가 매수·부분 청산, 같은 계획의 실제 FILL·현재 조건 재판단/정정·복구·전체 보호, 수동 수량 격리와 READY 화면/API를 Windows358/실제PG27건으로 확인했다. 대표1 전체는 실제 연구 최종평가 체인과 다른 계획의 수량 대조가 남아 진행이다. 대표2 재진입·대표6 병행/계좌·대표10 새 spec 교체, 대표8·11 및 DD/MICRO·독립 계좌/원주문 검증을 유지한다. 운영 제외·AR C24/C16은 유지한다. [로드맵](section12-development-roadmap-20261105.md) · [대표1 추가·부분 청산](#section12-leader-staged-actions) · [대표1 현재 주문](#section12-leader-current-order-management) · [대표10 부분](#section12-minute-feature-lifecycle) · [대표 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04 수락·전체4/5, S12-05 대표3·4·5·7·9의5/11 개발 수락이다. 대표1의 실제 동결 연구·최종평가→후보/현재 Shadow→READY 화면·인증 API를 현재 소스64건으로 검증하고 가공 분봉을 원본 manifest와 비교하던 결함을 수정했다. 추가/부분 청산의 실제 귀속·현재 조건/정정·복구·전체 보호·수동 격리는17f4ef0의 Windows358/실제PG27 근거를 변경 없는 주문 경계로 보존한다. 대표1의 다른 계획 수량 대조, 대표2 재진입·대표6 병행/계좌·대표10 새 spec 교체, 대표8·11 및 DD/MICRO·독립 계좌/원주문 검증은 남는다. 다음은 대표1과 연결된 단일 계좌의 다른 계획 관리다. 운영 제외·AR C24/C16은 유지한다. [로드맵](section12-development-roadmap-20261105.md) · [실제 연구 체인](#section12-staged-final-source-chain) · [추가·부분 청산](#section12-leader-staged-actions) · [대표 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -1967,7 +1967,7 @@ MAIN139에 AR06 수락 결과의 출처 전달과 AR09 version1 owner-state를 �
 
 현재 집계는 [0절](#0-현재-기준과-진행-현황)과 이 절의 표를 따른다. **90개 중 검증 완료 83·재발 시 이관 1·잔여 6(세부 행동 17)**이다. 잔여는 전환 전 조건 5개와 별도 승인 운영 단계 AR08-C25다. OS별 배포·장후 전송의 단계별 범위는 [11.72](#portable-execution-target)에 둔다. 이 집계는 각 조건의 국소 판정이며 AR 전체 종결·운영 수락은 0절에서 별도로 본다.
 
-라이브러리와 12절의 새 제품 개발은 [최초 범위11.239](#rss-and-section12-development)와 [현재0절](#0-현재-기준과-진행-현황)을 따른다. 최신 추가·부분 청산 근거는 [11.286](#section12-leader-staged-actions)에 두며 이 표의 조건별 검증·운영 수락과 분리한다.
+라이브러리와 12절의 새 제품 개발은 [최초 범위11.239](#rss-and-section12-development)와 [현재0절](#0-현재-기준과-진행-현황)을 따른다. 추가·부분 청산과 실제 연구 체인의 근거는 [11.286](#section12-leader-staged-actions)·[11.287](#section12-staged-final-source-chain)에 두며 이 표의 조건별 검증·운영 수락과 분리한다.
 
 **정본 사용:** 이 표를 갱신하고 같은 상태 보고를 계속 덧붙이지 않는다. **완료**는 해당 국소 조건의 본 코드 연결/관련 검증 수락, **부분 완료**는 일부 본 코드/검증 수락 후 필수 조건 잔여, **미완료**는 본 코드 미수락(격리 구현 포함), **외부 환경 대기**는 필요한 실제 입력/환경·승인 미확보다. 격리 후보나 정책 문서만으로 완료를 올리지 않는다. 개별 항목은 한 담당 AR에서만 집계하며 다른 AR의 선행·참조는 중복0이다. [전체 대조 근거/현재 코드/개별 완료조건](../../tmp/ar-v1-wave48-20261028/v1-remaining-checklist/consolidated.json)에 실제 함수·기존 실행 소스·미확인 범위와 root의 선행 정정을 보존한다. 최초 체크리스트 대조에서는 제품 변경·새 검사 시작·운영 접근 없이 기존 baseline 종료만 정리했다. 이후 승인 v1 연속 진행의 격리 후보 검사와 현재 결과는 0절 및 해당 잔여행에 반영한다.
 
@@ -4952,6 +4952,22 @@ Paper 완료봉/다음 실제 시가의 ENTER2·ADD1·REDUCE1·EXIT2와 비용�
 현재 소스1252파일 LF `076bcb90dea759ec5aa8dd04c7245bffae50eef28b58c7c9834dfb6222397f02`에서 Windows358/실제PG27을 검증했다. 최초PG27의240초 timeout은 통과0으로 보존하고8/19로 분리했다. 새 모듈8건의 실제 발견 건수를 요구한 최초 증분 거절도 보존하며 정규 모듈 발견/실행 근거로 실제8건을 확인했고 현재 소스의 증분 실행 대조도 통과했다. 기대값·안전 제한·기존 검사는 완화하지 않았다. 새25정의·총7360/원장302·원래 미결49를 보존하고 native SQL 두 지점만 목적/transaction/검증을 연결해 승인했다. 성공 worker의 TEMP/HKCU와 PG DB·포트·비밀 자료를 정리했고, 종료된 개발 실패20영수증의 잔여 TEMP11만 정확한 경로로 정리했다. 새 라이브러리나 측정하지 않은 속도 향상은 주장하지 않는다. [묶음 근거/잔여](../../tmp/s12-05-leader-staged/component-evidence.json) · [증분 대조](../../tmp/s12-05-leader-staged/review-execution-final.json) · [영향 선정/timeout/미연결](../../tmp/s12-05-leader-staged/impact-resolution.json).
 
 **대표1 전체는 진행이다.** 실제 frozen 연구→최종평가→후보/Shadow의 단계 체인과 다른 계획 물량의 대조가 남는다. history-only Family adapter는 현재 보유만으로 단계의 과거 관측 연속성을 복원할 수 없으며 incremental ADD/history-only HOLD 재현을 보존했다. 실제 owner의 연속 상태를 연결하되 가짜 과거 포지션·틱이나 연구 전체 차단으로 메우지 않는다. 옛 native-policy v4의 최초 진입/SELL 비교 모형도 새 단계의 일반 규칙으로 승격하지 않는다. marker의 로컬 복구를 offline 보존 자료의 실제 주문 권한 인계로 계산하지 않는다. 대표2·6·8·10·11, DD/MICRO와 독립 계좌/원주문 조건, 전체4/5·대표5/11을 유지하며 같은 승인 로드맵으로 계속 진행한다. 실제 주문·운영 NAS 변경/배포·자료 이전·T0·권한 인계·push는 수행하지 않았다.
+
+<a id="section12-staged-final-source-chain"></a>
+
+### 11.287 S12-05 대표1 · 실제 동결 연구·최종평가→후보/Shadow→READY — 2026-11-06
+
+일반 연구 실행기의 실제 incremental 상태와 기존 독립 최종평가를 사용해 명시 v2를 연결했다. 합성 동결 분봉의 신호 다음 실제 시가에서 BUY2@1041·ADD1@1061·부분 SELL2@1119·잔여 SELL1@929가 기록되고 보유0이 된다. 원본 파일과 실제 워밍업·FILL·비용을 보존한 상태에서도 첫 실행은 FINAL_REPORT_NOT_ELIGIBLE로 후보를 차단했다. 원인은 신호용으로 정리한 `leader_rows`를 원본 `dataset.manifest`의 건수/ID 해시와 비교해 universe_missing·hash_unverified·warmup_not_covered 세 거짓 사유를 만들던 호출이었다. 실제 source17f4ef0과 실패·기대 수량·합성 손익19원을 보존했다.
+
+수정은 기존 `build_research_report`에 해당 manifest의 원본 `dataset.observations`를 전달하는 한 연결이다. 실제 판단·완료봉 시계·다음 시가 체결·비용·사전 동결 기준은 바꾸지 않았다. 신호용 projection은 계속 판단에 사용하고 원본 자료의 출처/해시/건수 검증과 구분한다. 원본과 실제 워밍업이 있는 긍정 사례는 자료 PASS/VERIFIED·원본 건수·universe1·최종 보고서 ELIGIBLE를 확인했다. 별도로 실행 전에 최소 청산3건을 동결한 사례는 보고된2건으로 기존 MINIMUM_CLOSED_TRADES_NOT_MET/BLOCKED를 유지했다. 원본 손상 거절과 기존 워밍업/최종평가 검사를 재사용했으며 조건이나 기대값을 완화하지 않았다. [직접 원인·입력/소비 추적](../../tmp/s12-05-leader-staged/research-root-cause.json).
+
+이 실제 최종평가의 package/run/result hash를 후보 파일·인증 후보 게시/재조회→현재0B의 실제 CandidateMonitor Shadow→Qt의 명시 추가/감축 수량·현재 정정 정책 파일→READY 게시/조회까지 대조했다. 원본 후보의 contexts는 비우고 현재 유효한 context와 원래 규칙을 결속한다. 게시만으로 runtime/control·주문 의도나 FILL을 만들지 않는다. 연구 결과는 합성 소프트웨어 연결 근거이며 과거 시장의 예측력·운영 수락으로 계산하지 않는다.
+
+이전 history-only adapter 재현의 실제 소비자를 추적했다. 일반 leader 연구는 실제 entry context와 `leader_minute_states`를 유지하는 `evaluate_leader_breakout_bar_step`을 직접 사용한다. 현재 Shadow/Episode도 각각0B/LeaderTradeInputs 경로다. 옛 native-policy v4 verifier에 leader가 연결된다는 추정은 실제로는 `research_run`의 기존 미설정 study 거절 앞에서 도달하지 않는다. 새 최종평가 검사는 실제 kernel을 그대로 감싸 연속 보유3을 확인하고 stateless adapter가 호출되지 않는 것도 대조했다. standalone history-only 비교의 한계는 보존하되 이를 일반 연구 전체의 차단이나 가짜 과거 포지션/틱으로 해결하지 않는다. 이번에 실제 일반 연구 체인의 검증을 닫았으며 옛 비교 모형을 전면 재설계하지 않는다.
+
+현재1253파일 LF `d8415dd54a54a5bed591afff3562f66cb36a72d21471dc1ec828e45225c9de05`의 관련64건·증분 실행 대조·구조/호출 경계가 통과했다. 총7362정의·원장303·원래 미결49를 유지한다. 성공7 worker의 source/종료/TEMP/HKCU와 종료된 개발 검사25영수증의 잔여 TEMP3 정리를 대조했다. 실제 주문 경계의 파일은17f4ef0 이후 변경0이며 그358/PG27을 해당 소스의 근거로만 보존한다. 이번64를 전체 현재 native/PG 회귀로 확대하지 않는다. 새 계층·DB/SQL·worker·라이브러리·성능 향상 주장은 없다. [현재 근거/정리/재사용 범위](../../tmp/s12-05-leader-staged/research-component-evidence.json) · [증분](../../tmp/s12-05-leader-staged/research-review-execution-final.json).
+
+대표1 전체는 다른 계획 수량의 격리 대조가 남아 진행이다. 다음은 대표1과 원래2/6/10의 연결 선행인 같은 계좌의 다른 계획·재진입/병행·명세 교체 관리다. 대표8·11과 DD/MICRO·독립 계좌/원주문 조건도 유지한다. 전체4/5·대표5/11과 실제 주문·운영 NAS 변경/배포·자료 이전·실제 권한 인계·T0·push 제외는 그대로다.
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

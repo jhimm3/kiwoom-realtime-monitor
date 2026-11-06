@@ -469,7 +469,9 @@ def execute_research(
             report = build_research_report(
                 run_id,
                 input_manifest=dataset.manifest,
-                observations=leader_rows if leader else dataset.observations,
+                # Quality/reproducibility belongs to the frozen source manifest.
+                # Leader closes are a judgment projection, not its source rows.
+                observations=dataset.observations,
                 candidate_events=candidate_events,
                 decisions=decision_rows,
                 execution_events=execution_events,
