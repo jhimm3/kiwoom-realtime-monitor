@@ -451,7 +451,8 @@
       "owner_prefix": "ForwardEvaluationRepository",
       "receiver": "self._store",
       "backend_scope": "injected QueryStore protocol",
-      "reason": "Research and mock-automation projections delegate to the injected store."
+      "reason": "Research and mock-automation projections delegate to the injected store. S12-05 account-selection preparation adds one current verified-binding lookup at publication and one existing bounded document-list read. Exact immutable member reads and native immutable insert reuse the same helpers; publication is passive and never grants account/order authority.",
+      "evidence": "tests/unit/test_mock_automation_account_selection.py; tests/integration/test_mock_automation_account_selection_postgres.py"
     },
     {
       "id": "diagnostic-replay-store",

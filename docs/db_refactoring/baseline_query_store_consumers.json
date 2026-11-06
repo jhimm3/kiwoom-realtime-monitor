@@ -5204,6 +5204,28 @@
       "",
       "",
       "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/infrastructure/persistence/forward_evaluation_repository.py",
+      "ForwardEvaluationRepository.load_mock_automation_account_selections",
+      "self._store",
+      "load_documents",
+      "direct_call",
+      "self._store.load_documents",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/infrastructure/persistence/forward_evaluation_repository.py",
+      "ForwardEvaluationRepository.publish_mock_automation_account_selection",
+      "self._store",
+      "load_latest_account_binding",
+      "direct_call",
+      "self._store.load_latest_account_binding",
+      "",
+      "",
+      "reviewed_store_binding"
     ]
   ],
   "forwarding_identities": [
@@ -6956,6 +6978,41 @@
         "tmp/s12-05-leader-staged-consumers.json",
         "tests/unit/test_leader_staged_execution.py",
         "tests/integration/test_leader_staged_execution_postgres.py"
+      ]
+    },
+    {
+      "id": "S12-05-passive-account-selection-store-20261106",
+      "added": [
+        [
+          "src/kiwoom_monitor/infrastructure/persistence/forward_evaluation_repository.py",
+          "ForwardEvaluationRepository.load_mock_automation_account_selections",
+          "self._store",
+          "load_documents",
+          "direct_call",
+          "self._store.load_documents",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/infrastructure/persistence/forward_evaluation_repository.py",
+          "ForwardEvaluationRepository.publish_mock_automation_account_selection",
+          "self._store",
+          "load_latest_account_binding",
+          "direct_call",
+          "self._store.load_latest_account_binding",
+          "",
+          "",
+          "reviewed_store_binding"
+        ]
+      ],
+      "removed": [],
+      "forwarding_added": [],
+      "reason": "Append only the current-binding read and bounded passive selection list on the same injected native store. Existing immutable document writer/direct keyed reader are reused. No QueryStore method/contract/authority/worker/0B I/O or baseline reset.",
+      "evidence": [
+        "tmp/s12-05-leader-staged/account-selection-consumers-before.json",
+        "tests/unit/test_mock_automation_account_selection.py",
+        "tests/integration/test_mock_automation_account_selection_postgres.py"
       ]
     }
   ]

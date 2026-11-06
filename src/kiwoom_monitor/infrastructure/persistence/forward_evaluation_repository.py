@@ -66,6 +66,8 @@ from kiwoom_monitor.domain.execution_activation import (
     ForwardEvaluationSpec,
     ForwardReportStatus,
     MockAutomationOperatingSpec,
+    MockAutomationAccountSelection,
+    mock_automation_account_selection_from_dict,
     StrategyLifecycleStage,
     StrategyStageRevision,
     forward_spec_from_dict,
@@ -120,6 +122,7 @@ class ForwardEvaluationRepository:
     FEEDBACK_REVALIDATION_REQUEST_COLLECTION = "execution_feedback_revalidation_requests"
     FEEDBACK_REVALIDATION_COLLECTION = "execution_feedback_revalidation_receipts"
     MOCK_AUTOMATION_SPEC_COLLECTION = "execution_mock_automation_specs"
+    MOCK_AUTOMATION_ACCOUNT_SELECTION_COLLECTION = 'execution_mock_automation_account_selections'
     MOCK_AUTOMATION_ADMISSION_COLLECTION = "execution_mock_automation_admissions"
     MOCK_AUTOMATION_ADMISSION_BY_SPEC_COLLECTION = "execution_mock_automation_admission_by_spec"
     MOCK_AUTOMATION_LEASE_COLLECTION = "execution_mock_automation_lease_receipts"
@@ -253,6 +256,38 @@ class ForwardEvaluationRepository:
             or str(latest.get("verification_method", "")) != "ka00001"
         ):
             raise ValueError("mock automation spec requires the current verified mock binding")
+
+    def publish_mock_automation_account_selection(self, value: MockAutomationAccountSelection, *,
+                                                expected_implementation_hash) -> bool:
+        from kiwoom_monitor.application.mock_automation_specification import validate_mock_automation_account_selection
+        value = mock_automation_account_selection_from_dict(value.to_dict())
+        binding = self._store.load_latest_account_binding(value.credential_profile_id,
+            value.account_scope.broker, value.account_scope.environment.value)
+        validate_mock_automation_account_selection(self, value, current_binding=binding,
+            expected_implementation_hash=expected_implementation_hash)
+        return self._save_immutable(self.MOCK_AUTOMATION_ACCOUNT_SELECTION_COLLECTION,
+            value.account_scope.account_ref, value.selection_id, value.to_dict())
+
+    def load_mock_automation_account_selection(self, account_ref: str, selection_id: str):
+        document = self._find(self.MOCK_AUTOMATION_ACCOUNT_SELECTION_COLLECTION, account_ref, selection_id)
+        value = mock_automation_account_selection_from_dict(document) if document is not None else None
+        if value is not None and value.selection_id != selection_id:
+            raise ValueError('account selection stored identity conflict')
+        if value is not None and value.account_scope.account_ref != account_ref:
+            raise ValueError('account selection stored scope conflict')
+        return value
+
+    def load_mock_automation_account_selections(self, account_ref: str):
+        rows = self._store.load_documents(self.MOCK_AUTOMATION_ACCOUNT_SELECTION_COLLECTION, account_ref, 10_000)
+        values = []
+        for row in rows:
+            value = mock_automation_account_selection_from_dict(_document(row))
+            if row.get('key') != value.selection_id:
+                raise ValueError('account selection stored identity conflict')
+            values.append(value)
+        if any(value.account_scope.account_ref != account_ref for value in values):
+            raise ValueError('account selection stored scope conflict')
+        return tuple(sorted(values, key=lambda value: (value.frozen_at, value.selection_id)))
 
     def load_mock_automation_specs(
         self, account_ref: str,

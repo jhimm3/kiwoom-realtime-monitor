@@ -460,6 +460,112 @@ class MockAutomationOperatingSpec:
 
 
 @dataclass(frozen=True)
+class MockAutomationAccountLimits:
+    """Explicit shared-account bounds; no trading values are inferred."""
+    maximum_concurrent_strategies: int
+    maximum_concurrent_positions: int
+    maximum_capital_won: int
+    maximum_daily_loss_won: int
+    maximum_data_gap_seconds: int
+    maximum_submission_unknown_count: int
+    maximum_reconnect_count: int
+    maximum_balance_mismatch_count: int
+    version: str = 'mock_automation_account_limits/v1'
+
+    def __post_init__(self):
+        if self.version != 'mock_automation_account_limits/v1':
+            raise ValueError('unsupported mock account limits version')
+        positive = {'maximum_concurrent_strategies', 'maximum_concurrent_positions',
+                    'maximum_capital_won', 'maximum_daily_loss_won'}
+        for name, value in self.to_dict().items():
+            if name != 'version' and (type(value) is not int or value < (1 if name in positive else 0)):
+                raise ValueError('explicit integer account limit required: ' + name)
+
+    def to_dict(self):
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class MockAutomationAccountSelection:
+    """Frozen composition for one account, separate from execution authority.
+
+    Members retain their original candidate/strategy policies. Shared bounds
+    and ordered selection are explicit; publishing this does not admit a run.
+    The first member is the declared execution anchor, not a ranking default.
+    """
+    account_scope: AccountScope
+    credential_profile_id: str
+    binding_revision: int
+    binding_verified_at: datetime
+    frozen_at: datetime
+    member_spec_ids: tuple[str, ...]
+    limits: MockAutomationAccountLimits
+    version: str = 'mock_automation_account_selection/v1'
+
+    def __post_init__(self):
+        if self.version != 'mock_automation_account_selection/v1':
+            raise ValueError('unsupported mock account selection version')
+        if not isinstance(self.account_scope, AccountScope) or self.account_scope.environment is not AccountEnvironment.MOCK:
+            raise ValueError('account selection requires a verified mock scope')
+        if type(self.credential_profile_id) is not str or not self.credential_profile_id.strip():
+            raise ValueError('account selection requires its credential profile')
+        if type(self.binding_revision) is not int or self.binding_revision <= 0:
+            raise ValueError('account selection requires a positive binding revision')
+        if not isinstance(self.binding_verified_at, datetime) or not isinstance(self.frozen_at, datetime):
+            raise ValueError('account selection requires explicit aware times')
+        _require_aware(self.binding_verified_at, 'binding_verified_at')
+        _require_aware(self.frozen_at, 'frozen_at')
+        if self.frozen_at < self.binding_verified_at:
+            raise ValueError('account selection predates verified binding')
+        if type(self.member_spec_ids) is not tuple or not self.member_spec_ids:
+            raise ValueError('account selection requires explicit ordered members')
+        for identity in self.member_spec_ids:
+            prefix = 'mock_automation_spec_'
+            if type(identity) is not str or not identity.startswith(prefix):
+                raise ValueError('account selection requires a frozen operating spec ID')
+            _require_sha256(identity[len(prefix):], 'member_spec_id')
+        if len(set(self.member_spec_ids)) != len(self.member_spec_ids):
+            raise ValueError('account selection contains duplicate members')
+        if not isinstance(self.limits, MockAutomationAccountLimits):
+            raise ValueError('account selection requires explicit typed account limits')
+
+    @property
+    def primary_spec_id(self):
+        return self.member_spec_ids[0]
+
+    @property
+    def selection_id(self):
+        return _content_id('mock_automation_account_selection', self._identity_document())
+
+    def _identity_document(self):
+        return dict(version=self.version, account_scope=self.account_scope.to_dict(),
+            credential_profile_id=self.credential_profile_id, binding_revision=self.binding_revision,
+            binding_verified_at=self.binding_verified_at.isoformat(), frozen_at=self.frozen_at.isoformat(),
+            member_spec_ids=list(self.member_spec_ids), limits=self.limits.to_dict())
+
+    def to_dict(self):
+        return dict(selection_id=self.selection_id, **self._identity_document())
+
+
+def mock_automation_account_selection_from_dict(value):
+    raw = dict(value)
+    identity = raw.pop('selection_id')
+    scope = dict(raw['account_scope'])
+    scope['environment'] = AccountEnvironment(scope['environment'])
+    raw.update(account_scope=AccountScope(**scope),
+        binding_verified_at=datetime.fromisoformat(raw['binding_verified_at']),
+        frozen_at=datetime.fromisoformat(raw['frozen_at']),
+        limits=MockAutomationAccountLimits(**raw['limits']))
+    if type(raw['member_spec_ids']) is not list:
+        raise ValueError('account selection members must be a JSON array')
+    raw['member_spec_ids'] = tuple(raw['member_spec_ids'])
+    result = MockAutomationAccountSelection(**raw)
+    if identity != result.selection_id or result.to_dict() != dict(value):
+        raise ValueError('mock account selection canonical content conflict')
+    return result
+
+
+@dataclass(frozen=True)
 class MockAutomationReadiness:
     spec_id: str
     status: MockAutomationReadinessStatus

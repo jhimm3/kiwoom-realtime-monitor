@@ -4,7 +4,7 @@
 
 전체 단계와 완료 기준은 이 문서 한 곳에서 관리한다. **S12-01 → S12-02 → S12-03 → S12-04 → S12-05** 순서로 통합한다. 각 단계는 실행할 코드, 직접 관련 검사, 검증 기록과 로컬 커밋을 남긴다. [정본 12절](app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [기능별 계약](r3-ownership.md) · [남은 작업](../OPEN_ITEMS.md) · [저장소 전체 로드맵](../../FUTURE_DEVELOPMENT_ROADMAP.md).
 
-**현재 상태.** S12-01~04 수락 · 전체4/5 · S12-05 대표3·4·5·7·9의5/11 개발 수락이다. 대표1의 실제 동결 연구·최종평가→후보/현재 Shadow→READY 화면·인증 API를 현재 소스64건으로 검증하고 가공 분봉을 원본 manifest와 비교하던 결함을 수정했다. 추가/부분 청산의 실제 귀속·현재 조건/정정·복구·전체 보호·수동 격리는17f4ef0의 Windows358/실제PG27 근거를 변경 없는 주문 경계로 보존한다. 대표1의 다른 계획 수량 대조, 대표2 재진입·대표6 병행/계좌·대표10 새 spec 교체, 대표8·11 및 DD/MICRO·독립 계좌/원주문 검증과 운영 제외는 유지한다. [실제 연구 체인](#section12-staged-final-source-chain) · [추가·부분 청산](#section12-leader-staged-actions) · [대표 잔여](#s12-acceptance-remaining).
+**현재 상태.** S12-01~04 수락·전체4/5, S12-05 대표3·4·5·7·9의5/11 개발 수락이다. 같은 검증 계좌의 READY 명세 두 개와 명시 공통 한도를 동결·저장·인증 조회하는 선행 연결을 Windows81/실제PG3으로 검증했다. 저장으로 주문 권한을 만들지 않으며 실제 병행 기동·계획별 Risk/공통 자금 적용·Runner/Shadow·UI 선택은 아직 미완료다. 대표1 다른 계획 수량 대조, 대표2 재진입·대표6 병행/계좌·대표10 새 spec 교체, 대표8·11 및 DD/MICRO·독립 계좌/원주문 검증을 계속한다. 다음은 실제 승인·체결된 다른 계획의 물량 격리다. [계좌 구성 선행](#section12-explicit-account-composition) · [실제 연구 체인](#section12-staged-final-source-chain) · [대표 잔여](#s12-acceptance-remaining).
 
 ## 1. 착수 기준과 선행 작업
 
@@ -765,3 +765,14 @@ source `1f3cda2408c5b45f0cd6923d827f5ee5165333e5c5f4876e3c0aaf7d0a1e5517`에서 
 현재 소스 d8415dd5의 관련64건·증분 실행 대조·구조/호출 경계가 통과했다. 새2정의·총7362/원장303/원래 미결49를 보존하고7 worker의 종료·TEMP/HKCU와 종료된 개발 검사25영수증의 잔여 TEMP3 정리를 확인했다.17f4ef0의 native358/PG27은 변경 없는 주문 경계의 해당 소스 근거로 재사용하며 이번64를 전체 현재 native/PG 검사로 보고하지 않는다. 새 라이브러리·계층·SQL·worker나 측정하지 않은 속도 향상은 없다. 합성 소프트웨어 연결 증거이며 과거 실증/운영 수락과 분리한다. [정본11.287](app-target-20261023.md#section12-staged-final-source-chain) · [직접 원인](../../tmp/s12-05-leader-staged/research-root-cause.json) · [현재 실행/정리/재사용](../../tmp/s12-05-leader-staged/research-component-evidence.json) · [증분](../../tmp/s12-05-leader-staged/research-review-execution-final.json).
 
 대표1 전체는 다른 계획 수량의 격리 대조가 남아 진행이다. 다음은 대표1과 원래2/6/10의 선행인 같은 계좌의 다른 계획·재진입/병행·명세 교체 관리다. 대표8·11, DD/MICRO와 독립 계좌/원주문 조건도 유지한다. 전체4/5·대표5/11과 실제 주문·운영 NAS 변경/배포·자료 이전·실제 권한 인계·T0·push 제외는 그대로다.
+
+
+<a id="section12-explicit-account-composition"></a>
+
+### S12-05 대표1/2/6/10 선행 · 명시 계좌 구성의 준비 저장/조회 — 2026-11-06
+
+같은 검증 모의계좌/credential/binding에 이미 READY인 명세들의 순서 있는 ID와 명시 공통 한도를 별도 불변 구성으로 동결한다. 순서는 실행 우선순위가 아닌 명시 anchor를 보존한다. 기존 v1 명세/제어/입장·wire와 단일 동시성 제한은 바꾸지 않았다. 게시 시 원래 READY/적격성/최종 결과/현재 구현 hash·계좌 판본을 대조하고 모두 유효할 때 기존 native immutable writer로 저장한다. 같은 profile의 구현 hash만 요청 안에서 공유한다. 실제 COMMIT 뒤 응답 유실·재요청에도 문서 한 개이며 현재 source를 재확인한다. 인증 API 저장/조회는 orders_started=false이고 control/Runtime/lease/주문을 생성하지 않는다. 조회는 실행 코드 없이 동결 자료를 읽고 잘못된 행 key/계좌·변조된 body는 원본을 덮어쓰지 않고 거절한다.
+
+현재 소스3f44ef7a에서 관련 Windows81(8모듈)/실제PG3·구조/소비자/증분 실행 대조를 통과했다. 새11정의/총7373·원장304·원래 미결49를 보존했다.8 worker 종료/TEMP/HKCU와 PG DB·포트·비밀/Job active0 정리를 확인했다. 최초 개발 호출의 datetime/문자열 혼동은 호출만 수정했고 실패·로그를 보존했다. 종료된 개발3영수증의 잔여TEMP1도 소유 범위로 정리했다. 새 라이브러리·schema·worker/권한 owner와 측정된 속도 향상은 없다. [현재 소스/실행/정리](../../tmp/s12-05-account-selection/component-evidence.json) · [증분 대조](../../tmp/s12-05-account-selection/review-execution-final.json).
+
+이는 준비 문서의 저장/조회만 검증한 선행이다. 실제 병행 활성화·멤버 입장/제어·계획별 Risk·공통 자금/예약·Runner/Shadow·UI 선택과 명세 교체는 계속 구현해야 하며 대표1/6/10 수락으로 합산하지 않는다. 전체4/5·대표5/11과 원래 잔여/운영 제외는 유지한다. 다음은 실제 승인·체결된 다른 계획 물량을 침범하지 않는지 대조한다. 현재 조건 재판단·접수 미체결 정정 우선·UNKNOWN 중복 제출 금지는 공통 계약으로 유지한다.

@@ -12,6 +12,7 @@ from kiwoom_monitor.application.mock_automation_candidate import (
     candidate_package_from_dict,
     eligibility_policy_from_dict,
     eligibility_receipt_from_dict,
+    evaluate_candidate_eligibility,
 )
 from kiwoom_monitor.application.research_families import (
     get_research_family,
@@ -254,6 +255,68 @@ def _mapping(value: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     if not isinstance(result, Mapping):
         raise ValueError(f"{name} is missing")
     return result
+
+
+def validate_mock_automation_account_selection(repository, selection, *, current_binding,
+                                               expected_implementation_hash):
+    """Bind a passive account composition to existing complete frozen members.
+
+    This is publication, not admission. Activation must obtain fresh account,
+    binding, Risk/control and lease evidence through the existing order owner.
+    """
+    from kiwoom_monitor.domain.execution_activation import mock_automation_account_selection_from_dict
+    value = mock_automation_account_selection_from_dict(selection.to_dict())
+    binding = current_binding or {}
+    if (binding.get('credential_profile_id') != value.credential_profile_id
+            or binding.get('account_ref') != value.account_scope.account_ref
+            or binding.get('binding_revision') != value.binding_revision
+            or binding.get('broker') != value.account_scope.broker
+            or binding.get('environment') != value.account_scope.environment.value
+            or binding.get('verification_method') != 'ka00001'
+            or not same_aware_instant(str(binding.get('verified_at', '')), value.binding_verified_at)):
+        raise ValueError('account selection requires the current verified mock binding')
+    implementations, members = {}, []
+    for spec_id in value.member_spec_ids:
+        member = repository.load_mock_automation_spec(value.account_scope.account_ref, spec_id,
+                                                       require_canonical_document=True)
+        if member is None:
+            raise ValueError('account selection member is missing: ' + spec_id)
+        if member.spec_id != spec_id:
+            raise ValueError('account selection member identity conflict')
+        if (member.account_scope != value.account_scope or member.credential_profile_id != value.credential_profile_id
+                or member.binding_revision != value.binding_revision
+                or not same_aware_instant(member.binding_verified_at.isoformat(), value.binding_verified_at)
+                or member.frozen_at > value.frozen_at):
+            raise ValueError('account selection member scope or freeze conflict')
+        profile = repository.load_profile(member.strategy_ref, member.forward_profile_id)
+        if profile is None:
+            raise ValueError('account selection member forward profile is missing')
+        ready = assess_mock_automation_readiness(member, profile,
+            strategy_stage=repository.latest_stage(member.strategy_ref))
+        if ready.status is not MockAutomationReadinessStatus.READY:
+            raise ValueError('account selection member is not READY: ' + ','.join(ready.reasons))
+        package = repository.load_mock_automation_candidate_package(member.strategy_ref, member.candidate_package_hash)
+        policy = repository.load_mock_automation_eligibility_policy(member.strategy_ref, member.candidate_package_hash)
+        receipt = repository.load_mock_automation_eligibility_receipt(value.account_scope.account_ref, member.candidate_package_hash)
+        if (package is None or policy is None or receipt is None or policy.tbd_fields
+                or receipt.status is not CandidateEligibilityStatus.ELIGIBLE
+                or receipt.to_dict() != evaluate_candidate_eligibility(package, policy,
+                    account_ref=value.account_scope.account_ref).to_dict()):
+            raise ValueError('account selection member lacks complete ELIGIBLE evidence')
+        family_id, factor_ids = _candidate_family_contract(package)
+        if (package.strategy_ref != member.strategy_ref or policy.strategy_ref != member.strategy_ref
+                or (package.source_final_batch_id, package.source_final_run_id, package.source_final_result_hash)
+                    != (member.final_batch_id, member.final_run_id, member.final_result_hash)
+                or (profile.family_version, profile.factor_versions, profile.policy_version)
+                    != (family_id, factor_ids, policy.policy_id)
+                or package.candidate_spec['session_profile']['profile'] != member.session_profile):
+            raise ValueError('account selection member candidate lineage conflict')
+        if member.session_profile not in implementations:
+            implementations[member.session_profile] = expected_implementation_hash(member.session_profile)
+        if not implementations[member.session_profile] or implementations[member.session_profile] != package.scientific_implementation_hash:
+            raise ValueError('account selection member selected implementation changed')
+        members.append(member)
+    return tuple(members)
 
 
 class MockAutomationSpecificationRepository(Protocol):

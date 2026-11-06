@@ -41,6 +41,14 @@ class MockAutomationSpecPublicationRequest(BaseModel):
     stage_revisions: list[dict[str, Any]] = Field(min_length=3, max_length=3)
     operating_spec: dict[str, Any]
 
+
+class MockAutomationAccountSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    account_ref: str = Field(min_length=36, max_length=36)
+    credential_profile_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,96}$')
+    expected_binding_revision: int = Field(strict=True, ge=1)
+    selection: dict[str, Any]
+
 def create_mock_publication_router(
     store: MockPublicationEvidenceStore, repository: ForwardEvaluationRepository,
     authorize: Callable[..., None],
@@ -239,5 +247,44 @@ def create_mock_publication_router(
                 "reasons": list(readiness.reasons) if readiness is not None else ["FORWARD_PROFILE_MISSING"],
             })
         return {"account_ref": account_ref, "specs": values}
+
+    @router.post('/api/v1/research/mock-automation-account-selections', dependencies=[Depends(authorize)])
+    async def publish_mock_account_selection(request: MockAutomationAccountSelectionRequest):
+        from kiwoom_monitor.domain.execution_activation import mock_automation_account_selection_from_dict
+        try:
+            if len(json.dumps(request.model_dump(), ensure_ascii=False).encode('utf-8')) > 256 * 1024:
+                raise ValueError('mock account selection publication is too large')
+            selection = mock_automation_account_selection_from_dict(request.selection)
+            if (request.account_ref != selection.account_scope.account_ref
+                    or request.credential_profile_id != selection.credential_profile_id
+                    or request.expected_binding_revision != selection.binding_revision):
+                raise ValueError('mock account selection request scope conflict')
+            changed = await await_native_call(repository.publish_mock_automation_account_selection,
+                selection, expected_implementation_hash=expected_implementation_hash)
+        except (KeyError, TypeError, ValueError) as error:
+            detail = str(error)
+            status = 409 if any(token in detail for token in (
+                'conflict', 'current verified', 'selected implementation', 'not READY')) else 400
+            raise HTTPException(status_code=status, detail=detail) from None
+        return {'status': 'saved' if changed else 'unchanged', 'selection_id': selection.selection_id,
+                'orders_started': False}
+
+    @router.get('/api/v1/research/mock-automation-account-selections/{account_ref}', dependencies=[Depends(authorize)])
+    async def list_mock_account_selections(account_ref: str,
+            credential_profile_id: str = Query(min_length=1, max_length=96, pattern=r'^[A-Za-z0-9_-]+$')):
+        binding = await asyncio.to_thread(current_mock_binding, credential_profile_id)
+        if binding is None or binding.get('account_ref') != account_ref:
+            raise HTTPException(status_code=409, detail='current verified mock binding mismatch')
+        try:
+            values = await asyncio.to_thread(repository.load_mock_automation_account_selections, account_ref)
+        except (KeyError, TypeError, ValueError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+        return {'account_ref': account_ref, 'binding': {
+                    'credential_profile_id': credential_profile_id, 'account_ref': account_ref,
+                    'broker': 'kiwoom', 'environment': 'mock',
+                    'binding_revision': int(binding['binding_revision']),
+                    'verified_at': str(binding['verified_at']),
+                    'verification_method': str(binding['verification_method'])},
+                'selections': [value.to_dict() for value in values]}
 
     return router
