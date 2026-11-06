@@ -340,6 +340,9 @@ class PaperExecutionEngine:
         self.strategy = strategy
         from .leader_breakout import LeaderBreakoutConfig
         self._leader = isinstance(strategy, LeaderBreakoutConfig)
+        from kiwoom_monitor.domain.strategy_contract import LeaderBreakoutStagedExecutionContract
+        self._staged_leader = self._leader and isinstance(strategy.execution_contract, LeaderBreakoutStagedExecutionContract)
+        self._leader_entry_notional = 0
         self._completed_close = execution.version == COMPLETED_CLOSE_EXECUTION_VERSION
         if self._completed_close and session_profile != KRX_REGULAR_RESEARCH_PROFILE:
             raise ValueError("completed-close execution requires an explicit KRX regular profile")
@@ -433,11 +436,21 @@ class PaperExecutionEngine:
         self, decision: StrategyDecision, resulting_state: StrategyState,
         *, source_bar: KrxMinuteBarFrame | None = None, minimum_fill_exclusive: int | None = None,
     ) -> tuple[ExecutionEvent, ...]:
+        previous_state = self.strategy_state
         self.strategy_state = resulting_state
         action = decision.final_action
-        if action not in {"ENTER", "EXIT"} and not (self._completed_close and action in {"ADD", "REDUCE"}):
+        if action not in {"ENTER", "EXIT"} and not ((self._completed_close or self._staged_leader) and action in {"ADD", "REDUCE"}):
             return ()
         side = "BUY" if action in {"ENTER", "ADD"} else "SELL"
+        if self._staged_leader and action in {'ADD', 'REDUCE'}:
+            position = self.portfolio.position
+            reason = ('pending_order' if self.portfolio.pending_order is not None else
+                      'position_missing' if position is None else
+                      'position_symbol_mismatch' if position.symbol != decision.symbol else
+                      'position_quantity_mismatch' if action == 'REDUCE' and not 0 < decision.quantity < position.quantity else '')
+            if reason:
+                self.strategy_state = previous_state
+                return (self._notice(decision, side, 'ORDER_REJECTED', reason),)
         if minimum_fill_exclusive is not None and (not self._completed_close or action != "ENTER"
                                                   or type(minimum_fill_exclusive) is not int or minimum_fill_exclusive <= 0):
             raise ValueError("only a completed-close entry can pin a positive failure price")
@@ -478,19 +491,23 @@ class PaperExecutionEngine:
                 self.strategy_state = StrategyState(emitted_candidate_keys=resulting_state.emitted_candidate_keys)
                 return (self._notice(decision, side, "ORDER_REJECTED", reason),)
         quantity = (
-            decision.quantity if side == "BUY" or self._completed_close else position.quantity
+            decision.quantity if side == "BUY" or self._completed_close or self._staged_leader else position.quantity
         )
         if quantity <= 0:
             return (self._notice(decision, side, "ORDER_REJECTED", "invalid_quantity"),)
         reserved = self._estimated_buy_cash(decision.signal_reference_price, quantity) if side == "BUY" else 0
         available_cash = self.portfolio.cash_won - self.portfolio.reserved_cash_won
         cash_buffer = 0
+        if (self._staged_leader and side == 'BUY'
+                and self._leader_entry_notional + quantity * decision.signal_reference_price > self.strategy.capital_won):
+            self.strategy_state = previous_state
+            return (self._notice(decision, side, 'ORDER_REJECTED', 'explicit_plan_entry_budget'),)
         if self._completed_close and side == "BUY":
             spent = position.entry_notional + position.entry_commission if position is not None else 0
             available_cash = min(available_cash, self.strategy.capital_won - spent)
             cash_buffer = self.portfolio.cash_won - available_cash
         if side == "BUY" and reserved > available_cash:
-            self.strategy_state = StrategyState(
+            self.strategy_state = previous_state if self._staged_leader else StrategyState(
                 emitted_candidate_keys=resulting_state.emitted_candidate_keys,
             )
             return (self._notice(decision, side, "ORDER_REJECTED", "cash_reservation_exceeded"),)
@@ -1042,7 +1059,8 @@ class PaperExecutionEngine:
         tax = _fee_won(notional, cost.sell_tax_bps) if pending.side == "SELL" else 0
         if pending.side == "BUY":
             required = notional + commission
-            if required > self.portfolio.cash_won - pending.cash_buffer_won:
+            if (required > self.portfolio.cash_won - pending.cash_buffer_won
+                    or self._staged_leader and self._leader_entry_notional + notional > self.strategy.capital_won):
                 self.portfolio = SimulationPortfolio(
                     cash_won=self.portfolio.cash_won, reserved_cash_won=0,
                     position=self.portfolio.position, pending_order=None,
@@ -1068,6 +1086,8 @@ class PaperExecutionEngine:
                 opened_at=bar.bar_start, entry_intent_id=pending.intent_id,
             )
             previous = self.portfolio.position
+            if self._staged_leader:
+                self._leader_entry_notional += notional
             if previous is not None:
                 quantity = previous.quantity + pending.quantity
                 notional_basis = previous.entry_notional + notional

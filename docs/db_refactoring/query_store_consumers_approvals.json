@@ -418,7 +418,8 @@
       "owner_prefix": "MockAutomationEpisode",
       "receiver": "self._store",
       "backend_scope": "same Supervisor-injected QueryStore; Episode owns business state, native store remains owner",
-      "reason": "Relocate the six originally reviewed Runner self._store sites: prepare runner+clock reads2, leader result writes2, session-clock write1, observation revisions read1. Same native capabilities/multiplicity/dispatch. Repository lookalikes remain unresolved; no new DB/lease/transaction authority."
+      "reason": "Relocate the six originally reviewed Runner self._store sites: prepare runner+clock reads2, leader result writes2, session-clock write1, observation revisions read1. Same native capabilities/multiplicity/dispatch. Repository lookalikes remain unresolved; no new DB/lease/transaction authority. S12-05 staged leader adds one existing load_document site for native single-use step markers, scoped to the same account/plan and refreshed only after material head changes. Its original checkpoint remains advisory; the same store/native transaction owns accepted actions. No new public method/connection/task/authority.",
+      "evidence": "tests/unit/test_leader_staged_execution.py; tests/integration/test_leader_staged_execution_postgres.py"
     },
     {
       "id": "central-mock-input-progress-bootstrap-store",

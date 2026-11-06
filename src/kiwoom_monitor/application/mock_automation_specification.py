@@ -25,7 +25,7 @@ from kiwoom_monitor.domain.execution_activation import (
     MOCK_RECOVERY_POLICY,
     MOCK_STOP_POLICY,
     MockAutomationOperatingSpec,
-    CLOSE_NATIVE_PLAN_MODE,
+    CLOSE_NATIVE_PLAN_MODE, LEADER_NATIVE_PLAN_MODE,
     CloseMockExecutionPolicy,
     PANIC_NATIVE_PLAN_MODE, PanicMockExecutionPolicy,
     MockUnfilledExecutionPolicy,
@@ -114,6 +114,15 @@ def matching_shadow_events(
     ))
 
 
+def _require_staged_leader_order_policy(package, mode, policy):
+    parameters = package.candidate_spec.get('parameters') or {}
+    contract = parameters.get('execution_contract') or {}
+    if (package.candidate_spec.get('family') == 'leader_breakout/v1'
+            and contract.get('version') == 'leader_breakout_execution/v2'
+            and (mode != LEADER_NATIVE_PLAN_MODE or policy is None or policy.accepted_order_management is None)):
+        raise ValueError('분할 돌파는 명시 계획과 현재 조건 재판단·정정 정책 v2가 필요합니다')
+
+
 def build_mock_automation_publication_documents(
     *, candidate_publication: Mapping[str, Any], binding: Mapping[str, Any],
     credential_profile_id: str, shadow_event: Mapping[str, Any],
@@ -126,6 +135,7 @@ def build_mock_automation_publication_documents(
 ) -> dict[str, Any]:
     """Build the explicit PC-owned READY publication; this performs no I/O."""
     package = candidate_package_from_dict(_mapping(candidate_publication, "package"))
+    _require_staged_leader_order_policy(package, execution_plan_mode, unfilled_execution_policy)
     if package.candidate_spec.get('family') == 'panic_rebound/v1' and (
         execution_plan_mode != PANIC_NATIVE_PLAN_MODE or not isinstance(panic_execution_policy, PanicMockExecutionPolicy)
         or not isinstance(shadow_event.get('panic_entry_parameters'), Mapping)
@@ -275,6 +285,7 @@ def publish_ready_mock_automation_spec(
     )
     if package is None:
         raise ValueError("mock automation candidate package is not stored")
+    _require_staged_leader_order_policy(package, spec.execution_plan_mode, spec.unfilled_execution_policy)
     if package.candidate_spec.get('family') == 'panic_rebound/v1' and (
         spec.execution_plan_mode != PANIC_NATIVE_PLAN_MODE or not isinstance(spec.panic_execution_policy, PanicMockExecutionPolicy)
         or not isinstance(shadow_event.get('panic_entry_parameters'), Mapping)

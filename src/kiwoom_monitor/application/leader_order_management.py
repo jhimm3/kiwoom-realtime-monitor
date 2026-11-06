@@ -6,9 +6,27 @@ from .minute_order_management import MinuteOrderManagementClaim, assess_current_
 from kiwoom_monitor.domain.strategy_contract import _time
 
 
+def leader_position_order_confirmation_time(record, events):
+    """Material terminal receipt for a staged order, independent of repeated reads."""
+    from .mock_automation_risk import planned_leader_root_confirmation_time
+    from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
+    if record.detailed_filled_quantity:
+        return planned_leader_root_confirmation_time(record, events)
+    if (record.state not in TERMINAL_ORDER_STATES or record.filled_quantity
+            or record.broker_reported_filled_quantity):
+        raise ValueError('leader_position_order_terminal_unconfirmed')
+    material = max((index for index, row in enumerate(events) if row['event_type'] in {
+        'SUBMISSION_STARTED', 'CANCEL_STARTED', 'AMENDMENT_STARTED'}), default=-1)
+    receipt = next((row for row in events[material+1:] if row['state'] == record.state.value
+                    and row['event_type'] in {'BROKER_RECONCILED', 'SUBMISSION_REJECTED', 'RELEASED', 'EXPIRED'}), None)
+    if receipt is None:
+        raise ValueError('leader_position_order_terminal_receipt_missing')
+    return max(_time(receipt['received_at']), _time(receipt.get('broker_as_of') or receipt['received_at']))
+
+
 def assess_leader_order_management(spec, *, run_id, config, position_proof, record, head,
         order_events, recovery, risk, quote, decided_at, now, entry_enabled,
-        decision_source, protection_notice=None, stop_risk=None):
+        decision_source, protection_notice=None, stop_risk=None, plan_entry_notional_won=None):
     """Reassess an existing physical remainder; never create an additional tranche."""
     from .mock_automation_execution import mock_automation_intent_id
     from .mock_automation_session_clock import content_id
@@ -48,12 +66,15 @@ def assess_leader_order_management(spec, *, run_id, config, position_proof, reco
             raise ValueError('LEADER_CURRENT_ORDER_DECISION_CHANGED')
     else:
         raise ValueError('LEADER_CURRENT_ORDER_POLICY_CHANGED')
+    staged = hasattr(config.execution_contract, 'position_steps')
+    if staged and record.intent.side is OrderSide.BUY and (type(plan_entry_notional_won) is not int or plan_entry_notional_won < 0):
+        raise ValueError('LEADER_CURRENT_ORDER_PLAN_ENTRY_NOTIONAL_REQUIRED')
     if ((record.intent.intent_id, record.intent.decision_id, record.intent.quantity, record.intent.limit_price)
             != (mock_automation_intent_id(spec.spec_id, original['decision_id']), original['decision_id'],
                 original['quantity'], original['signal_reference_price'])
-            or record.intent.side.value != {'ENTER': 'BUY', 'EXIT': 'SELL'}.get(original['final_action'])):
+            or record.intent.side.value != {'ENTER': 'BUY', 'ADD': 'BUY', 'REDUCE': 'SELL', 'EXIT': 'SELL'}.get(original['final_action'])):
         raise ValueError('LEADER_CURRENT_ORDER_ORIGINAL_DECISION_CHANGED')
-    if record.intent.side is OrderSide.BUY and (
+    if record.intent.side is OrderSide.BUY and not (staged and original['final_action'] == 'ADD') and (
             record.intent.intent_id != position_proof['entry_intent_id'] or head.quantity != record.detailed_filled_quantity):
         raise ValueError('LEADER_CURRENT_BUY_PLAN_QUANTITY_CHANGED')
 
@@ -84,7 +105,11 @@ def assess_leader_order_management(spec, *, run_id, config, position_proof, reco
         return normalized
 
     def invalid_price(price):
-        if price * 10_000 <= context.reference_price * (10_000 + config.breakout_buffer_bps):
+        reference = context.reference_price
+        if staged and original['final_action'] == 'ADD':
+            metadata = decision_source['snapshot']['feature_values'][0]['value']['position_step']
+            reference = config.execution_contract.position_steps[metadata['index']].reference_price
+        if price * 10_000 <= reference * (10_000 + config.breakout_buffer_bps):
             return 'current_leader_breakout_not_confirmed'
         observation = quote['observation']
         raw = replay_leader_stop_observation(config, context, observation)
@@ -101,7 +126,8 @@ def assess_leader_order_management(spec, *, run_id, config, position_proof, reco
         entry_deadline=min(_time(context.valid_until), record.intent.created_at + timedelta(seconds=terms.maximum_management_seconds)),
         capital_limit=min(config.capital_won, spec.maximum_capital_won), invalid_entry_price=invalid_price,
         protection_notice=protection_notice, protection_reason=protection_reason,
-        exit_anchor=record.intent.limit_price, validate_quote=current_quote)
+        exit_anchor=record.intent.limit_price, validate_quote=current_quote,
+        plan_entry_notional_won=plan_entry_notional_won if staged else None)
     if (assessment is not None and assessment['action'] == 'AMEND'
             and sum(row['event_type'] == 'AMENDMENT_STARTED' for row in order_events) >= terms.maximum_reprices):
         assessment = {**assessment, 'action': 'WAIT', 'reason': 'original_amendment_limit_reached'}
@@ -109,7 +135,7 @@ def assess_leader_order_management(spec, *, run_id, config, position_proof, reco
 
 
 def prepare_leader_order_management_claim(store, runtime, execution, spec, record, *, config, quote,
-        recovery, risk, entry_enabled, protection_notice=None):
+        recovery, risk, entry_enabled, protection_notice=None, plan_entry_notional_won=None):
     from .mock_automation_risk import mock_automation_risk_snapshot_from_dict
 
     account = spec.account_scope.account_ref
@@ -128,5 +154,6 @@ def prepare_leader_order_management_claim(store, runtime, execution, spec, recor
         order_events=execution.events(record.intent.intent_id), recovery=recovery, risk=risk,
         quote={'observation': quote.observation()} if quote is not None else None,
         decided_at=runtime.server_now(), now=runtime.server_now(), entry_enabled=entry_enabled,
-        decision_source=source, protection_notice=protection_notice, stop_risk=stop_risk)
+        decision_source=source, protection_notice=protection_notice, stop_risk=stop_risk,
+        plan_entry_notional_won=plan_entry_notional_won)
     return MinuteOrderManagementClaim(assessment, recovery) if assessment is not None else None

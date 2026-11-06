@@ -60,7 +60,7 @@ def assess_current_minute_order(spec, *, run_id, record, head, order_events, rec
         quote, decided_at, now, entry_enabled, terms, management_version, entry_proof_id,
         signal_reference_price, entry_deadline, capital_limit, invalid_entry_price=None,
         protection_notice=None, protection_reason=None, exit_anchor=None,
-        validate_quote=acknowledged_minute_quote):
+        validate_quote=acknowledged_minute_quote, plan_entry_notional_won=None):
     """One reconciled current remainder; no new intent, broker call or mutable state."""
     age = spec.maximum_data_gap_seconds
     account = recovery.account
@@ -98,7 +98,8 @@ def assess_current_minute_order(spec, *, run_id, record, head, order_events, rec
             action, reason = 'CANCEL', 'original_entry_signal_expired'
         elif record.filled_quantity >= record.intent.quantity:
             action, reason = 'CANCEL', 'original_target_already_filled'
-        elif account.positions.get(record.intent.symbol, 0) != owned:
+        elif (account.positions.get(record.intent.symbol, 0) != owned
+              and not (plan_entry_notional_won is not None and account.positions.get(record.intent.symbol, 0) >= owned)):
             action, reason = 'CANCEL', 'current_run_position_unverified'
         elif (risk.daily_net_pnl_won is None or spec.maximum_daily_loss_won is None
                 or risk.daily_net_pnl_won <= -spec.maximum_daily_loss_won):
@@ -123,7 +124,9 @@ def assess_current_minute_order(spec, *, run_id, record, head, order_events, rec
                 action, reason = 'CANCEL', 'current_entry_slippage_bound_exceeded'
             elif invalid_entry_price is not None and (invalid_reason := invalid_entry_price(price)) is not None:
                 action, reason = 'CANCEL', invalid_reason
-            elif (capital_limit is None or (owned + pending) * price > capital_limit
+            elif (capital_limit is None
+                    or ((owned + pending) * price if plan_entry_notional_won is None
+                        else plan_entry_notional_won + pending * price) > capital_limit
                     or increase > account.available_cash_won - account.reserved_open_buy_won):
                 action, reason = 'CANCEL', 'current_buy_budget_unavailable'
             elif (spec.maximum_concurrent_positions is None or

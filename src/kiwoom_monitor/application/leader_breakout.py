@@ -407,8 +407,9 @@ def validate_leader_position_proof(proof, config, spec, run_id):
 def leader_evaluation(*, run_id, config, raw, state, context=None):
     """Translate a pure proposal to the existing sized execution DTO only when ready."""
     from .breakout_strategy import FeatureSnapshot, StrategyDecision, StrategyEvaluation, CandidateEvent
-    missing = list(config.execution_missing(raw["input_mode"]))
     action = raw["proposal"]
+    missing = list(config.execution_missing(raw["input_mode"],
+        require_contexts=not (action == 'ADD' and context is not None)))
     reasons = list(raw["reasons"])
     if action == "ENTER":
         if state.status == "open":
@@ -421,20 +422,38 @@ def leader_evaluation(*, run_id, config, raw, state, context=None):
     elif action == "EXIT":
         # Entry data/turnover expiry must not disarm a pinned, configured position exit.
         missing = [] if state.status == "open" and context is not None else ["owned_position_context_unavailable"]
-    if action not in {"ENTER", "EXIT"} or missing:
+    elif action in {'ADD', 'REDUCE'}:
+        step = raw.get('position_step')
+        expected = leader_next_position_step(config, state)
+        if (state.status != 'open' or expected is None or step is None
+                or step['index'] != expected[0] or step['step_key'] != expected[2]
+                or expected[1].action != action):
+            missing.append('explicit_position_step_unavailable')
+        elif action == 'REDUCE':
+            missing = [] if context is not None else ['owned_position_context_unavailable']
+            if state.position_quantity <= expected[1].quantity:
+                missing.append('partial_reduction_requires_remaining_owned_quantity')
+        if action == 'ADD':
+            reason = leader_session_entry_rejection(config, _time(raw['decided_at'])) if not missing else ''
+            if reason:
+                missing.append(reason)
+    if action not in {"ENTER", "EXIT", 'ADD', 'REDUCE'} or missing:
         final = "NO_TRADE" if action != "HOLD" else "HOLD"
     else:
         final = action
     reasons += ["unconfigured:" + name for name in missing]
-    quantity = (config.quantity if action == "ENTER" else state.position_quantity) if final in {"ENTER", "EXIT"} else 0
+    quantity = (expected[1].quantity if action in {'ADD', 'REDUCE'} else
+                config.quantity if action == "ENTER" else state.position_quantity) if final in {"ENTER", "EXIT", 'ADD', 'REDUCE'} else 0
     price = raw.get("signal_reference_price") or 0
-    if final == "ENTER" and quantity * price > config.capital_won:
+    if final in {'ENTER', 'ADD'} and quantity * price > config.capital_won:
         final, quantity = "NO_TRADE", 0
         reasons.append("explicit_capital_limit")
     after = state
     if final == "ENTER":
         after = replace(state, status="candidate", symbol=raw["symbol"], candidate_key=raw["episode_id"],
             candidate_expires_at=raw["valid_until"], emitted_candidate_keys=(*state.emitted_candidate_keys, raw["episode_id"]))
+    elif final in {'ADD', 'REDUCE'}:
+        after = replace(state, emitted_candidate_keys=(*state.emitted_candidate_keys, raw['position_step']['step_key']))
     feature = {"factor_id": "leader_structure/v1", "version": "v1", "value": raw,
                "rules_hash": config.rules_hash, "context": asdict(context) if context else None,
                "context_hash": _id("leader-context/v1", asdict(context)) if context else None,
@@ -443,7 +462,7 @@ def leader_evaluation(*, run_id, config, raw, state, context=None):
         raw["decided_at"], raw["decided_at"], raw["symbol"], "", (feature,), (raw["input_ref"],),
         "leader_breakout", "v1", "leader_execution_adapter/v1", state.to_dict())
     decision = StrategyDecision("pending", run_id, snapshot.snapshot_id,
-        raw["symbol"], action, final, quantity, price, quantity*price if final == "ENTER" else 0,
+        raw["symbol"], action, final, quantity, price, quantity*price if final in {"ENTER", 'ADD'} else 0,
         tuple(reasons), tuple(missing), state.to_dict(), after.to_dict(), raw["decided_at"])
     from .breakout_strategy import _content_id
     body = decision.to_dict()
@@ -453,6 +472,76 @@ def leader_evaluation(*, run_id, config, raw, state, context=None):
         "explicit_leader_structure", raw["input_ref"], "flat->candidate", None, price, raw["available_at"],
         snapshot.snapshot_id, decision.decision_id) if raw["new_candidate"] else None
     return StrategyEvaluation(snapshot, decision, event, after)
+
+
+def leader_next_position_step(config, state):
+    """Read the declared sequence; accepted actions, not price polls, advance it."""
+    from kiwoom_monitor.domain.strategy_contract import LeaderBreakoutStagedExecutionContract
+    terms = config.execution_contract
+    if not isinstance(terms, LeaderBreakoutStagedExecutionContract) or not terms.position_steps:
+        return None
+    for index, step in enumerate(terms.position_steps):
+        key = _id('leader-position-step/v1', [terms.fingerprint, index, asdict(step)])
+        if key not in state.emitted_candidate_keys:
+            return index, step, key
+    return None
+
+
+def leader_position_action_ref(config, position_proof, raw):
+    """Bind native approval to the declared action and its exact observation cut."""
+    metadata = raw.get('position_step')
+    if metadata is None:
+        return None
+    terms = config.execution_contract
+    step = terms.position_steps[metadata['index']]
+    key = _id('leader-position-step/v1', [terms.fingerprint, metadata['index'], asdict(step)])
+    if (metadata['step_id'], metadata['step_key'], metadata['reason_ref'], raw['proposal']) != (
+            step.step_id, key, step.reason_ref, step.action):
+        raise ValueError('leader position action differs from its frozen declaration')
+    return _id('leader-plan-action/v1', [position_proof['proof_id'], terms.fingerprint,
+        raw['decision_id'], metadata])
+
+
+def evaluate_leader_position_step(config, raw, state, context, *, source, step_state=None, entry_enabled):
+    """Explicit ADD/reduction hypotheses over real observations, after full-exit priority.
+
+    ADD reuses this Family's configured crossing/confirmation/turnover checks.
+    REDUCE uses its declared absolute comparison and only actual owned shares.
+    The state returned here is observation continuity, never an order receipt.
+    """
+    selected = leader_next_position_step(config, state)
+    if state.status != 'open' or context is None or selected is None or raw['proposal'] == 'EXIT':
+        return raw, None
+    index, step, key = selected
+    if raw['status'] != 'HOLD':
+        return raw, None
+    confirmation, after = None, None
+    if step.action == 'ADD':
+        if not entry_enabled:
+            return raw, None
+        derived = replace(context, reference_price=step.reference_price,
+            evidence_ref=_id('leader-step-context/v1', [asdict(context), asdict(step)]))
+        policy = replace(config.policy, contexts=(derived,))
+        # An unclaimed proposal is not a completed step. It may observe a new
+        # cross later, without renewing the old crossing while price stays high.
+        if step_state is not None and step_state.episode_id:
+            step_state = replace(step_state, episode_id='')
+        confirmation, after = evaluate_leader_breakout(policy=policy, symbol=raw['symbol'],
+            price=raw['signal_reference_price'], turnover_won=raw['turnover_won'],
+            observed_at=raw['observed_at'], available_at=raw['available_at'],
+            decision_time=raw['decided_at'], input_ref=raw['input_ref'],
+            source=source, mode=raw['input_mode'], state=step_state)
+        if confirmation['proposal'] != 'ENTER':
+            return raw, after
+    else:
+        price = raw['signal_reference_price']
+        if not (price >= step.reference_price if step.trigger == 'price_at_or_above'
+                else price <= step.reference_price):
+            return raw, None
+    metadata = {'index': index, 'step_id': step.step_id, 'step_key': key,
+        'reason_ref': step.reason_ref, 'confirmation': confirmation}
+    return {**raw, 'proposal': step.action, 'new_candidate': False, 'position_step': metadata,
+        'reasons': [*raw['reasons'], 'explicit_position_step:' + step.reason_ref]}, after
 
 
 def leader_current_entry_matches(config, proof, settings, now):
@@ -487,11 +576,13 @@ def evaluate_leader_breakout_bar(*, run_id, evaluation_bar, bar_history, univers
 def evaluate_leader_breakout_bar_step(*, run_id, evaluation_bar, config, state, minute_state=None,
                                       position_context=None, original_observation=None):
     """One completed close and an explicit bounded observation window, independent of fills."""
-    observed, window, previous_cut = minute_state if minute_state is not None else (None, (), None)
+    observed, window, previous_cut = minute_state[:3] if minute_state is not None else (None, (), None)
+    step_observed = minute_state[3] if minute_state is not None and len(minute_state) == 4 else None
     cut = _time(evaluation_bar.bar_end)
     gap = previous_cut is not None and cut-_time(previous_cut) != timedelta(minutes=1)
     if gap:
         observed, window = None, ()
+        step_observed = None
     value = evaluation_bar.trade_value_million_won
     if original_observation is not None:
         payload = original_observation["payload"]
@@ -523,7 +614,12 @@ def evaluate_leader_breakout_bar_step(*, run_id, evaluation_bar, config, state, 
     if original_observation is not None:
         raw.update(original_received_at=original_observation.get("leader_original_receipt"),
                    original_source=original_observation.get("source"), trade_value_kind=original_observation.get("value_kind"))
-    return leader_evaluation(run_id=run_id, config=config, raw=raw, state=state, context=context), (observed, window, cut.isoformat())
+    raw, step_observed = evaluate_leader_position_step(config, raw, state, context,
+        source='final_completed_minute:' + cut.date().isoformat(), step_state=step_observed, entry_enabled=True)
+    next_state = (observed, window, cut.isoformat())
+    if hasattr(config.execution_contract, 'position_steps'):
+        next_state += (step_observed,)
+    return leader_evaluation(run_id=run_id, config=config, raw=raw, state=state, context=context), next_state
 
 
 def evaluate_leader_breakout_minutes(policy, observations, *, session_profile, checkpoint=lambda: None):
@@ -642,6 +738,7 @@ class LeaderTradeInputs:
         self._generation = 0
         self._discontinuity = ""
         self._stop_quote = None
+        self._position_step_observation = None
         # Legacy leader checkpoints may contain decoded minute documents. They
         # are opaque compatibility inputs here, never a live leader price feed.
         self._restored_bars = {}
@@ -685,17 +782,20 @@ class LeaderTradeInputs:
             self._discontinuity = ""
         if reason:
             self._observations.clear()
+            self._position_step_observation = None
         return reason
 
     def take(self):
         with self._queue_lock:
             if self._discontinuity:
                 self._observations.clear()
+                self._position_step_observation = None
                 self._discontinuity = ""
             return self._queue.popleft() if self._queue else None
 
     def reset_evaluations(self):
         self._observations.clear()
+        self._position_step_observation = None
 
     @staticmethod
     def resolve_config(admitted, current, *, position_open):
@@ -722,6 +822,16 @@ class LeaderTradeInputs:
         if position_context is None:
             position_context = next((c for c in config.contexts if c.evidence_ref == raw["context_ref"]), None)
         return raw, position_context
+
+    def evaluate_position_step(self, config, raw, state, context, *, source, entry_enabled):
+        selected = leader_next_position_step(config, state)
+        key = selected[2] if selected else None
+        prior = self._position_step_observation
+        before = prior[1] if prior is not None and prior[0] == key else None
+        result, after = evaluate_leader_position_step(config, raw, state, context,
+            source=source, step_state=before, entry_enabled=entry_enabled)
+        self._position_step_observation = (key, after) if after is not None else None
+        return result
 
     def capture_stop_quote(self, config, envelope: LeaderTradeEnvelope, *, decision_time, position_context):
         raw, _ = evaluate_leader_breakout_trade(config.policy, envelope.payload, received_at=envelope.received_at,

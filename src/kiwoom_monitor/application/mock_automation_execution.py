@@ -50,6 +50,7 @@ from kiwoom_monitor.infrastructure.persistence.execution_repository import Execu
 MOCK_AUTOMATION_DECISION_GATE_VERSION = "mock_automation_decision_gate/v2"
 MOCK_AUTOMATION_DECISION_GATE_LEGACY_VERSION = "mock_automation_decision_gate/v1"
 MOCK_AUTOMATION_REPLACEMENT_GATE_VERSION = "mock_automation_replacement_gate/v3"
+MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION = 'mock_automation_plan_action_gate/v1'
 MOCK_AUTOMATION_DISPATCH_RECEIPT_VERSION = "mock_automation_dispatch_receipt/v1"
 MOCK_AUTOMATION_STOP_VERSION = "mock_automation_stop/v1"
 
@@ -141,6 +142,7 @@ class MockAutomationDecisionGate:
     risk_reconciliation_revision: int = 0
     replacement_binding: Mapping[str, Any] | None = None
     plan: OrderPlanRef | None = None
+    position_action_ref: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -155,6 +157,7 @@ class MockAutomationDecisionGate:
             MOCK_AUTOMATION_DECISION_GATE_VERSION,
             MOCK_AUTOMATION_DECISION_GATE_LEGACY_VERSION,
             MOCK_AUTOMATION_REPLACEMENT_GATE_VERSION,
+            MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION,
         }:
             raise ValueError("unsupported mock automation decision gate")
         if not self.action:
@@ -171,7 +174,8 @@ class MockAutomationDecisionGate:
             raise ValueError("approved mock automation gate cannot contain blocking reasons")
         if self.status is MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION and (
             self.action not in ({"ADD", "REENTER", "REDUCE", "EXIT"}
-                if self.version == MOCK_AUTOMATION_REPLACEMENT_GATE_VERSION else {"ENTER", "EXIT"}) or self.quantity <= 0
+                if self.version == MOCK_AUTOMATION_REPLACEMENT_GATE_VERSION else
+                {'ADD', 'REDUCE'} if self.version == MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION else {"ENTER", "EXIT"}) or self.quantity <= 0
             or (
                 self.version != MOCK_AUTOMATION_DECISION_GATE_LEGACY_VERSION
                 and self.control_revision <= 0
@@ -216,10 +220,20 @@ class MockAutomationDecisionGate:
             raise ValueError("legacy gate cannot carry replacement authority")
         if self.plan is not None and (
             not isinstance(self.plan, OrderPlanRef)
-            or self.version != MOCK_AUTOMATION_DECISION_GATE_VERSION
+            or self.version not in {MOCK_AUTOMATION_DECISION_GATE_VERSION, MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION}
             or not self.risk_snapshot_id
         ):
             raise ValueError("plan approval requires the current decision gate and Risk evidence")
+        if self.version == MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION and self.plan is None:
+            raise ValueError('position action approval requires its original native plan')
+        if self.version == MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION:
+            prefix = 'leader-plan-action/v1:'
+            ref = self.position_action_ref
+            if (type(ref) is not str or not ref.startswith(prefix)
+                    or len(ref) != len(prefix) + 64 or any(c not in '0123456789abcdef' for c in ref[len(prefix):])):
+                raise ValueError('position action approval requires its frozen step reference')
+        elif self.position_action_ref is not None:
+            raise ValueError('original and replacement gates cannot carry position action authority')
 
     def to_dict(self) -> dict[str, Any]:
         document = {
@@ -261,6 +275,8 @@ class MockAutomationDecisionGate:
             document["replacement_binding"] = deepcopy(dict(self.replacement_binding))
         if self.plan is not None:
             document["plan"] = asdict(self.plan)
+        if self.position_action_ref is not None:
+            document['position_action_ref'] = self.position_action_ref
         return document
 
 
@@ -566,6 +582,15 @@ def _decision_safety_context(spec, admission, recovery_decision, decision, recov
     return reasons, positions
 
 
+def _is_native_leader_position_action(spec, profile, decision, plan, position_action_ref=None):
+    # This is account preflight only. The native writer independently reproduces
+    # the frozen step and its current observation before accepting any new lot.
+    return (isinstance(plan, OrderPlanRef) and spec.execution_plan_mode == LEADER_NATIVE_PLAN_MODE
+            and profile is not None and profile.family_version == LEADER_BREAKOUT_FAMILY_ID
+            and position_action_ref is not None
+            and decision.final_action in {'ADD', 'REDUCE'})
+
+
 def assess_mock_automation_decision(
     spec: MockAutomationOperatingSpec,
     admission: MockAutomationAdmission,
@@ -584,22 +609,29 @@ def assess_mock_automation_decision(
     risk_snapshot_id: str = "",
     risk_reconciliation_revision: int = 0,
     plan: OrderPlanRef | None = None,
+    position_action_ref: str | None = None,
 ) -> MockAutomationDecisionGate:
     _validate_decision_identity(decision)
     _validate_lineage(spec, admission, lease_receipt, recovery_decision, recovery)
     decided_at = datetime.fromisoformat(decision.decided_at)
     effective_now = server_now or metrics.observed_at
+    plan_action = _is_native_leader_position_action(spec, profile, decision, plan, position_action_ref)
+    if position_action_ref is not None and not plan_action:
+        raise ValueError('explicit position action requires the native leader plan')
     _require_aware(effective_now, "server_now")
     intent_id = mock_automation_intent_id(spec.spec_id, decision.decision_id)
     reasons, positions = _decision_safety_context(
         spec, admission, recovery_decision, decision, recovery, metrics,
         strategy_ref=strategy_ref, latest_stop=latest_stop, control=control,
         in_flight_order_count=in_flight_order_count, profile=profile, effective_now=effective_now,
-        is_exit=decision.final_action == "EXIT",
+        is_exit=decision.final_action == "EXIT" or plan_action and decision.final_action == 'REDUCE',
+        allow_manage_only=plan_action,
     )
-    if decision.final_action == "ENTER":
-        if positions:
+    if decision.final_action == "ENTER" or plan_action and decision.final_action == 'ADD':
+        if positions and decision.final_action == 'ENTER':
             reasons.append("ENTRY_REQUIRES_FLAT_ACCOUNT")
+        if plan_action and dict(metrics.owned_position_quantities).get(decision.symbol, 0) <= 0:
+            reasons.append('ADDITIONAL_ENTRY_REQUIRES_OWNED_PLAN_POSITION')
         if decision.required_capital_won != decision.quantity * decision.signal_reference_price:
             reasons.append("DECISION_CAPITAL_MISMATCH")
         if (
@@ -610,7 +642,7 @@ def assess_mock_automation_decision(
         available = recovery.account.available_cash_won - recovery.account.reserved_open_buy_won
         if decision.required_capital_won > available:
             reasons.append("INSUFFICIENT_AVAILABLE_CASH")
-    elif decision.final_action == "EXIT":
+    elif decision.final_action == "EXIT" or plan_action and decision.final_action == 'REDUCE':
         owned_positions = dict(metrics.owned_position_quantities)
         pending_sells = dict(metrics.pending_sell_quantities)
         owned = owned_positions.get(decision.symbol)
@@ -619,6 +651,8 @@ def assess_mock_automation_decision(
         elif max(0, min(int(positions.get(decision.symbol, 0)), owned)
                  - pending_sells.get(decision.symbol, 0)) < decision.quantity:
             reasons.append("INSUFFICIENT_POSITION")
+        if plan_action and owned is not None and decision.quantity >= owned:
+            reasons.append('PARTIAL_REDUCTION_REQUIRES_REMAINING_POSITION')
     else:
         reasons.append("NON_ACTION_DECISION")
 
@@ -634,7 +668,7 @@ def assess_mock_automation_decision(
         reasons.append("SESSION_PROFILE_MISMATCH")
     unique_reasons = tuple(dict.fromkeys(reasons))
     body = {
-        "version": MOCK_AUTOMATION_DECISION_GATE_VERSION,
+        "version": MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION if plan_action else MOCK_AUTOMATION_DECISION_GATE_VERSION,
         "admission_id": admission.admission_id,
         "lease_receipt_id": lease_receipt.receipt_id,
         "recovery_decision_id": recovery_decision.decision_id,
@@ -670,6 +704,7 @@ def assess_mock_automation_decision(
         "risk_snapshot_id": risk_snapshot_id,
         "risk_reconciliation_revision": risk_reconciliation_revision,
         **({"plan": asdict(plan)} if plan is not None else {}),
+        **({'position_action_ref': position_action_ref} if plan_action else {}),
     }
     return MockAutomationDecisionGate(
         gate_id=_content_id("mock_automation_gate", body),
@@ -704,6 +739,7 @@ def dispatch_mock_automation_decision(
     risk_reconciliation_revision: int = 0,
     protection_exit_id: str | None = None,
     plan: OrderPlanRef | None = None,
+    position_action_ref: str | None = None,
 ) -> tuple[MockAutomationDecisionGate, ExecutionRecord | None, MockAutomationDispatchReceipt | None]:
     spec, profile, admission, lease, recovered, latest_stop, control = _load_context(
         repository, account_ref, spec_id,
@@ -720,7 +756,7 @@ def dispatch_mock_automation_decision(
             raise ValueError("strategy_ref does not match the admitted operating spec")
         if decision.run_id != admission.execution_run_id:
             raise ValueError("strategy Decision does not belong to the admitted execution run")
-        if decision.final_action not in {"ENTER", "EXIT"}:
+        if decision.final_action not in {"ENTER", "EXIT"} and not _is_native_leader_position_action(spec, profile, decision, plan, position_action_ref):
             gate = assess_mock_automation_decision(
                 spec, admission, lease, recovered, decision, recovery, metrics,
                 strategy_ref=strategy_ref, latest_stop=latest_stop, control=control,
@@ -728,6 +764,7 @@ def dispatch_mock_automation_decision(
                 risk_snapshot_id=risk_snapshot_id,
                 risk_reconciliation_revision=risk_reconciliation_revision,
                 plan=plan,
+                position_action_ref=position_action_ref,
             )
             repository.save_mock_automation_decision_gate(gate)
             return gate, None, None
@@ -746,7 +783,8 @@ def dispatch_mock_automation_decision(
             gate = repository.load_mock_automation_approved_gate(
                 account_ref, existing.intent.intent_id,
             )
-            if gate is None or gate.admission_id != admission.admission_id or gate.plan != plan:
+            if (gate is None or gate.admission_id != admission.admission_id or gate.plan != plan
+                    or gate.position_action_ref != position_action_ref):
                 raise RuntimeError("existing automation intent has no approved decision gate")
             receipt = repository.load_mock_automation_dispatch_receipt(
                 account_ref, existing.intent.intent_id,
@@ -771,9 +809,11 @@ def dispatch_mock_automation_decision(
                 risk_snapshot_id=risk_snapshot_id,
                 risk_reconciliation_revision=risk_reconciliation_revision,
                 plan=plan,
+                position_action_ref=position_action_ref,
             )
             repository.save_mock_automation_decision_gate(gate)
-        elif gate.plan != plan or gate.admission_id != admission.admission_id:
+        elif (gate.plan != plan or gate.admission_id != admission.admission_id
+              or gate.position_action_ref != position_action_ref):
             raise ValueError("stored decision approval does not match the plan")
         if gate.status is MockAutomationGateStatus.BLOCKED:
             return gate, None, None
@@ -803,6 +843,7 @@ def dispatch_mock_automation_decision_from_risk(
     strategy_ref: str,
     protection_exit_id: str | None = None,
     plan: OrderPlanRef | None = None,
+    position_action_ref: str | None = None,
 ) -> tuple[MockAutomationDecisionGate, ExecutionRecord | None, MockAutomationDispatchReceipt | None]:
     """Dispatch only from the latest stored NAS risk revision."""
     metrics = _validated_risk_metrics(repository, runtime, recovery, risk, account_ref, spec_id)
@@ -812,17 +853,19 @@ def dispatch_mock_automation_decision_from_risk(
         risk_snapshot_id=risk.snapshot_id,
         risk_reconciliation_revision=risk.reconciliation_revision,
         plan=plan,
+        position_action_ref=position_action_ref,
         **({'protection_exit_id':protection_exit_id} if protection_exit_id is not None else {}),
     )
 
 
 def assess_mock_automation_decision_from_risk(
-    repository, runtime, decision, recovery, risk, *, account_ref, spec_id, strategy_ref, plan=None,
+    repository, runtime, decision, recovery, risk, *, account_ref, spec_id, strategy_ref, plan=None, position_action_ref=None,
 ):
     """Existing ENTER/EXIT gate assessment without dispatch or approved-gate writes.
 
     The caller owns automation_decision_guard through its native checkpoint ACK.
-    Unsupported ADD/REDUCE remain NON_ACTION_DECISION; never relabel them.
+    Only explicit native leader plan actions support ADD/REDUCE here.
+    Cancel/retry children retain their separate replacement approval.
     """
     spec, profile, admission, lease, recovered, latest_stop, control, metrics, now, in_flight = _native_gate_context(
         repository, runtime, recovery, risk, account_ref, spec_id,
@@ -833,6 +876,7 @@ def assess_mock_automation_decision_from_risk(
         profile=profile, server_now=now, in_flight_order_count=in_flight,
         risk_snapshot_id=risk.snapshot_id, risk_reconciliation_revision=risk.reconciliation_revision,
         plan=plan,
+        position_action_ref=position_action_ref,
     )
 
 
@@ -1458,6 +1502,7 @@ def mock_automation_decision_gate_from_dict(value: Mapping[str, Any]) -> MockAut
         risk_reconciliation_revision=int(value.get("risk_reconciliation_revision") or 0),
         replacement_binding=deepcopy(value.get("replacement_binding")),
         plan=OrderPlanRef(**value["plan"]) if "plan" in value else None,
+        position_action_ref=value.get('position_action_ref'),
     )
     _verify_content_id("mock_automation_gate", gate.gate_id, dict(value), "gate_id")
     return gate
@@ -1555,7 +1600,7 @@ def _intent_for_decision(
     *, family_id=None,
 ) -> OrderIntent:
     decided_at = datetime.fromisoformat(decision.decided_at)
-    side = OrderSide.BUY if decision.final_action == "ENTER" else OrderSide.SELL
+    side = OrderSide.BUY if decision.final_action in {"ENTER", 'ADD'} else OrderSide.SELL
     validity_seconds = max(1, int(spec.maximum_data_gap_seconds or 1))
     return OrderIntent(
         intent_id=mock_automation_intent_id(spec.spec_id, decision.decision_id),

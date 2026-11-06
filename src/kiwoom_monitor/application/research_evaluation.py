@@ -435,6 +435,11 @@ def unfilled_action_outcome_from_events(context, events, *, start_event_id, end_
     engine=PaperExecutionEngine(context['run_id'],context['unfilled_execution'],context['unfilled_strategy'],'krx-regular/v1')
     engine.portfolio=SimulationPortfolio(**raw)
     engine.strategy_state=StrategyState(**proof['initial_strategy_state'])
+    if engine._staged_leader:
+        # Residual cost basis excludes shares already sold. A reduction never
+        # replenishes the declared cumulative BUY budget in a replay branch.
+        engine._leader_entry_notional=sum(e['notional_won'] for e in events[:left]
+            if e['event_type']=='FILL' and e['side']=='BUY')
     engine._last_processed_bar=source
     expected=list(engine.process_unfilled_action(request,source_bar=source))
     offset=left
@@ -890,6 +895,8 @@ def _native_policy_study_outcome(context,events,proof,case_event,selection,popul
     engine=PaperExecutionEngine(context['run_id'],context['native_study_execution'],context['native_study_strategy'],'krx-regular/v1')
     engine.portfolio=SimulationPortfolio(**{**proof['portfolio'],'position':position})
     engine.strategy_state=StrategyState(**{**proof['strategy_state'],'emitted_candidate_keys':tuple(proof['strategy_state']['emitted_candidate_keys'])})
+    if engine._staged_leader:
+        engine._leader_entry_notional=prefix[0]['notional_won']
     engine._last_processed_bar=source
     observed=engine.observe_position_study_case(context['position_study_ref'],context['position_study_policy'],
         context['position_study_case'],source_bar=source,historical_context=context.get('position_study_context'))

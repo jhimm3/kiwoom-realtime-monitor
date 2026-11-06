@@ -357,7 +357,9 @@ class LeaderBreakoutExecutionContract:
     hard_risk_profile: Mapping[str, Any] | None = None
 
     def __post_init__(self):
-        if self.version != "leader_breakout_execution/v1":
+        if self.version != "leader_breakout_execution/v1" and not (
+                self.version == "leader_breakout_execution/v2"
+                and isinstance(self, LeaderBreakoutStagedExecutionContract)):
             raise ValueError("unsupported leader execution contract")
         for name, allowed in (("sizing_mode", "fixed_quantity"), ("order_type", "LIMIT"),
                 ("exit_quantity_rule", "all_owned"), ("research_exit_observation", "completed_minute_close")):
@@ -389,12 +391,67 @@ class LeaderBreakoutExecutionContract:
 
     @property
     def fingerprint(self):
-        return _id("leader-execution/v1", self.to_dict())
+        return _id("leader-execution/" + self.version.rsplit("/", 1)[1], self.to_dict())
 
     def missing(self, mode):
         names = [f.name for f in fields(self) if f.name != "version" and
                  (mode == "1m" or f.name != "research_exit_observation")]
         return tuple("execution." + name for name in names if getattr(self, name) is None)
+
+
+@dataclass(frozen=True)
+class LeaderPositionStep:
+    """A declared research/operator hypothesis, with no implicit size or level."""
+    step_id: str
+    action: str
+    trigger: str
+    reference_price: int
+    quantity: int
+    reason_ref: str
+
+    def __post_init__(self):
+        if any(type(getattr(self, name)) is not str or not getattr(self, name).strip()
+               for name in ('step_id', 'reason_ref')):
+            raise ValueError('leader position step requires its own identity and reason')
+        allowed = {'ADD': {'observed_cross_above'},
+                   'REDUCE': {'price_at_or_above', 'price_at_or_below'}}
+        if (type(self.action) is not str or type(self.trigger) is not str
+                or self.action not in allowed or self.trigger not in allowed[self.action]):
+            raise ValueError('unsupported explicit leader position step')
+        if any(type(getattr(self, name)) is not int or getattr(self, name) <= 0
+               for name in ('reference_price', 'quantity')):
+            raise ValueError('leader position step requires positive explicit price and quantity')
+
+
+@dataclass(frozen=True)
+class LeaderBreakoutStagedExecutionContract(LeaderBreakoutExecutionContract):
+    """Opt-in actions within cumulative actual BUY notional; reductions do not refill it.
+
+    V1 serialization and behavior stay frozen. Levels, quantities and reasons
+    are supplied by a declared hypothesis, never populated as trading defaults.
+    """
+    version: str = 'leader_breakout_execution/v2'
+    position_steps: tuple[LeaderPositionStep, ...] | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.position_steps is not None and (
+                type(self.position_steps) is not tuple or not self.position_steps
+                or any(type(step) is not LeaderPositionStep for step in self.position_steps)
+                or len({step.step_id for step in self.position_steps}) != len(self.position_steps)):
+            raise ValueError('explicit unique ordered leader position steps required')
+
+
+def leader_execution_contract_from_dict(document):
+    raw = dict(document)
+    if raw.get('version') == 'leader_breakout_execution/v2':
+        steps = raw.get('position_steps')
+        if steps is not None:
+            if not isinstance(steps, (tuple, list)) or any(not isinstance(step, Mapping) for step in steps):
+                raise ValueError('leader position steps must be explicit objects')
+            raw['position_steps'] = tuple(LeaderPositionStep(**step) for step in steps)
+        return LeaderBreakoutStagedExecutionContract(**raw)
+    return LeaderBreakoutExecutionContract(**raw)
 
 
 @dataclass(frozen=True)
@@ -413,7 +470,7 @@ class LeaderBreakoutConfig(LeaderBreakoutPolicy):
         contract = raw.pop("execution_contract", None)
         policy = LeaderBreakoutPolicy.from_dict(raw)
         return cls(**{f.name: getattr(policy, f.name) for f in fields(LeaderBreakoutPolicy)},
-                   execution_contract=LeaderBreakoutExecutionContract(**contract) if contract is not None else None)
+                   execution_contract=leader_execution_contract_from_dict(contract) if contract is not None else None)
 
     def to_dict(self):
         # Canonical JSON arrays, including nested contexts, roundtrip through files/API.

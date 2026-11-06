@@ -3222,6 +3222,22 @@
         "tests/integration/test_leader_order_management_postgres.py",
         "tests/unit/test_mock_automation_dialog.py"
       ]
+    },
+    {
+      "id": "S12-05-staged-leader-native-plan-actions-20261106",
+      "reason": "S12-05 original representative1: implement actual explicitly declared additional BUY lots and partial SELL reductions, independently of old cancel/replacement ADD/REDUCE aliases. No numeric strategy defaults or live operation.",
+      "connection": "Explicit frozen v2 contract -> shared pure real0B/completed-minute step -> existing Paper or Episode -> separate plan-action gate -> native QUEUED/marker/physical ledger -> current management/actual head -> journal and real READY UI/authenticated API. Restore from native accepted actions, not a stale checkpoint alone.",
+      "validation": "Two purposeful sites in the existing QUEUED/current-management/protection native transaction: one scoped account/run/plan ledger join and one atomic one-step marker insertion. No public store method, connection, worker or account authority added. Current-condition/account checks precede atomic submission; budget/settings failure rolls back marker and queued intent. Actual first/current/late physical fills and exact manual-share isolation are covered on SQLite and isolated PostgreSQL. Episode caches head/material signatures and only rereads changed facts; no runtime speed claim is inferred from static site counts.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_leader_plan_ledger|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_leader_position_action|cursor.execute": 1
+      },
+      "evidence": [
+        "tests/unit/test_leader_position_steps.py",
+        "tests/unit/test_leader_staged_execution.py",
+        "tests/integration/test_leader_staged_execution_postgres.py",
+        "tests/unit/test_leader_staged_publication.py"
+      ]
     }
   ]
 }

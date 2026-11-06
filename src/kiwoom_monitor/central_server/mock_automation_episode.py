@@ -48,7 +48,8 @@ from kiwoom_monitor.application.mock_automation_risk import mock_automation_prot
 from kiwoom_monitor.application.research_families import get_research_family, parse_strategy_config
 from kiwoom_monitor.application.leader_breakout import (
     LeaderBreakoutConfig, LeaderTradeInputs, leader_evaluation, leader_position_proof,
-    replay_leader_stop_observation, validate_leader_position_proof,
+    replay_leader_stop_observation, validate_leader_position_proof, leader_current_entry_matches,
+    leader_position_action_ref,
 )
 from kiwoom_monitor.application.research_replay import (
     KrxMinuteBarFrame, MinuteStrategyInputs,
@@ -457,6 +458,7 @@ class MockAutomationEpisode:
         self._leader_management_records = None
         self._leader_plan_refresh_quote = None
         self._leader_plan_confirmation = None
+        self._leader_staged_facts = None
         self._leader_plan_reprepare_requested = None
         self._planned_protection_restore = None
         self._planned_protection_readback = None
@@ -627,6 +629,10 @@ class MockAutomationEpisode:
         self._leader = isinstance(self._config, LeaderBreakoutConfig)
         if self._leader_plan_mode and (not self._leader or not isinstance(self._bundle.repository, ExecutionRepository)):
             raise ValueError("native leader plan requires the existing leader execution owner")
+        if hasattr(getattr(self._config, 'execution_contract', None), 'position_steps') and (
+                not self._leader_plan_mode or spec.unfilled_execution_policy is None
+                or spec.unfilled_execution_policy.accepted_order_management is None):
+            raise ValueError('staged leader execution requires the explicit native current-order policy')
         if spec.session_profile != str(candidate.get("session_profile", {}).get("profile", "")):
             raise ValueError("MOCK_AUTOMATION_SESSION_PROFILE_MISMATCH")
         if spec.unfilled_execution_policy is not None:
@@ -1060,7 +1066,9 @@ class MockAutomationEpisode:
         entry = dict(risk.owned_entry_prices).get(symbol)
         now = self._now()
         at = datetime.fromisoformat(raw["available_at"])
-        if (not quantity or not entry or positions.get(symbol) != quantity
+        staged = hasattr(self._config.execution_contract, 'position_steps')
+        position_matches = (positions.get(symbol, 0) >= quantity if staged and quantity else positions.get(symbol) == quantity)
+        if (not quantity or not entry or not position_matches
                 or at < risk.account_as_of or not 0 <= (now-at).total_seconds() <= self._config.max_data_age_seconds):
             return
         previous = self._protection_snapshot()
@@ -1117,6 +1125,13 @@ class MockAutomationEpisode:
                 assessment = session_clock_assessment(config, self._episode_position.state, now)
                 if assessment["exit_required"] and raw["status"] in {"HOLD", "HARD_EXIT", "INVALIDATED"}:
                     raw = {**raw, "proposal": "EXIT", "reasons": [*raw["reasons"], *assessment["reasons"]]}
+                if hasattr(config.execution_contract, 'position_steps') and context is not None:
+                    enabled = (control.desired_state.value == 'RUNNING' and not control.entry_resume_required
+                        and isinstance(current, Mapping) and leader_current_entry_matches(self._config,
+                            self._leader_position_proof, {'shadow_candidate_enabled': current.get('enabled'),
+                                'shadow_candidate_config': current.get('policy')}, now))
+                    raw = self._strategy_inputs.evaluate_position_step(config, raw, self._episode_position.state,
+                        context, source=source, entry_enabled=enabled)
                 evaluation = leader_evaluation(run_id=self._bundle.run_id, config=config, raw=raw, state=self._episode_position.state, context=context)
                 active = await drain_thread_call(self._bundle.repository.active_intents, "mock", self._bundle.account_ref, self._bundle.run_id)
                 if active:
@@ -1124,9 +1139,11 @@ class MockAutomationEpisode:
                         self.request_protection_review(reason="registered_strategy_protective_exit", input_ref=raw["input_ref"], requested_at=now)
                     self._status = {"state": "WAITING_ORDER", "reason": "active_intent_reconciliation", "orders_enabled": False}
                     continue
-                self._episode_position.replace_strategy_state(evaluation.state, position_time=self._position_state_time)
+                position_action = evaluation.decision.final_action in {'ADD', 'REDUCE'}
+                if not position_action:
+                    self._episode_position.replace_strategy_state(evaluation.state, position_time=self._position_state_time)
                 decision = evaluation.decision
-                if decision.final_action not in {"ENTER", "EXIT"}:
+                if decision.final_action not in {"ENTER", "EXIT", 'ADD', 'REDUCE'}:
                     self._status = {"state": "BLOCKED" if decision.constraints or raw["status"] == "BLOCKED" else "RUNNING",
                         "reason": ";".join(decision.reasons), "last_decision_id": decision.decision_id, "input_mode": "0B", "orders_enabled": False}
                     continue
@@ -1156,7 +1173,12 @@ class MockAutomationEpisode:
                 plan = await drain_thread_call(self._leader_plan_for_decision, decision) if self._leader_plan_mode else None
                 gate, record, _ = await drain_thread_call(
                     self._dispatch_original_and_register, decision, recovery, risk, plan=plan,
+                    **({'position_action_ref': leader_position_action_ref(config, self._leader_position_proof, raw)}
+                       if position_action else {}),
                 )
+                if position_action and record is not None:
+                    self._episode_position.replace_strategy_state(evaluation.state, position_time=self._position_state_time)
+                    await drain_thread_call(self._save_checkpoint, force=True)
                 self._status = {"state": "ORDER_SUBMITTED" if record is not None else "BLOCKED",
                     "reason": ";".join(gate.reasons) if gate.reasons else "approved", "last_decision_id": decision.decision_id,
                     "pending_intent_id": record.intent.intent_id if record is not None else "", "input_mode": "0B", "orders_enabled": False}
@@ -1333,6 +1355,12 @@ class MockAutomationEpisode:
             return True
         record = active[0]
         if record.state is OrderState.QUEUED:
+            if hasattr(self._config.execution_contract, 'position_steps') and self._now() >= record.intent.expires_at:
+                await drain_thread_call(self._bundle.runtime.cancel, record.intent.intent_id)
+                self._status = {'state': 'WAITING_ORDER', 'reason': 'unsent_position_action_expired',
+                                'orders_enabled': False, 'pending_intent_id': record.intent.intent_id, 'input_mode': '0B'}
+                await drain_thread_call(self._save_checkpoint)
+                return True
             return False  # The original unsent TTL/claim path still owns this order.
         if record.state is OrderState.SUBMISSION_UNKNOWN:
             self._bundle.monitor.request_automation_execution_recovery()
@@ -1370,9 +1398,13 @@ class MockAutomationEpisode:
             current_quote = self._strategy_inputs.latest_stop_quote
             if current_quote is not None and not self._strategy_inputs.stop_quote_generation_is_current(current_quote):
                 current_quote = None
+            if hasattr(self._config.execution_contract, 'position_steps'):
+                self._read_leader_plan_root(execution)
             claim = prepare_leader_order_management_claim(self._store, self._bundle.runtime, execution, self._spec,
                 updated, config=self._config, quote=current_quote, recovery=cut['recovery'], risk=cut['risk'],
-                entry_enabled=enabled, protection_notice=protection)
+                entry_enabled=enabled, protection_notice=protection,
+                plan_entry_notional_won=(self._leader_staged_facts['entry_notional']
+                    if self._leader_staged_facts is not None else None))
             if claim is not None:
                 outcome.update(claim.assessment)
             return claim
@@ -1440,6 +1472,10 @@ class MockAutomationEpisode:
         if (quote is None or quote.envelope.received_at <= datetime.fromisoformat(stop["available_at"])
                 or confirmed_at is None or quote.envelope.received_at < confirmed_at):
             return
+        if hasattr(self._config.execution_contract, 'position_steps') and (
+                self._leader_staged_facts is None or self._leader_staged_facts['confirmed_at'] is None
+                or quote.envelope.received_at < self._leader_staged_facts['confirmed_at']):
+            return
         if cut is None or cut["risk"].observed_at < quote.envelope.received_at:
             if self._leader_plan_refresh_quote is None:
                 # Keep this cut while Risk catches up, even during continuous 0B delivery.
@@ -1475,8 +1511,12 @@ class MockAutomationEpisode:
                 self._planned_protection_restore = (workflow, plan, decision)
                 self._leader_plan_refresh_quote = None
             await drain_thread_call(self._save_checkpoint, force=True)
-            await drain_thread_call(self._dispatch_original_and_register, decision, recovery, risk,
+            gate, record, _ = await drain_thread_call(self._dispatch_original_and_register, decision, recovery, risk,
                                     plan=plan, protection_exit_id=workflow["workflow_id"])
+            if record is not None:
+                self._status.update(pending_intent_id=record.intent.intent_id, last_decision_id=decision.decision_id)
+            elif gate.reasons:
+                self._status['planned_protection_reason'] = ';'.join(gate.reasons)
         except (ValueError, RuntimeError) as error:
             self._status["planned_protection_reason"] = str(error)
 
@@ -2099,17 +2139,21 @@ class MockAutomationEpisode:
         if decision.final_action == "ENTER":
             return plan
         head = self._bundle.repository.load_plan_position(self._bundle.account_ref, self._bundle.run_id, decision.symbol, plan)
-        if head.quantity != decision.quantity or head.unreconciled_sell_quantity:
+        if (head.unreconciled_sell_quantity
+                or decision.final_action == 'EXIT' and head.quantity != decision.quantity
+                or decision.final_action == 'REDUCE' and not 0 < decision.quantity < head.quantity
+                or decision.final_action == 'ADD' and head.quantity <= 0):
             raise ValueError("leader exit does not match the durable plan position")
         return head.plan
 
-    def _dispatch_original_and_register(self, decision, recovery, risk, *, protection_exit_id=None, plan=None):
+    def _dispatch_original_and_register(self, decision, recovery, risk, *, protection_exit_id=None, plan=None, position_action_ref=None):
         if self._leader_plan_mode and plan is None:
             raise ValueError("native leader plan cannot dispatch a planless order")
         result = dispatch_mock_automation_decision_from_risk(self._repository, self._bundle.runtime, decision,
             recovery, risk, account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id,
             strategy_ref=self._spec.strategy_ref,
             **({"plan": plan} if plan is not None else {}),
+            **({'position_action_ref':position_action_ref} if position_action_ref is not None else {}),
             **({'protection_exit_id':protection_exit_id} if protection_exit_id is not None else {}))
         if result[1] is not None and plan is None:
             self._register_native_unfilled(result[1], result[0], decision)
@@ -2889,6 +2933,77 @@ class MockAutomationEpisode:
             if self._leader_plan_confirmation is None or self._leader_plan_confirmation[0] != key:
                 self._leader_plan_confirmation = (key, planned_leader_root_confirmation_time(root,
                     execution.events(root.intent.intent_id, **({} if _reader is None else {'_reader': _reader}))))
+        if root is not None and hasattr(self._config.execution_contract, 'position_steps'):
+            self._read_leader_staged_facts(execution, root, revision, _reader=_reader)
+
+    def _read_leader_staged_facts(self, execution, root, revision, *, _reader=None):
+        """Recover accepted steps and share material fill facts with current management."""
+        from kiwoom_monitor.application.leader_breakout import _id
+        from kiwoom_monitor.application.leader_order_management import leader_position_order_confirmation_time
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_legs
+        args = {} if _reader is None else {'_reader': _reader}
+        account, run_id = self._bundle.account_ref, self._bundle.run_id
+        head = execution.load_plan_position(account, run_id, root.intent.symbol, root.intent.plan, **args)
+        head_key = (head.plan.expected_revision, head.fill_cursor)
+        prior = self._leader_staged_facts or {}
+        claims = prior.get('claims', ())
+        all_keys = tuple(_id('leader-position-step/v1', [self._config.execution_contract.fingerprint, index, asdict(step)])
+            for index, step in enumerate(self._config.execution_contract.position_steps))
+        if prior.get('head_key') != head_key:
+            claims = []
+            for index, key in enumerate(all_keys):
+                row = self._store.load_document('execution_leader_position_actions', account,
+                    _id('leader-plan-step-claim/v1', [head.plan.plan_id, key]), **args)
+                if row is None:
+                    break
+                claim = row['document']
+                if (claim.get('spec_id'), claim.get('run_id'), claim.get('plan_id'), claim.get('policy_ref'),
+                    claim.get('index'), claim.get('step_key')) != (
+                        self._spec.spec_id, run_id, head.plan.plan_id, head.plan.policy_ref, index, key):
+                    raise ValueError('leader_position_action_claim_changed')
+                claims.append(claim)
+        records, pages, signatures, confirmations = {}, {}, {}, {}
+        for identity in (root.intent.intent_id, *(claim['intent_id'] for claim in claims)):
+            previous = prior.get('records', {}).get(identity)
+            record = (root if identity == root.intent.intent_id else previous
+                if previous is not None and previous.state in TERMINAL_ORDER_STATES and prior.get('head_key') == head_key
+                else execution.load(identity, **args))
+            if (record is None or not isinstance(record.intent, PlannedOrderIntent)
+                    or (record.intent.account_ref, record.intent.run_id, record.intent.plan.plan_id, record.intent.plan.policy_ref)
+                    != (account, run_id, head.plan.plan_id, head.plan.policy_ref)):
+                raise ValueError('leader_position_action_order_missing_or_changed')
+            claimed = next((claim for claim in claims if claim['intent_id'] == identity), None)
+            if claimed is not None and identity not in prior.get('records', {}):
+                gate = self._repository.load_mock_automation_approved_gate(account, identity, **args)
+                if (gate is None or gate.version != 'mock_automation_plan_action_gate/v1'
+                        or (gate.position_action_ref, gate.strategy_decision_id, gate.action, gate.quantity, gate.plan)
+                        != (claimed['position_action_ref'], record.intent.decision_id, claimed['action'],
+                            record.intent.quantity, record.intent.plan)):
+                    raise ValueError('leader_position_action_approval_changed')
+            signature = (record.state, record.detailed_filled_quantity, record.broker_reported_filled_quantity,
+                record.amendment.reconciliation_pending if record.amendment is not None else False,
+                tuple((leg.broker_order_id, leg.state, leg.filled_quantity, leg.remaining_quantity)
+                      for leg in execution_broker_legs(record)))
+            events = (prior['pages'][identity] if prior.get('signatures', {}).get(identity) == signature
+                      else execution.events(identity, **args))
+            confirmed = None
+            if (record.state in TERMINAL_ORDER_STATES and record.filled_quantity == record.detailed_filled_quantity
+                    and record.filled_quantity == record.broker_reported_filled_quantity
+                    and not (record.amendment is not None and record.amendment.reconciliation_pending)):
+                confirmed = (prior['confirmations'].get(identity) if prior.get('signatures', {}).get(identity) == signature
+                             else leader_position_order_confirmation_time(record, events))
+            records[identity], pages[identity], signatures[identity], confirmations[identity] = record, events, signature, confirmed
+        keys = tuple(claim['step_key'] for claim in claims)
+        state = self._episode_position.state
+        merged = (*[key for key in state.emitted_candidate_keys if key not in all_keys], *keys)
+        if merged != state.emitted_candidate_keys:
+            self._episode_position.replace_strategy_state(replace(state, emitted_candidate_keys=merged),
+                position_time=self._position_state_time)
+        self._leader_staged_facts = dict(head_key=head_key, revision=revision, claims=tuple(claims), records=records,
+            pages=pages, signatures=signatures, confirmations=confirmations,
+            entry_notional=sum(event['quantity'] * event['price'] for identity, events in pages.items()
+                if records[identity].intent.side is OrderSide.BUY for event in events if event['event_type'] == 'FILL'),
+            confirmed_at=max(confirmations.values()) if confirmations and all(confirmations.values()) else None)
 
     def _apply_fills_and_read_control(self, execution: ExecutionRepository):
         with self._repository.mock_automation_read_scope() as reader:

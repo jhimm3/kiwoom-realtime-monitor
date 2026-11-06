@@ -103,6 +103,7 @@
     "tests.integration.test_close_mock_execution_postgres",
     "tests.integration.test_close_order_management_postgres",
     "tests.integration.test_leader_order_management_postgres",
+      "tests.integration.test_leader_staged_execution_postgres",
       "tests.integration.test_panic_mock_execution_postgres",
     "tests.integration.test_ipo_mock_execution_postgres",
     "tests.integration.test_order_amendment_postgres",

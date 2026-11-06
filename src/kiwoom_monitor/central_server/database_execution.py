@@ -303,6 +303,7 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
 
     from kiwoom_monitor.application.mock_automation_execution import (
         MOCK_AUTOMATION_DECISION_GATE_VERSION,
+        MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION,
         MockAutomationGateStatus,
         mock_automation_decision_gate_from_dict,
         mock_automation_intent_id,
@@ -314,7 +315,7 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
         mock_automation_recovery_decision_from_dict,
     )
     from kiwoom_monitor.application.mock_automation_risk import PROTECTION_EXIT_VERSION, mock_automation_risk_snapshot_from_dict
-    from kiwoom_monitor.domain.execution_activation import forward_spec_from_dict, mock_automation_spec_from_dict
+    from kiwoom_monitor.domain.execution_activation import forward_spec_from_dict, mock_automation_spec_from_dict, LEADER_NATIVE_PLAN_MODE
     from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
 
     recovery = ownership.get("plan_recovery") if ownership is not None else None
@@ -329,7 +330,7 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
         gate.plan is None
         or asdict(gate.plan) != value["plan"]
         or gate.status is not MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION
-        or gate.version != MOCK_AUTOMATION_DECISION_GATE_VERSION
+        or gate.version not in {MOCK_AUTOMATION_DECISION_GATE_VERSION, MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION}
         or gate.spec_id != ownership.get("active_spec_id")
         or gate.control_revision != ownership.get("control_revision")
         or (gate.account_ref, gate.execution_run_id, gate.strategy_decision_id,
@@ -337,7 +338,7 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
             account_ref, value["run_id"], value["decision_id"], value["intent_id"],
             value["symbol"], value["quantity"], value["limit_price"])
         or value["intent_id"] != mock_automation_intent_id(gate.spec_id, gate.strategy_decision_id)
-        or value["side"] != {"ENTER": "BUY", "EXIT": "SELL"}.get(gate.action)
+        or value["side"] != {"ENTER": "BUY", "ADD": "BUY", "REDUCE": "SELL", "EXIT": "SELL"}.get(gate.action)
         or value["order_type"] != "LIMIT"
         or gate.decided_at != datetime.fromisoformat(value["created_at"])
     ):
@@ -354,6 +355,15 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
     if profile_doc is None:
         raise RuntimeError("PLANNED_EXECUTION_FORWARD_PROFILE_MISSING")
     profile = forward_spec_from_dict(profile_doc)
+    if (gate.version == MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION and (
+            spec.execution_plan_mode != LEADER_NATIVE_PLAN_MODE
+            or profile.family_version != 'leader_breakout/v1' or gate.action not in {'ADD', 'REDUCE'})):
+        raise RuntimeError('PLANNED_POSITION_ACTION_FAMILY_CHANGED')
+    if gate.version == MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION:
+        source = _plan_document(cursor, p, 'execution_leader_decisions', account_ref, value['decision_id']) or {}
+        raw = (source.get('snapshot') or {}).get('feature_values', [{}])[0].get('value', {})
+        if not raw.get('position_step') or raw.get('proposal') != gate.action:
+            raise RuntimeError('PLANNED_POSITION_ACTION_EVIDENCE_MISSING')
     policy = mock_automation_order_policy_version(profile.family_version, spec.session_profile)
     if policy == 'leader_execution_adapter/v1' and value['side'] == 'SELL' and ownership.get('protection_claim') is not None:
         policy = PROTECTION_EXIT_VERSION  # The ownership transaction already validated the typed proof.
@@ -370,7 +380,7 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
     expiry = datetime.fromisoformat(value["expires_at"])
     fingerprint = mock_account_recovery_fingerprint(recovery)
     statuses = {MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED}
-    if value["side"] == "SELL":
+    if value["side"] == "SELL" or (gate.version == MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION and gate.action == 'ADD'):
         statuses.add(MockAutomationRecoveryStatus.MANAGE_ONLY_ORDERS_DISABLED)
     if (
         spec.account_scope.account_ref != account_ref or spec.spec_id != gate.spec_id
@@ -400,11 +410,11 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
     )
     if cursor.fetchone() is not None:
         raise RuntimeError("PLANNED_EXECUTION_RISK_OR_RECOVERY_CHANGED")
-    return gate.gate_id, spec
+    return gate.gate_id, spec, gate.action
 
 
 def _claim_plan_position(cursor, p, value, ownership, now_provider):
-    gate_id, spec = _require_plan_approval(cursor, p, value, ownership, now_provider)
+    gate_id, spec, action = _require_plan_approval(cursor, p, value, ownership, now_provider)
     account_ref, ref = value["account_ref"], value["plan"]
     head = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account_ref, ref["plan_id"])
     if head is None:
@@ -428,8 +438,10 @@ def _claim_plan_position(cursor, p, value, ownership, now_provider):
         raise RuntimeError("EXECUTION_PLAN_SUBMISSION_UNKNOWN_LIMIT")
     account = ownership["plan_recovery"].account
     if value["side"] == "BUY":
-        if any(account.positions.values()):
+        if any(account.positions.values()) and action != 'ADD':
             raise RuntimeError("PLANNED_ENTRY_REQUIRES_FLAT_ACCOUNT")
+        if action == 'ADD' and (head['quantity'] <= 0 or account.positions.get(value['symbol'], 0) < head['quantity']):
+            raise RuntimeError('PLANNED_ADDITIONAL_ENTRY_REQUIRES_OWNED_POSITION')
         if any(not row.get("plan") or row["run_id"] != value["run_id"] for row in active):
             raise RuntimeError("PLANNED_EXECUTION_UNVERIFIED_OPEN_ORDER")
         buys = [row for row in active if row["side"] == "BUY"]
@@ -649,6 +661,12 @@ def _require_leader_order_management_claim(cursor, p, stored, value, event, owne
         and not control.get('entry_resume_required', False) and leader_current_entry_matches(config, pin, settings, now))
     notice = claim.get('protection_notice')
     stop_risk = None
+    plan_entry_notional = None
+    staged_orders = staged_pages = None
+    if hasattr(config.execution_contract, 'position_steps') and stored['side'] == 'BUY':
+        staged_orders, staged_pages = _leader_plan_ledger(cursor, p, account, stored['run_id'], stored['plan']['plan_id'])
+        plan_entry_notional = sum(row['quantity'] * row['price'] for identity, events in staged_pages.items()
+            if staged_orders[identity]['side'] == 'BUY' for _, row in events if row['event_type'] == 'FILL')
     if notice is not None or stored['policy_version'] == 'mock-protection-exit/v1':
         checkpoint = document('execution_mock_automation_runner_current', 'current')
         if ((checkpoint.get('spec_id'), checkpoint.get('execution_run_id'), checkpoint.get('leader_position_proof'))
@@ -657,20 +675,32 @@ def _require_leader_order_management_claim(cursor, p, stored, value, event, owne
         if stored['side'] == 'BUY':
             trigger = notice['planned_leader_stop']
             stop_risk = mock_automation_risk_snapshot_from_dict(document('execution_mock_automation_risk_snapshots', trigger['risk_snapshot_id']))
-            cursor.execute(f'SELECT accepted_sequence,document_json FROM central_execution_events WHERE intent_id={p} ORDER BY accepted_sequence',
-                           (stored['intent_id'],))
-            quantity = sum(row['quantity'] for sequence, raw in cursor.fetchall()
-                if sequence <= stop_risk.execution_event_high_watermark
-                and (row := _json_document(raw))['event_type'] == 'FILL' and row['broker_execution_id'])
+            if staged_pages is not None:
+                quantity = sum((1 if staged_orders[identity]['side'] == 'BUY' else -1) * row['quantity']
+                    for identity, events in staged_pages.items() for sequence, row in events
+                    if sequence <= stop_risk.execution_event_high_watermark and row['event_type'] == 'FILL')
+            else:
+                cursor.execute(f'SELECT accepted_sequence,document_json FROM central_execution_events WHERE intent_id={p} ORDER BY accepted_sequence',
+                               (stored['intent_id'],))
+                quantity = sum(row['quantity'] for sequence, raw in cursor.fetchall()
+                    if sequence <= stop_risk.execution_event_high_watermark
+                    and (row := _json_document(raw))['event_type'] == 'FILL' and row['broker_execution_id'])
             if quantity != trigger['stop_loss']['quantity']:
                 raise RuntimeError('LEADER_CURRENT_ORDER_ORIGINAL_STOP_FILLS_CHANGED')
     source = (notice['planned_leader_protection_exit'] if stored['policy_version'] == 'mock-protection-exit/v1'
               else document('execution_leader_decisions', stored['decision_id']))
+    if (source.get('snapshot') or {}).get('feature_values', [{}])[0].get('value', {}).get('position_step'):
+        from kiwoom_monitor.application.leader_breakout import leader_position_action_ref
+        if (approval.get('version'), approval.get('position_action_ref')) != (
+                'mock_automation_plan_action_gate/v1',
+                leader_position_action_ref(config, pin, source['snapshot']['feature_values'][0]['value'])):
+            raise RuntimeError('LEADER_CURRENT_ORDER_POSITION_ACTION_CHANGED')
     assessed = assess_leader_order_management(spec, run_id=stored['run_id'], config=config, position_proof=pin,
         record=record, head=head, order_events=[_json_document(row[0]) for row in _execution_event_rows(cursor, stored['intent_id'], p)],
         recovery=ownership['plan_recovery'], risk=mock_automation_risk_snapshot_from_dict(document('execution_mock_automation_current_risk', account)),
         quote=claim['quote'], decided_at=datetime.fromisoformat(claim['decided_at']), now=now, entry_enabled=enabled,
-        decision_source=source, protection_notice=notice, stop_risk=stop_risk)
+        decision_source=source, protection_notice=notice, stop_risk=stop_risk,
+        plan_entry_notional_won=plan_entry_notional)
     action = 'AMEND' if event['event_type'] == 'AMENDMENT_STARTED' else 'CANCEL'
     if (assessed != claim or claim['action'] != action or event['broker_order_id'] != claim['broker_order_id']
             or action == 'AMEND' and (event['quantity'], event['price']) != (claim['quantity'], claim['limit_price'])):
@@ -942,7 +972,7 @@ def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider
     """Bind the already-approved generic gate to the new Family's exact evidence."""
     from kiwoom_monitor.application.leader_breakout import (
         LeaderBreakoutConfig, LeaderBreakoutPolicy, LeaderBreakoutState, evaluate_leader_breakout_trade,
-        validate_leader_position_proof, leader_evaluation,
+        validate_leader_position_proof, leader_evaluation, evaluate_leader_position_step,
     )
     from kiwoom_monitor.application.research_families import parse_strategy_config
     from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
@@ -962,6 +992,10 @@ def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider
     config = parse_strategy_config(package.candidate_spec['family'], package.candidate_spec['parameters'])
     if not isinstance(config, LeaderBreakoutConfig) or package.package_hash != spec.candidate_package_hash:
         raise RuntimeError('LEADER_EXECUTION_PACKAGE_CHANGED')
+    if hasattr(config.execution_contract, 'position_steps') and (
+            spec.execution_plan_mode != 'leader-0b-native-plan/v1' or spec.unfilled_execution_policy is None
+            or spec.unfilled_execution_policy.accepted_order_management is None):
+        raise RuntimeError('STAGED_LEADER_CURRENT_ORDER_POLICY_REQUIRED')
     record = document('execution_leader_decisions', account, value['decision_id'])
     raw = record['snapshot']['feature_values'][0]['value']
     policy = LeaderBreakoutPolicy.from_dict(record['policy'])
@@ -973,7 +1007,7 @@ def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider
     plan = value.get("plan")
     if plan is not None and (
         plan["plan_id"] != proof["entry_intent_id"] or plan["policy_ref"] != proof["proof_id"]
-        or (value["side"] == "BUY" and plan["expected_revision"] != 0)
+        or (value["side"] == "BUY" and raw.get('position_step') is None and plan["expected_revision"] != 0)
     ):
         raise RuntimeError("LEADER_EXECUTION_PLAN_PROOF_CHANGED")
     saved = document('execution_leader_position_context', account, proof['entry_intent_id'])
@@ -1007,6 +1041,11 @@ def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider
     assessment = session_clock_assessment(config, state, datetime.fromisoformat(raw['decided_at']))
     if assessment['exit_required'] and reproduced['status'] in {'HOLD','HARD_EXIT','INVALIDATED'}:
         reproduced = {**reproduced, 'proposal':'EXIT', 'reasons':[*reproduced['reasons'],*assessment['reasons']]}
+    if raw.get('position_step') is not None:
+        confirmation = raw['position_step'].get('confirmation')
+        before = LeaderBreakoutState(**confirmation['state_before']) if confirmation is not None else None
+        reproduced, _ = evaluate_leader_position_step(configured, reproduced, state, context,
+            source=observation['source'], step_state=before, entry_enabled=True)
     canonical = lambda obj: json.dumps(obj, sort_keys=True, separators=(',', ':'))
     if canonical(reproduced) != canonical(raw):
         raise RuntimeError('LEADER_0B_DECISION_PROOF_CHANGED')
@@ -1020,7 +1059,7 @@ def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider
             or not 0 <= (now-observed).total_seconds() <= config.max_data_age_seconds
             or value['symbol'] != expected.decision.symbol or value['quantity'] != expected.decision.quantity
             or value['decision_id'] != expected.decision.decision_id
-            or value['side'] != {'ENTER': 'BUY', 'EXIT': 'SELL'}.get(expected.decision.final_action)
+            or value['side'] != {'ENTER': 'BUY', 'ADD': 'BUY', 'REDUCE': 'SELL', 'EXIT': 'SELL'}.get(expected.decision.final_action)
             or value['order_type'] != config.execution_contract.order_type
             or value['limit_price'] != expected.decision.signal_reference_price):
         raise RuntimeError('LEADER_PRICE_OR_ORDER_CHANGED')
@@ -1032,6 +1071,109 @@ def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider
         if (LeaderBreakoutConfig.from_dict(live.to_dict()).rules_hash != config.rules_hash
                 or context not in live.contexts or now >= datetime.fromisoformat(context.valid_until)):
             raise RuntimeError('LEADER_CURRENT_ENTRY_CONTEXT_CHANGED')
+        if hasattr(config.execution_contract, 'position_steps') and settings.get('shadow_candidate_enabled') is not True:
+            raise RuntimeError('LEADER_CURRENT_ENTRY_DISABLED')
+    if raw.get('position_step') is not None:
+        _require_leader_position_action(cursor, p, value, spec, configured, proof, raw, state, now)
+
+
+def _require_leader_position_action(cursor, p, value, spec, config, pin, raw, state, now):
+    """Single-use staged action and cumulative entry budget, in the owning transaction."""
+    from dataclasses import asdict
+    from kiwoom_monitor.application.leader_breakout import leader_position_action_ref, leader_next_position_step, _id
+    from kiwoom_monitor.application.mock_automation_execution import MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION
+    from kiwoom_monitor.domain.strategy_contract import LeaderBreakoutStagedExecutionContract
+    from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, execution_broker_legs
+    terms = config.execution_contract
+    if not isinstance(terms, LeaderBreakoutStagedExecutionContract) or not terms.position_steps:
+        raise RuntimeError('LEADER_POSITION_ACTION_UNCONFIGURED')
+    account, plan = value['account_ref'], value['plan']
+    metadata = raw['position_step']
+    selected = leader_next_position_step(config, state)
+    if selected is None or selected[0] != metadata['index'] or selected[2] != metadata['step_key']:
+        raise RuntimeError('LEADER_POSITION_ACTION_SEQUENCE_CHANGED')
+    gate = _plan_document(cursor, p, 'execution_mock_automation_approved_gates', account, value['intent_id']) or {}
+    action_ref = leader_position_action_ref(config, pin, raw)
+    if (gate.get('version'), gate.get('action'), gate.get('position_action_ref')) != (
+            MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION, selected[1].action, action_ref):
+        raise RuntimeError('LEADER_POSITION_ACTION_APPROVAL_CHANGED')
+    head = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, plan['plan_id']) or {}
+    if (head.get('policy_ref'), head.get('run_id'), head.get('symbol'), head.get('quantity')) != (
+            pin['proof_id'], value['run_id'], value['symbol'], state.position_quantity) or head.get('unreconciled_sell_quantity'):
+        raise RuntimeError('LEADER_POSITION_ACTION_OWNED_QUANTITY_CHANGED')
+    index = metadata['index']
+    prior_id = pin['entry_intent_id']
+    if index:
+        step = terms.position_steps[index-1]
+        key = _id('leader-position-step/v1', [terms.fingerprint, index-1, asdict(step)])
+        prior = _plan_document(cursor, p, 'execution_leader_position_actions', account,
+            _id('leader-plan-step-claim/v1', [plan['plan_id'], key])) or {}
+        if (prior.get('plan_id'), prior.get('policy_ref'), prior.get('step_key'), prior.get('index')) != (
+                plan['plan_id'], pin['proof_id'], key, index-1):
+            raise RuntimeError('LEADER_PREVIOUS_POSITION_ACTION_MISSING')
+        prior_id = prior.get('intent_id', '')
+    previous_row = _execution_intent_row(cursor, prior_id, p)
+    previous = _record_from_document(_json_document(previous_row[0])) if previous_row else None
+    if (previous is None or previous.state not in TERMINAL_ORDER_STATES
+            or getattr(previous.intent, 'plan', None) is None
+            or (previous.intent.account_ref, previous.intent.run_id, previous.intent.symbol,
+                previous.intent.policy_version) != (account, value['run_id'], value['symbol'], 'leader_execution_adapter/v1')
+            or previous.intent.plan.plan_id != plan['plan_id'] or previous.intent.plan.policy_ref != pin['proof_id']
+            or previous.filled_quantity != previous.detailed_filled_quantity
+            or previous.filled_quantity != previous.broker_reported_filled_quantity
+            or any(leg.state not in TERMINAL_ORDER_STATES
+                   or leg.detailed_filled_quantity != leg.broker_reported_filled_quantity
+                   for leg in execution_broker_legs(previous))):
+        raise RuntimeError('LEADER_PREVIOUS_POSITION_ACTION_UNCONFIRMED')
+    if index:
+        prior_source = _plan_document(cursor, p, 'execution_leader_decisions', account, previous.intent.decision_id) or {}
+        prior_raw = (prior_source.get('snapshot') or {}).get('feature_values', [{}])[0].get('value', {})
+        if ((prior_raw.get('position_step') or {}).get('step_key') != key
+                or prior.get('decision_id') != previous.intent.decision_id
+                or prior.get('position_action_ref') != leader_position_action_ref(config, pin, prior_raw)):
+            raise RuntimeError('LEADER_PREVIOUS_POSITION_ACTION_CHANGED')
+    if value['side'] == 'BUY':
+        orders, pages = _leader_plan_ledger(cursor, p, account, value['run_id'], plan['plan_id'])
+        spent = sum(row['quantity'] * row['price'] for identity, events in pages.items()
+                    if orders[identity]['side'] == 'BUY' for _, row in events if row['event_type'] == 'FILL')
+        if spent + value['quantity'] * value['limit_price'] > min(terms.capital_won, spec.maximum_capital_won):
+            raise RuntimeError('LEADER_POSITION_ENTRY_BUDGET_EXCEEDED')
+    collection = 'execution_leader_position_actions'
+    key = _id('leader-plan-step-claim/v1', [plan['plan_id'], metadata['step_key']])
+    claim = dict(version='leader-position-action-claim/v1', plan_id=plan['plan_id'], policy_ref=pin['proof_id'],
+        run_id=value['run_id'], spec_id=spec.spec_id, index=index, step_key=metadata['step_key'],
+        intent_id=value['intent_id'], decision_id=value['decision_id'], position_action_ref=action_ref,
+        action=selected[1].action, quantity=value['quantity'])
+    existing = _plan_document(cursor, p, collection, account, key)
+    if existing is not None and existing != claim:
+        raise RuntimeError('LEADER_POSITION_ACTION_ALREADY_CLAIMED')
+    if head.get('revision') != plan['expected_revision'] + (existing is not None):
+        raise RuntimeError('LEADER_POSITION_ACTION_REVISION_CHANGED')
+    if existing is None:
+        cursor.execute(f'INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) '
+            f'VALUES({p},{p},{p},{p},{p}) ON CONFLICT(collection,owner,document_key) DO NOTHING',
+            (collection, account, key, now.timestamp(), _event_document(claim)))
+        if _plan_document(cursor, p, collection, account, key) != claim:
+            raise RuntimeError('LEADER_POSITION_ACTION_ALREADY_CLAIMED')
+
+
+def _leader_plan_ledger(cursor, p, account, run_id, plan_id):
+    """One transaction-scoped plan projection; no new store or account owner."""
+    projection = "i.document_json->'plan'->>'plan_id'" if p == '%s' else "json_extract(i.document_json,'$.plan.plan_id')"
+    cursor.execute('SELECT i.document_json,e.accepted_sequence,e.document_json '
+        'FROM central_execution_intents i LEFT JOIN central_execution_events e ON e.intent_id=i.intent_id '
+        f'WHERE i.environment={p} AND i.account_ref={p} AND i.run_id={p} AND {projection}={p} '
+        'ORDER BY e.accepted_sequence', ('mock', account, run_id, plan_id))
+    orders, pages = {}, {}
+    for intent, sequence, event in cursor.fetchall():
+        value = _json_document(intent)
+        identity = value['intent_id']
+        orders[identity] = value
+        pages.setdefault(identity, [])
+        if event is not None:
+            pages[identity].append((sequence, _json_document(event)))
+    return orders, pages
 
 
 def _require_mock_replacement_claim(cursor, ownership, value, p, *, new_intent_claim, now_provider=None):
@@ -1118,6 +1260,61 @@ def _require_mock_replacement_claim(cursor, ownership, value, p, *, new_intent_c
             raise RuntimeError('MOCK_REPLACEMENT_ALREADY_CLAIMED')
 
 
+def _require_staged_leader_protection_facts(cursor, p, value, pin, trigger, original_risk, risk, workflow):
+    """Actual fills from every accepted lot/reduction, with the original stop cut."""
+    from kiwoom_monitor.application.leader_order_management import leader_position_order_confirmation_time
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, execution_broker_legs
+    from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
+    plan, account = value['plan'], value['account_ref']
+    orders, pages = _leader_plan_ledger(cursor, p, account, value['run_id'], plan['plan_id'])
+    root = orders.get(pin['entry_intent_id']) or {}
+    if (root.get('side') != 'BUY' or root.get('state') not in {'FILLED', 'CANCELLED'}
+            or not root.get('detailed_filled_quantity') or not root.get('mock_plan_approval')):
+        raise RuntimeError('STAGED_LEADER_PROTECTION_ORIGIN_UNCONFIRMED')
+    fills, confirmations = [], {}
+    for identity, document in orders.items():
+        if identity == value['intent_id']:
+            continue  # This protection reservation is validated by the shared final claim.
+        record = _record_from_document(document)
+        if (record.state not in TERMINAL_ORDER_STATES or record.intent.policy_version != 'leader_execution_adapter/v1'
+                or record.intent.plan.policy_ref != pin['proof_id'] or record.intent.symbol != value['symbol']
+                or record.filled_quantity != record.detailed_filled_quantity
+                or record.filled_quantity != record.broker_reported_filled_quantity
+                or any(leg.state not in TERMINAL_ORDER_STATES
+                       or leg.detailed_filled_quantity != leg.broker_reported_filled_quantity
+                       for leg in execution_broker_legs(record))):
+            raise RuntimeError('STAGED_LEADER_PROTECTION_LOT_UNCONFIRMED')
+        events = pages[identity]
+        confirmations[identity] = leader_position_order_confirmation_time(record, tuple(row for _, row in events))
+        detailed = [(sequence, row) for sequence, row in events if row['event_type'] == 'FILL']
+        if sum(row['quantity'] for _, row in detailed) != record.detailed_filled_quantity:
+            raise RuntimeError('STAGED_LEADER_PROTECTION_DETAIL_CHANGED')
+        fills.extend((sequence, 1 if record.intent.side.value == 'BUY' else -1, row) for sequence, row in detailed)
+    quantity = original_quantity = last_fill = 0
+    seen = set()
+    for sequence, sign, event in sorted(fills, key=lambda row: row[0]):
+        identity = (event['intent_id'], event['broker_order_id'], event['broker_execution_id'])
+        if (identity in seen or not identity[2] or event['quantity'] <= 0 or event['price'] <= 0
+                or sequence > risk.execution_event_high_watermark):
+            raise RuntimeError('STAGED_LEADER_PROTECTION_FILL_CUT_CHANGED')
+        seen.add(identity)
+        quantity += sign * event['quantity']
+        if quantity < 0:
+            raise RuntimeError('STAGED_LEADER_PROTECTION_NEGATIVE_POSITION')
+        if sequence <= original_risk.execution_event_high_watermark:
+            original_quantity = quantity
+        last_fill = sequence
+    head = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, plan['plan_id']) or {}
+    if (quantity <= 0 or (head.get('quantity'), head.get('fill_cursor')) != (quantity, last_fill)
+            or head.get('unreconciled_sell_quantity')
+            or original_quantity != trigger.stop_loss['quantity']):
+        raise RuntimeError('STAGED_LEADER_PROTECTION_POSITION_CHANGED')
+    available = datetime.fromisoformat(workflow['snapshot']['observation']['received_at'])
+    if available < max(confirmations.values()):
+        raise RuntimeError('STAGED_LEADER_PROTECTION_QUOTE_PREDATES_LOT_CONFIRMATION')
+    return root['state'], confirmations[pin['entry_intent_id']], head, original_quantity
+
+
 def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, stored, now_provider, submission_claim):
     """Reproduce the two proof cuts while holding the existing account owner transaction."""
     from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
@@ -1174,121 +1371,127 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
             or gate.get('replacement_binding') is not None or gate.get('plan') != value['plan']):
         raise RuntimeError('PLANNED_LEADER_PROTECTION_APPROVAL_CHANGED')
 
+    from kiwoom_monitor.domain.strategy_contract import LeaderBreakoutStagedExecutionContract
     lock = ' FOR UPDATE' if p == '%s' else ''
-    cursor.execute(f'SELECT document_json FROM central_execution_intents WHERE intent_id={p}' + lock, (plan.plan_id,))
-    row = cursor.fetchone()
-    root = _json_document(row[0]) if row else {}
-    root_plan = root.get('plan') or {}
-    root_state = root.get('state')
-    if ((root.get('environment'), root.get('account_ref'), root.get('run_id'), root.get('symbol'), root.get('side'),
-         root.get('policy_version'), root_plan.get('plan_id'), root_plan.get('policy_ref'))
-            != ('mock', account, run_id, value['symbol'], 'BUY', 'leader_execution_adapter/v1',
-                plan.plan_id, plan.policy_ref)
-            or root_state not in {'CANCELLED', 'FILLED'}
-            or not root.get('broker_order_id') or not root.get('mock_plan_approval')
-            or not 0 < root['detailed_filled_quantity'] == root['broker_reported_filled_quantity']
-            == root['filled_quantity'] <= root['quantity']
-            or (root_state == 'FILLED') != (root['filled_quantity'] == root['quantity'])):
-        raise RuntimeError('PLANNED_LEADER_PROTECTION_ROOT_UNCONFIRMED')
-    cursor.execute(f'SELECT accepted_sequence,document_json FROM central_execution_events WHERE intent_id={p} '
-                   'ORDER BY accepted_sequence', (plan.plan_id,))
-    root_events = [(sequence, _json_document(raw)) for sequence, raw in cursor.fetchall()]
-    current_management = spec.unfilled_execution_policy.accepted_order_management is not None
-    if current_management:
-        root_record = _record_from_document(root)
-        confirmed_at = planned_leader_root_confirmation_time(root_record, tuple(row for _, row in root_events))
-        legs = execution_broker_legs(root_record)
-        orders = {order.broker_order_id: order for order in recovery.orders}
-        if any(leg.broker_order_id not in orders or leg.state.value not in {'FILLED', 'CANCELLED'}
-               or (orders[leg.broker_order_id].account_ref, orders[leg.broker_order_id].symbol,
-                   orders[leg.broker_order_id].state, orders[leg.broker_order_id].filled_quantity,
-                   orders[leg.broker_order_id].remaining_quantity)
-               != (account, root['symbol'], leg.state, leg.filled_quantity, 0) for leg in legs):
-            raise RuntimeError('PLANNED_LEADER_PROTECTION_PHYSICAL_CUT_CHANGED')
+    if isinstance(config.execution_contract, LeaderBreakoutStagedExecutionContract):
+        root_state, confirmed_at, head, original_quantity = _require_staged_leader_protection_facts(
+            cursor, p, value, pin, trigger, original_risk, risk, workflow)
     else:
-        confirmed_at = datetime.fromisoformat(root['last_broker_as_of'])
-        if not any(order.broker_order_id == root['broker_order_id'] and order.state.value == root_state
-                   and order.account_ref == account
-                   and order.symbol == root['symbol'] and order.filled_quantity == root['detailed_filled_quantity']
-                   and order.remaining_quantity == 0 and order.as_of == confirmed_at for order in recovery.orders):
-            raise RuntimeError('PLANNED_LEADER_PROTECTION_BROKER_CUT_CHANGED')
-    original_quantity = current_quantity = fill_cursor = cancel_sequence = unknown_sequence = 0
-    expired_entry_cancel = False
-    expiry_fill_quantity = 0
-    fill_ids = []
-    event, terminal_sequence = {}, 0
-    cancelled_physical = set()
-    for sequence, event in root_events:
-        terminal_sequence = sequence
-        if event['event_type'] == 'CANCEL_STARTED':
-            if current_management:
-                current_cancel = event.get('leader_order_management_claim') or {}
-                if (current_cancel.get('version') != 'leader-current-order-management/v1'
-                        or current_cancel.get('action') != 'CANCEL'
-                        or (current_cancel.get('plan', {}).get('plan_id'), current_cancel.get('entry_proof_id'))
-                        != (plan.plan_id, pin['proof_id']) or event['broker_order_id'] in cancelled_physical):
+        lock = ' FOR UPDATE' if p == '%s' else ''
+        cursor.execute(f'SELECT document_json FROM central_execution_intents WHERE intent_id={p}' + lock, (plan.plan_id,))
+        row = cursor.fetchone()
+        root = _json_document(row[0]) if row else {}
+        root_plan = root.get('plan') or {}
+        root_state = root.get('state')
+        if ((root.get('environment'), root.get('account_ref'), root.get('run_id'), root.get('symbol'), root.get('side'),
+             root.get('policy_version'), root_plan.get('plan_id'), root_plan.get('policy_ref'))
+                != ('mock', account, run_id, value['symbol'], 'BUY', 'leader_execution_adapter/v1',
+                    plan.plan_id, plan.policy_ref)
+                or root_state not in {'CANCELLED', 'FILLED'}
+                or not root.get('broker_order_id') or not root.get('mock_plan_approval')
+                or not 0 < root['detailed_filled_quantity'] == root['broker_reported_filled_quantity']
+                == root['filled_quantity'] <= root['quantity']
+                or (root_state == 'FILLED') != (root['filled_quantity'] == root['quantity'])):
+            raise RuntimeError('PLANNED_LEADER_PROTECTION_ROOT_UNCONFIRMED')
+        cursor.execute(f'SELECT accepted_sequence,document_json FROM central_execution_events WHERE intent_id={p} '
+                       'ORDER BY accepted_sequence', (plan.plan_id,))
+        root_events = [(sequence, _json_document(raw)) for sequence, raw in cursor.fetchall()]
+        current_management = spec.unfilled_execution_policy.accepted_order_management is not None
+        if current_management:
+            root_record = _record_from_document(root)
+            confirmed_at = planned_leader_root_confirmation_time(root_record, tuple(row for _, row in root_events))
+            legs = execution_broker_legs(root_record)
+            orders = {order.broker_order_id: order for order in recovery.orders}
+            if any(leg.broker_order_id not in orders or leg.state.value not in {'FILLED', 'CANCELLED'}
+                   or (orders[leg.broker_order_id].account_ref, orders[leg.broker_order_id].symbol,
+                       orders[leg.broker_order_id].state, orders[leg.broker_order_id].filled_quantity,
+                       orders[leg.broker_order_id].remaining_quantity)
+                   != (account, root['symbol'], leg.state, leg.filled_quantity, 0) for leg in legs):
+                raise RuntimeError('PLANNED_LEADER_PROTECTION_PHYSICAL_CUT_CHANGED')
+        else:
+            confirmed_at = datetime.fromisoformat(root['last_broker_as_of'])
+            if not any(order.broker_order_id == root['broker_order_id'] and order.state.value == root_state
+                       and order.account_ref == account
+                       and order.symbol == root['symbol'] and order.filled_quantity == root['detailed_filled_quantity']
+                       and order.remaining_quantity == 0 and order.as_of == confirmed_at for order in recovery.orders):
+                raise RuntimeError('PLANNED_LEADER_PROTECTION_BROKER_CUT_CHANGED')
+        original_quantity = current_quantity = fill_cursor = cancel_sequence = unknown_sequence = 0
+        expired_entry_cancel = False
+        expiry_fill_quantity = 0
+        fill_ids = []
+        event, terminal_sequence = {}, 0
+        cancelled_physical = set()
+        for sequence, event in root_events:
+            terminal_sequence = sequence
+            if event['event_type'] == 'CANCEL_STARTED':
+                if current_management:
+                    current_cancel = event.get('leader_order_management_claim') or {}
+                    if (current_cancel.get('version') != 'leader-current-order-management/v1'
+                            or current_cancel.get('action') != 'CANCEL'
+                            or (current_cancel.get('plan', {}).get('plan_id'), current_cancel.get('entry_proof_id'))
+                            != (plan.plan_id, pin['proof_id']) or event['broker_order_id'] in cancelled_physical):
+                        raise RuntimeError('PLANNED_LEADER_PROTECTION_CANCEL_PROOF_CHANGED')
+                    cancelled_physical.add(event['broker_order_id'])
+                    continue
+                if 'planned_leader_cancel_claim' not in event or event['state'] != 'CANCEL_PENDING':
                     raise RuntimeError('PLANNED_LEADER_PROTECTION_CANCEL_PROOF_CHANGED')
-                cancelled_physical.add(event['broker_order_id'])
-                continue
-            if 'planned_leader_cancel_claim' not in event or event['state'] != 'CANCEL_PENDING':
-                raise RuntimeError('PLANNED_LEADER_PROTECTION_CANCEL_PROOF_CHANGED')
-            cancel_document = event['planned_leader_cancel_claim']
-            expired_entry_cancel = cancel_document.get('version') == PLANNED_LEADER_EXPIRED_ENTRY_CANCEL_VERSION
-            if expired_entry_cancel:
-                cancel = PlannedLeaderExpiredEntryCancelClaim.from_dict(cancel_document, recovery)
-                expiry_fill_quantity = cancel.detailed_quantity_at_cancel
-                same_stop = expiry_fill_quantity == current_quantity  # Existing FILLs at the expiry cut.
-            else:
-                cancel = PlannedLeaderCancelClaim.from_dict(cancel_document)
-                same_stop = (cancel.trigger_id, cancel.notice_revision) == (trigger.trigger_id, notice['revision'])
-            if (cancel_sequence or not same_stop or (cancel.plan.plan_id, cancel.plan.policy_ref)
-                    != (plan.plan_id, plan.policy_ref)):
-                raise RuntimeError('PLANNED_LEADER_PROTECTION_CANCEL_PROOF_CHANGED')
-            cancel_sequence = sequence
-        if not current_management and root_state == 'FILLED' and event['event_type'] in {
-            'CANCEL_RESPONSE_UNKNOWN', 'CANCEL_ACCEPTED', 'CANCEL_REJECTED',
-        }:
-            if (not cancel_sequence or unknown_sequence or event['event_type'] != 'CANCEL_RESPONSE_UNKNOWN'
-                    or event['state'] != 'CANCEL_PENDING'):
-                raise RuntimeError('PLANNED_LEADER_PROTECTION_CANCEL_PROOF_CHANGED')
-            unknown_sequence = sequence
-        if event['event_type'] == 'FILL' and event['broker_execution_id']:
-            current_quantity += event['quantity']
-            fill_ids.append(event['broker_execution_id'])
-            fill_cursor = sequence
-            if sequence <= original_risk.execution_event_high_watermark:
-                original_quantity += event['quantity']
-    head = document(PLAN_POSITION_COLLECTION, plan.plan_id)
-    original_cursor = original_risk.execution_event_high_watermark
-    if current_management:
-        terminal_confirmed = (0 < fill_cursor < terminal_sequence <= risk.execution_event_high_watermark
-                              and event.get('state') == root_state and event.get('event_type') == 'BROKER_RECONCILED')
-    elif expired_entry_cancel:
-        # An expiry claim cannot arm a stop. The new stop must follow the
-        # broker-confirmed terminal root and the Risk must already own its fills.
-        terminal_confirmed = (
-            cancel_sequence < terminal_sequence <= original_cursor
-            and 0 < fill_cursor <= terminal_sequence and (expiry_fill_quantity > 0 or cancel_sequence < fill_cursor)
-            and confirmed_at < datetime.fromisoformat(trigger.stop_loss['available_at'])
-            and event.get('event_type') in ({'BROKER_RECONCILED'} if root_state == 'CANCELLED' else {'FILL', 'BROKER_RECONCILED'})
-            and (root_state == 'CANCELLED' or cancel_sequence < unknown_sequence < fill_cursor)
-        )
-    elif root_state == 'CANCELLED':
-        terminal_confirmed = (original_cursor < cancel_sequence < terminal_sequence
-                              and event.get('event_type') == 'BROKER_RECONCILED')
-    else:
-        terminal_confirmed = (original_cursor < fill_cursor <= terminal_sequence
-                              and event.get('event_type') in {'FILL', 'BROKER_RECONCILED'}
-                              and (not cancel_sequence or original_cursor < cancel_sequence < unknown_sequence < fill_cursor))
-    if (not terminal_confirmed or terminal_sequence > risk.execution_event_high_watermark
-            or event.get('state') != root_state
-            or (event.get('broker_order_id') not in {leg.broker_order_id for leg in legs} if current_management
-                else event.get('broker_order_id') != root['broker_order_id'])
-            or datetime.fromisoformat(event['broker_as_of']) != (
-                datetime.fromisoformat(root['last_broker_as_of']) if current_management else confirmed_at)
-            or (current_quantity, fill_ids, fill_cursor) != (root['detailed_filled_quantity'], root['fill_ids'], head['fill_cursor'])
-            or head['quantity'] != current_quantity):
-        raise RuntimeError('PLANNED_LEADER_PROTECTION_DETAILED_FILLS_UNCONFIRMED')
+                cancel_document = event['planned_leader_cancel_claim']
+                expired_entry_cancel = cancel_document.get('version') == PLANNED_LEADER_EXPIRED_ENTRY_CANCEL_VERSION
+                if expired_entry_cancel:
+                    cancel = PlannedLeaderExpiredEntryCancelClaim.from_dict(cancel_document, recovery)
+                    expiry_fill_quantity = cancel.detailed_quantity_at_cancel
+                    same_stop = expiry_fill_quantity == current_quantity  # Existing FILLs at the expiry cut.
+                else:
+                    cancel = PlannedLeaderCancelClaim.from_dict(cancel_document)
+                    same_stop = (cancel.trigger_id, cancel.notice_revision) == (trigger.trigger_id, notice['revision'])
+                if (cancel_sequence or not same_stop or (cancel.plan.plan_id, cancel.plan.policy_ref)
+                        != (plan.plan_id, plan.policy_ref)):
+                    raise RuntimeError('PLANNED_LEADER_PROTECTION_CANCEL_PROOF_CHANGED')
+                cancel_sequence = sequence
+            if not current_management and root_state == 'FILLED' and event['event_type'] in {
+                'CANCEL_RESPONSE_UNKNOWN', 'CANCEL_ACCEPTED', 'CANCEL_REJECTED',
+            }:
+                if (not cancel_sequence or unknown_sequence or event['event_type'] != 'CANCEL_RESPONSE_UNKNOWN'
+                        or event['state'] != 'CANCEL_PENDING'):
+                    raise RuntimeError('PLANNED_LEADER_PROTECTION_CANCEL_PROOF_CHANGED')
+                unknown_sequence = sequence
+            if event['event_type'] == 'FILL' and event['broker_execution_id']:
+                current_quantity += event['quantity']
+                fill_ids.append(event['broker_execution_id'])
+                fill_cursor = sequence
+                if sequence <= original_risk.execution_event_high_watermark:
+                    original_quantity += event['quantity']
+        head = document(PLAN_POSITION_COLLECTION, plan.plan_id)
+        original_cursor = original_risk.execution_event_high_watermark
+        if current_management:
+            terminal_confirmed = (0 < fill_cursor < terminal_sequence <= risk.execution_event_high_watermark
+                                  and event.get('state') == root_state and event.get('event_type') == 'BROKER_RECONCILED')
+        elif expired_entry_cancel:
+            # An expiry claim cannot arm a stop. The new stop must follow the
+            # broker-confirmed terminal root and the Risk must already own its fills.
+            terminal_confirmed = (
+                cancel_sequence < terminal_sequence <= original_cursor
+                and 0 < fill_cursor <= terminal_sequence and (expiry_fill_quantity > 0 or cancel_sequence < fill_cursor)
+                and confirmed_at < datetime.fromisoformat(trigger.stop_loss['available_at'])
+                and event.get('event_type') in ({'BROKER_RECONCILED'} if root_state == 'CANCELLED' else {'FILL', 'BROKER_RECONCILED'})
+                and (root_state == 'CANCELLED' or cancel_sequence < unknown_sequence < fill_cursor)
+            )
+        elif root_state == 'CANCELLED':
+            terminal_confirmed = (original_cursor < cancel_sequence < terminal_sequence
+                                  and event.get('event_type') == 'BROKER_RECONCILED')
+        else:
+            terminal_confirmed = (original_cursor < fill_cursor <= terminal_sequence
+                                  and event.get('event_type') in {'FILL', 'BROKER_RECONCILED'}
+                                  and (not cancel_sequence or original_cursor < cancel_sequence < unknown_sequence < fill_cursor))
+        if (not terminal_confirmed or terminal_sequence > risk.execution_event_high_watermark
+                or event.get('state') != root_state
+                or (event.get('broker_order_id') not in {leg.broker_order_id for leg in legs} if current_management
+                    else event.get('broker_order_id') != root['broker_order_id'])
+                or datetime.fromisoformat(event['broker_as_of']) != (
+                    datetime.fromisoformat(root['last_broker_as_of']) if current_management else confirmed_at)
+                or (current_quantity, fill_ids, fill_cursor) != (root['detailed_filled_quantity'], root['fill_ids'], head['fill_cursor'])
+                or head['quantity'] != current_quantity):
+            raise RuntimeError('PLANNED_LEADER_PROTECTION_DETAILED_FILLS_UNCONFIRMED')
     validate_planned_leader_stop(trigger, spec=spec, leader_config=config, position_proof=pin,
                                 original_risk=original_risk, original_fill_quantity=original_quantity)
     now = kst_now() if now_provider is None else now_provider()
@@ -2076,7 +2279,7 @@ class SQLiteExecutionStoreMixin:
             if "plan" in intent and not _validate_plan_event(stored, intent, event):
                 return False
             if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":
-                approval, _ = _require_plan_approval(connection.cursor(), "?", intent, ownership,
+                approval, _, _ = _require_plan_approval(connection.cursor(), "?", intent, ownership,
                                                     getattr(self, "_execution_wall_now", None))
                 if stored is None or stored.get("mock_plan_approval") != approval:
                     raise RuntimeError("PLANNED_EXECUTION_APPROVAL_CHANGED")
@@ -2369,7 +2572,7 @@ class PostgresExecutionStoreMixin:
             if "plan" in intent and not _validate_plan_event(stored, intent, event):
                 return False
             if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":
-                approval, _ = _require_plan_approval(cursor, "%s", intent, ownership,
+                approval, _, _ = _require_plan_approval(cursor, "%s", intent, ownership,
                                                     getattr(self, "_execution_wall_now", None))
                 if stored is None or stored.get("mock_plan_approval") != approval:
                     raise RuntimeError("PLANNED_EXECUTION_APPROVAL_CHANGED")

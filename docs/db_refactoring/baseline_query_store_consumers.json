@@ -5193,6 +5193,17 @@
       "",
       "",
       "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._read_leader_staged_facts",
+      "self._store",
+      "load_document",
+      "direct_call",
+      "self._store.load_document",
+      "",
+      "",
+      "reviewed_store_binding"
     ]
   ],
   "forwarding_identities": [
@@ -6921,6 +6932,30 @@
         "tmp/s12-05-leader-current/consumers-before-append.json",
         "tests/unit/test_leader_order_management.py",
         "tests/integration/test_leader_order_management_postgres.py"
+      ]
+    },
+    {
+      "id": "S12-05-staged-leader-marker-reader-20261106",
+      "added": [
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._read_leader_staged_facts",
+          "self._store",
+          "load_document",
+          "direct_call",
+          "self._store.load_document",
+          "",
+          "",
+          "reviewed_store_binding"
+        ]
+      ],
+      "removed": [],
+      "forwarding_added": [],
+      "reason": "Append only the one reviewed marker-reader identity. Existing source contracts, unresolved candidates and every prior reviewed identity remain unchanged. Same native store and local recovery owner; no baseline reset.",
+      "evidence": [
+        "tmp/s12-05-leader-staged-consumers.json",
+        "tests/unit/test_leader_staged_execution.py",
+        "tests/integration/test_leader_staged_execution_postgres.py"
       ]
     }
   ]

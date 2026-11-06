@@ -4,6 +4,7 @@ from kiwoom_monitor.domain.time_basis import kst_now
 from kiwoom_monitor.infrastructure.time_display import format_kst_time
 
 from datetime import datetime, timedelta, timezone
+from copy import deepcopy
 import json
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,9 @@ from kiwoom_monitor.domain.execution_activation import (
     LEADER_NATIVE_PLAN_MODE, MockUnfilledExecutionPolicy,
 )
 from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
-from kiwoom_monitor.domain.strategy_contract import LEADER_BREAKOUT_FAMILY_ID
+from kiwoom_monitor.domain.strategy_contract import (
+    LEADER_BREAKOUT_FAMILY_ID, leader_execution_contract_from_dict,
+)
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient
 from kiwoom_monitor.infrastructure.central_credentials_client import CentralCredentialsClient
 from kiwoom_monitor.presentation.mock_automation_candidate_dialog import MockAutomationCandidateDialog
@@ -287,7 +290,13 @@ class MockAutomationPublicationDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("READY 모의운용 명세 작성")
         self.resize(650, 760)
-        self._candidate = candidate
+        package = candidate.get("package")
+        candidate_spec = package.get("candidate_spec") if isinstance(package, dict) else None
+        parameters = candidate_spec.get("parameters", {}) if isinstance(candidate_spec, dict) else {}
+        contract = parameters.get("execution_contract") or {}
+        staged = (isinstance(candidate_spec, dict) and candidate_spec.get("family") == LEADER_BREAKOUT_FAMILY_ID
+                  and contract.get("version") == 'leader_breakout_execution/v2')
+        self._candidate = deepcopy(candidate) if staged else candidate
         self._binding = binding
         self._profile_id = profile_id
         self._shadow_events = shadow_events
@@ -302,6 +311,28 @@ class MockAutomationPublicationDialog(QDialog):
         )
         notice.setWordWrap(True)
         layout.addWidget(notice)
+        self._position_terms = None
+        if staged:
+            execution = leader_execution_contract_from_dict(contract)
+            quantity = f"{execution.quantity:,}주" if execution.quantity is not None else "미정"
+            capital = f"{execution.capital_won:,}원" if execution.capital_won is not None else "미정"
+            terms = [f"최초 진입 {quantity} · 누적 매수금액 한도 {capital}",
+                     "일부 청산해도 누적 매수금액 한도는 되살아나지 않습니다."]
+            comparisons = {'observed_cross_above': '상향 돌파 후 원래 확인 조건 충족',
+                           'price_at_or_above': '이상', 'price_at_or_below': '이하'}
+            for index, step in enumerate(execution.position_steps or (), 1):
+                action = '추가 매수' if step.action == 'ADD' else '일부 청산'
+                terms.append(f"{index}. {action} {step.quantity:,}주 · {step.reference_price:,}원 {comparisons[step.trigger]}")
+            if execution.position_steps is None:
+                terms.append("추가·감축 단계 미정")
+            terms.append("현재 조건을 다시 판단하며, 접수된 미체결 잔량은 정정을 우선합니다.")
+            self._position_terms = QLabel('\n'.join(terms))
+            self._position_terms.setTextFormat(Qt.TextFormat.PlainText)
+            self._position_terms.setWordWrap(True)
+            self._position_terms.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            self._position_terms.setToolTip('\n'.join(
+                f"{step.step_id}: {step.reason_ref}" for step in execution.position_steps or ()))
+            layout.addWidget(self._position_terms)
         self._shadow = QComboBox()
         for event in shadow_events:
             self._shadow.addItem(
@@ -326,11 +357,10 @@ class MockAutomationPublicationDialog(QDialog):
             self._close_management.addItem("신규 진입 중지·원래 계획의 취소·청산 유지", "continue_original_plan/v1" if panic else "close-mock-execution-policy/v4")
             top.addRow(kind + " 중지 후 관리", self._close_management)
         self._plan_policy_path = None
-        package = candidate.get("package")
-        candidate_spec = package.get("candidate_spec") if isinstance(package, dict) else None
         if isinstance(candidate_spec, dict) and candidate_spec.get("family") == LEADER_BREAKOUT_FAMILY_ID:
             self._plan_policy_path = QLineEdit()
-            self._plan_policy_path.setPlaceholderText("계획형 0B 모의운용을 선택할 때 지정")
+            self._plan_policy_path.setPlaceholderText(
+                "현재 조건 재판단·정정 정책 파일 필수" if staged else "계획형 0B 모의운용을 선택할 때 지정")
             self._plan_policy_path.setClearButtonEnabled(True)
             browse = QPushButton("정책 파일 선택")
             browse.clicked.connect(self._choose_plan_policy)

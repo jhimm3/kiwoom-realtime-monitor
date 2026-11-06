@@ -581,6 +581,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             mock_automation_supervisor = MockAutomationSupervisor(store, mock_owner,
                 now_provider=server_now,
                 leader_context_source=lambda: {"policy": operational_state.settings.get("shadow_candidate_config"),
+                    "enabled": operational_state.settings.get('shadow_candidate_enabled') is True,
                     "revision": operational_state.applied_revision},
                 price_source=collector.automation_price_observation if collector is not None else None)
             if collector is not None:
