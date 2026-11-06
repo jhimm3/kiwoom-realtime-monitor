@@ -295,6 +295,7 @@
       "tests.unit.test_leader_staged_publication",
       "tests.unit.test_leader_staged_research",
       "tests.unit.test_mock_automation_account_selection",
+      "tests.unit.test_mock_automation_account_execution",
       "tests.unit.test_ipo_mock_execution",
       "tests.unit.test_panic_mock_execution",
       "tests.unit.test_minute_plan_lifecycle",

@@ -504,7 +504,7 @@ def _decision_safety_context(spec, admission, recovery_decision, decision, recov
                   and decision.final_action == 'EXIT' and (
                       allows_stopped_close_management(spec) and decision.constraints == ('close_execution_adapter/v1',)
                       or allows_stopped_panic_management(spec) and decision.constraints == ('panic_execution_adapter/v1',))))
-        or control.active_spec_id != spec.spec_id
+        or not control.includes_spec(spec.spec_id)
         or control.execution_run_id != admission.execution_run_id
     ):
         reasons.append("AUTOMATION_CONTROL_NOT_RUNNING")
@@ -1120,7 +1120,7 @@ def unfilled_management_control_revision(repository, spec, control, scope, polic
                                          _reader=None):
     """Keep enrollment fixed while requiring the current RUNNING authority."""
     if (control is None or control.desired_state is not MockAutomationDesiredState.RUNNING
-            or control.active_spec_id != spec.spec_id
+            or not control.includes_spec(spec.spec_id)
             or control.execution_run_id != scope['execution_run_id']
             or control.account_ref != scope['account_ref']):
         raise ValueError('unfilled_native_plan_control_changed')
@@ -1257,7 +1257,7 @@ def dispatch_mock_unfilled_replacement_from_risk(
         control = repository.load_mock_automation_control(account_ref)
         now = runtime.server_now()
         if (control is None or control.desired_state is not MockAutomationDesiredState.RUNNING
-                or control.active_spec_id != spec_id or control.control_revision != legacy.control_revision
+                or not control.includes_spec(spec_id) or control.control_revision != legacy.control_revision
                 or runtime.load_intent(managed.intent.intent_id) != managed
                 or runtime.load_intent(intent.intent_id) is not None
                 or not 0 <= (now - risk.observed_at).total_seconds() <= frozen.max_snapshot_age_seconds
@@ -1356,7 +1356,7 @@ def emergency_stop_mock_automation(
         runtime.set_new_orders_enabled(False)
         raise RuntimeError("mock automation control is missing")
     if (
-        control.active_spec_id != spec.spec_id
+        not control.includes_spec(spec.spec_id)
         or control.execution_run_id != admission.execution_run_id
         or (expected_control_revision is not None
             and control.control_revision != expected_control_revision)
@@ -1364,15 +1364,16 @@ def emergency_stop_mock_automation(
         runtime.set_new_orders_enabled(False)
         raise RuntimeError("mock automation control does not belong to this run or revision")
     stopped_control = MockAutomationControl(
-        version=MOCK_AUTOMATION_CONTROL_VERSION,
+        version=control.version,
         account_ref=account_ref,
         desired_state=MockAutomationDesiredState.STOPPED,
         control_revision=control.control_revision + 1,
-        active_spec_id=spec.spec_id,
+        active_spec_id=control.active_spec_id,
         execution_run_id=admission.execution_run_id,
         changed_at=stopped_at,
         reason=reason.strip(),
         entry_resume_required=getattr(control, "entry_resume_required", False),
+        account_selection=control.account_selection,
     )
     try:
         saved = repository.save_mock_automation_control(
@@ -1433,6 +1434,8 @@ def resume_mock_automation(
     control = repository.load_mock_automation_control(account_ref)
     if control is None:
         raise RuntimeError("mock automation control is missing")
+    if control.account_selection is not None:
+        raise RuntimeError('mock account resume requires fresh recovery for every selected member')
     if (
         control.active_spec_id != spec.spec_id
         or control.execution_run_id != admission.execution_run_id

@@ -3238,6 +3238,19 @@
         "tests/integration/test_leader_staged_execution_postgres.py",
         "tests/unit/test_leader_staged_publication.py"
       ]
+    },
+    {
+      "id": "S12-05-native-shared-account-membership-20261106",
+      "reason": "Original S12-05 representatives1/2/6/10 need one account authority with explicit admitted members and atomic shared budget/plan ownership. A passive selection cannot grant or copy standalone permissions.",
+      "connection": "Reuse one existing Runtime/lease/operation lock, immutable admission/receipt and control CAS. A separately versioned account control carries the exact immutable selected composition; native order ownership checks it against its stored original and current verified account binding. The existing QUEUED transaction owns member-scoped native plan heads and actual FIFO open basis plus durable BUY reservations.",
+      "validation": "One bounded SELECT of occupied native plan heads is required inside the already locked account claim, not per0B, and no public store method/schema/worker is added. Actual SQLite/PG member orders cover shared reservation/capital/concurrency rollback, current binding/control, other-member and oversized SELL rejection, exact detailed FILL cost/quantity, COMMIT ACK loss/no retransmission, and whole-account stop while preserving an accepted FILL. Standalone v1/native/current-order/lease/credential safety regressions remain selected. No measured speedup is claimed.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_claim_account_plan_capacity|cursor.execute": 1
+      },
+      "evidence": [
+        "tests/unit/test_mock_automation_account_execution.py",
+        "tests/integration/test_mock_automation_account_execution_postgres.py"
+      ]
     }
   ]
 }

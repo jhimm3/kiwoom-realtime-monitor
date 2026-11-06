@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-06 · S12-05 명시 계좌 구성의 준비 저장/조회 검증**. AR 판정과 선행 개발은11절에 둔다.
+갱신. **2026-11-06 · S12-05 명시 공통 계좌의 native 주문·체결·계획 범위 검증**. AR 판정과 선행 개발은11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04 수락·전체4/5, S12-05 대표3·4·5·7·9의5/11 개발 수락이다. 같은 검증 계좌의 READY 명세 두 개와 명시 공통 한도를 동결·저장·인증 조회하는 선행 연결을 Windows81/실제PG3으로 검증했다. 저장으로 주문 권한을 만들지 않으며 실제 병행 기동·계획별 Risk/공통 자금 적용·Runner/Shadow·UI 선택은 아직 미완료다. 대표1 다른 계획 수량 대조, 대표2 재진입·대표6 병행/계좌·대표10 새 spec 교체, 대표8·11 및 DD/MICRO·독립 계좌/원주문 검증을 계속한다. 다음은 실제 승인·체결된 다른 계획의 물량 격리다. 운영 제외·AR C24/C16은 유지한다. [로드맵](section12-development-roadmap-20261105.md) · [계좌 구성 선행](#section12-explicit-account-composition) · [대표 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04 수락·전체4/5, S12-05 대표3·4·5·7·9의5/11 개발 수락이다. 명시한 두 READY 명세가 하나의 Runtime/계좌 권한으로 native 주문·예약·원금/실제 체결·계획별 청산을 처리하는 공통 경계를 Windows259/실제PG16으로 검증했다. 자금/동시성 초과와 다른 멤버 물량 침범은 주문·계획 저장 전에 거절한다. 이는 기존 완료봉 Family의 공통 계좌 합성 검증이며 돌파/종가베팅의 정상 자동 병행 수락은 아니다. 다음은 native 멤버 ID를 체결·Risk·같은 Runner에 전달하는 연결이다. 대표1·2·6·10의 실제 전략/재진입/병행/교체, 대표8·11 및 DD/MICRO·독립 계좌/원주문 조건은 유지한다. 운영 제외·AR C24/C16은 유지한다. [로드맵](section12-development-roadmap-20261105.md) · [공통 계좌 native 경계](#section12-native-shared-account-owner) · [대표 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining) · [540](#c24-hosted-539-run-540) · [541](#c16-recurrence-handoff-541).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -1967,7 +1967,7 @@ MAIN139에 AR06 수락 결과의 출처 전달과 AR09 version1 owner-state를 �
 
 현재 집계는 [0절](#0-현재-기준과-진행-현황)과 이 절의 표를 따른다. **90개 중 검증 완료 83·재발 시 이관 1·잔여 6(세부 행동 17)**이다. 잔여는 전환 전 조건 5개와 별도 승인 운영 단계 AR08-C25다. OS별 배포·장후 전송의 단계별 범위는 [11.72](#portable-execution-target)에 둔다. 이 집계는 각 조건의 국소 판정이며 AR 전체 종결·운영 수락은 0절에서 별도로 본다.
 
-라이브러리와 12절의 새 제품 개발은 [최초 범위11.239](#rss-and-section12-development)와 [현재0절](#0-현재-기준과-진행-현황)을 따른다. 추가·부분 청산과 실제 연구 체인의 근거는 [11.286](#section12-leader-staged-actions)·[11.287](#section12-staged-final-source-chain)·[11.288](#section12-explicit-account-composition)에 두며 이 표의 조건별 검증·운영 수락과 분리한다.
+라이브러리와 12절의 새 제품 개발은 [최초 범위11.239](#rss-and-section12-development)와 [현재0절](#0-현재-기준과-진행-현황)을 따른다. 추가·부분 청산과 실제 연구 체인의 근거는 [11.286](#section12-leader-staged-actions)·[11.287](#section12-staged-final-source-chain)·[11.288](#section12-explicit-account-composition)·[11.289](#section12-native-shared-account-owner)에 두며 이 표의 조건별 검증·운영 수락과 분리한다.
 
 **정본 사용:** 이 표를 갱신하고 같은 상태 보고를 계속 덧붙이지 않는다. **완료**는 해당 국소 조건의 본 코드 연결/관련 검증 수락, **부분 완료**는 일부 본 코드/검증 수락 후 필수 조건 잔여, **미완료**는 본 코드 미수락(격리 구현 포함), **외부 환경 대기**는 필요한 실제 입력/환경·승인 미확보다. 격리 후보나 정책 문서만으로 완료를 올리지 않는다. 개별 항목은 한 담당 AR에서만 집계하며 다른 AR의 선행·참조는 중복0이다. [전체 대조 근거/현재 코드/개별 완료조건](../../tmp/ar-v1-wave48-20261028/v1-remaining-checklist/consolidated.json)에 실제 함수·기존 실행 소스·미확인 범위와 root의 선행 정정을 보존한다. 최초 체크리스트 대조에서는 제품 변경·새 검사 시작·운영 접근 없이 기존 baseline 종료만 정리했다. 이후 승인 v1 연속 진행의 격리 후보 검사와 현재 결과는 0절 및 해당 잔여행에 반영한다.
 
@@ -4978,6 +4978,20 @@ Paper 완료봉/다음 실제 시가의 ENTER2·ADD1·REDUCE1·EXIT2와 비용�
 현재 소스3f44ef7a에서 관련 Windows81(8모듈)/실제PG3·구조/소비자/증분 실행 대조를 통과했다. 새11정의/총7373·원장304·원래 미결49를 보존했다.8 worker 종료/TEMP/HKCU와 PG DB·포트·비밀/Job active0 정리를 확인했다. 최초 개발 호출의 datetime/문자열 혼동은 호출만 수정했고 실패·로그를 보존했다. 종료된 개발3영수증의 잔여TEMP1도 소유 범위로 정리했다. 새 라이브러리·schema·worker/권한 owner와 측정된 속도 향상은 없다. [현재 소스/실행/정리](../../tmp/s12-05-account-selection/component-evidence.json) · [증분 대조](../../tmp/s12-05-account-selection/review-execution-final.json).
 
 이는 준비 문서의 저장/조회만 검증한 선행이다. 실제 병행 활성화·멤버 입장/제어·계획별 Risk·공통 자금/예약·Runner/Shadow·UI 선택과 명세 교체는 계속 구현해야 하며 대표1/6/10 수락으로 합산하지 않는다. 전체4/5·대표5/11과 원래 잔여/운영 제외는 유지한다. 다음은 실제 승인·체결된 다른 계획 물량을 침범하지 않는지 대조한다. 현재 조건 재판단·접수 미체결 정정 우선·UNKNOWN 중복 제출 금지는 공통 계약으로 유지한다.
+
+<a id="section12-native-shared-account-owner"></a>
+
+### 11.289 S12-05 대표1/2/6/10 · 명시 공통 계좌의 native 주문·체결·계획 범위 — 2026-11-06
+
+명시 계좌 구성에 속한 두 READY 명세를 별도 버전의 멤버 입장/공통 control과 같은 Runtime/계좌 lease/작업 잠금에 연결했다. 원래 v1 명세·입장·control wire는 보존하고 기존 단일 명세 기동으로 group anchor만 실행하는 혼용은 거절한다. 각 명세의 원래 final/적격성/현재 구현·binding을 다시 확인한 뒤 멤버 입장/비활성 주문 영수증을 저장하고 공통 control 하나를 native CAS로 확정한다. 저장 응답 유실의 재요청은 같은 ID/판본을 재사용하며 새 주문을 만들지 않는다.
+
+같은 native QUEUED/제출 transaction이 불변 구성/현재 검증 binding·멤버 승인·최신 Risk/control/lease와 공유 자금·동시성을 확인한다. 기존 계획 head의 JSON에 group 멤버 spec_id와 capital_lots [[수량,실제 체결가]]를 보존하며 실제 FILL만 FIFO 원금/수량을 바꾼다. 공통 자금은 열린 체결 원금+내구 BUY 예약으로 대조하고 수수료/검증 손익을 임의0으로 채우지 않는다. 다른 멤버 plan의 청산과 계획 잔량 초과는 전체 transaction을 거절한다. 어느 멤버의 중지든 group/anchor를 보존해 계좌 전체 신규 행동을 막고 이미 접수된 FILL은 계속 대사한다. 새 schema/table·공개 QueryStore 메서드·worker/계좌 owner·라이브러리는 없다. 공통 cap에 필요한 native SELECT1개는 기존 계좌 잠금 안에서만 실행하며 매0B 조회나 속도 향상을 주장하지 않는다.
+
+현재 소스c295d81f에서 Windows259(11모듈)와 실제PG16(새6/기존10)·구조/소비자/증분 실행 대조를 통과했다. 새18정의/총7391·원장305·원래 미결49를 보존했다. 두 실제 승인 BUY70000은 공통150000에서 예약되고100000에서는 두 번째 계획/의도가 원자적으로 저장되지 않는다. 명시 동시 전략/계획1 제한, 서로 다른 두 상세 FILL의 수량/원금, 다른 멤버·2주 청산 거절 및 Alpha1주 청산 후 Beta head 원문 보존을 검증했다. QUEUED/control COMMIT 응답 유실·동일 결정 재전달·다른 lease owner·멤버 영수증 누락·source/계좌 binding 변경·전체 중지 후 기존 FILL도 대조했다. 숫자는 합성 검증 입력이다.
+
+최초 Windows는214통과/남은45의180초 작업자 제한으로 미완료였다. 같은 소스의45만600초 제한으로 통과했고214/PG16은 반복하지 않았다. 최초 실패/로그와 두 실행의 실제 ID·발견/종료를 보존·합쳤다. 성공11 worker와 실패1의 종료/고립·HKCU, 실패 TEMP1·개발5영수증과 PG2 DB/포트/비밀/Job active0 정리를 확인했다. [현재 소스/검증/정리](../../tmp/s12-05-account-execution/component-evidence.json) · [증분](../../tmp/s12-05-account-execution/review-execution-final.json) · [범위/최초 제한/잔여](../../tmp/s12-05-account-execution/impact-resolution.json).
+
+이 검증은 기존 완료봉 Family 두 합성 명세의 공통 native 경계다. 실제 돌파/CLOSE 등 멤버별 FILL·Risk/복구 상태, 하나의 Runner/공통 입력·Shadow·UI/API 병행 기동, 재진입·모든 멤버의 재개·기존 계획을 남긴 명세 교체는 아직 연결해야 한다. 단일 멤버의 복구로 group을 재개하지 않는다. 대표1/6/10의 수락을 대신하지 않으며 다음은 native 멤버 사실을 실제 소비자에 전달하는 작업이다. 전체4/5·대표5/11과 원래8·11/DD/MICRO·독립 계좌/원주문 조건 및 운영 제외를 유지한다.
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

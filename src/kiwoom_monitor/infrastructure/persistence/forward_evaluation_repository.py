@@ -12,6 +12,7 @@ from kiwoom_monitor.application.mock_automation_admission import (
     MockAutomationAdmission,
     MockAutomationControl,
     MockAutomationLeaseReceipt,
+    MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION,
     execution_run_id_for_spec,
     mock_automation_admission_from_dict,
     mock_automation_control_from_dict,
@@ -378,13 +379,23 @@ class ForwardEvaluationRepository:
         spec = self.load_mock_automation_spec(value.account_ref, value.spec_id)
         if spec is None:
             raise ValueError("mock automation admission requires a stored operating spec")
+        expected_run_id = execution_run_id_for_spec(spec.spec_id)
+        if value.version == MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION:
+            selection = self.load_mock_automation_account_selection(value.account_ref, value.account_selection_id)
+            if (selection is None or value.spec_id not in selection.member_spec_ids
+                    or selection.account_scope != spec.account_scope
+                    or selection.credential_profile_id != spec.credential_profile_id
+                    or selection.binding_revision != spec.binding_revision
+                    or not same_aware_instant(selection.binding_verified_at.isoformat(), spec.binding_verified_at)):
+                raise ValueError('mock account admission membership conflicts with its operating spec')
+            expected_run_id = execution_run_id_for_spec(selection.primary_spec_id)
         if (
             spec.strategy_ref != value.strategy_ref
             or spec.candidate_package_hash != value.candidate_package_hash
             or spec.final_result_hash != value.final_result_hash
             or spec.final_batch_id != value.final_batch_id
             or spec.final_run_id != value.final_run_id
-            or value.execution_run_id != execution_run_id_for_spec(spec.spec_id)
+            or value.execution_run_id != expected_run_id
         ):
             raise ValueError("mock automation admission does not match its operating spec")
         existing = self.load_mock_automation_admission_for_spec(

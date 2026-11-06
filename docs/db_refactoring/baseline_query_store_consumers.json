@@ -5226,6 +5226,28 @@
       "",
       "",
       "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_admission.py",
+      "admit_mock_automation_account_selection",
+      "repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_admission.py",
+      "admit_mock_automation_account_selection",
+      "repository",
+      "save_mock_automation_control",
+      "direct_call",
+      "repository.save_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
     ]
   ],
   "forwarding_identities": [
@@ -7013,6 +7035,41 @@
         "tmp/s12-05-leader-staged/account-selection-consumers-before.json",
         "tests/unit/test_mock_automation_account_selection.py",
         "tests/integration/test_mock_automation_account_selection_postgres.py"
+      ]
+    },
+    {
+      "id": "S12-05-native-shared-account-membership-20261106",
+      "added": [
+        [
+          "src/kiwoom_monitor/application/mock_automation_admission.py",
+          "admit_mock_automation_account_selection",
+          "repository",
+          "load_mock_automation_control",
+          "direct_call",
+          "repository.load_mock_automation_control",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/application/mock_automation_admission.py",
+          "admit_mock_automation_account_selection",
+          "repository",
+          "save_mock_automation_control",
+          "direct_call",
+          "repository.save_mock_automation_control",
+          "",
+          "",
+          "unresolved_candidate"
+        ]
+      ],
+      "removed": [],
+      "forwarding_added": [],
+      "reason": "Append only two same-named unresolved candidates in the new application account-admission function: injected ForwardEvaluationRepository load/save control, not direct QueryStore/SQL. Native store receiver sites and all public protocol signatures remain unchanged. Existing immutable methods and the existing native control CAS are reused; no baseline reset.",
+      "evidence": [
+        "tmp/s12-05-account-execution/consumers-before.json",
+        "tests/unit/test_mock_automation_account_execution.py",
+        "tests/integration/test_mock_automation_account_execution_postgres.py"
       ]
     }
   ]

@@ -79,7 +79,8 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
         if control_revision is not None and (
             (control.get("desired_state") != "RUNNING" and not stopped_close_management)
             or int(control.get("control_revision", 0)) != int(control_revision)
-            or control.get("active_spec_id") != ownership.get("active_spec_id")
+            or not _control_member_allowed(cursor, p, control, str(value.get('account_ref') or ''),
+                                           ownership.get('active_spec_id'))
             or control.get("execution_run_id") != ownership["run_id"]
         ):
             raise RuntimeError("MOCK_AUTOMATION_CONTROL_CHANGED")
@@ -130,6 +131,72 @@ def _plan_document(cursor, p, collection, account, key):
     )
     row = cursor.fetchone()
     return _json_document(row[0]) if row is not None else None
+
+
+def _control_member_allowed(cursor, p, control, account, spec_id):
+    """Read frozen membership in the same native transaction as the order claim."""
+    selection = _account_control_selection(cursor, p, control, account)
+    return (spec_id in selection.member_spec_ids if selection is not None
+            else control.get('active_spec_id') == spec_id)
+
+
+def _account_control_selection(cursor, p, control, account, *, verify_admissions=False, require_current_binding=True):
+    from kiwoom_monitor.application.mock_automation_admission import (
+        MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION, MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION,
+        mock_automation_control_from_dict, mock_automation_admission_from_dict,
+        mock_automation_lease_receipt_from_dict,
+    )
+    from kiwoom_monitor.domain.time_basis import same_aware_instant
+    from .database_account_identity import _account_binding_row, _latest_account_binding_row
+
+    if control.get('version') != MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION:
+        if control.get('account_selection') is not None:
+            raise RuntimeError('MOCK_ACCOUNT_CONTROL_MEMBERSHIP_CHANGED')
+        return None
+    value = mock_automation_control_from_dict(control)
+    selection = value.account_selection
+    stored = _plan_document(cursor, p, 'execution_mock_automation_account_selections', account, selection.selection_id)
+    if (value.to_dict() != control or value.account_ref != account or stored != selection.to_dict()):
+        raise RuntimeError('MOCK_ACCOUNT_CONTROL_MEMBERSHIP_CHANGED')
+    if require_current_binding:
+        row = _latest_account_binding_row(cursor, selection.credential_profile_id, 'kiwoom', 'mock', p)
+        binding = _account_binding_row(row) if row is not None else {}
+        if (binding.get('account_ref') != account or binding.get('binding_revision') != selection.binding_revision
+                or binding.get('verification_method') != 'ka00001'
+                or not same_aware_instant(str(binding.get('verified_at', '')), selection.binding_verified_at)):
+            raise RuntimeError('MOCK_ACCOUNT_CONTROL_BINDING_CHANGED')
+    if verify_admissions:
+        for spec_id in selection.member_spec_ids:
+            document = _plan_document(cursor, p, 'execution_mock_automation_admission_by_spec', account, spec_id)
+            if document is None:
+                raise RuntimeError('MOCK_ACCOUNT_MEMBER_ADMISSION_MISSING')
+            admission = mock_automation_admission_from_dict(document)
+            if (admission.version != MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION
+                    or admission.spec_id != spec_id or admission.account_ref != account
+                    or admission.account_selection_id != selection.selection_id
+                    or admission.execution_run_id != value.execution_run_id
+                    or _plan_document(cursor, p, 'execution_mock_automation_admissions', account,
+                                      admission.admission_id) != document):
+                raise RuntimeError('MOCK_ACCOUNT_MEMBER_ADMISSION_CHANGED')
+            receipt_doc = _plan_document(cursor, p, 'execution_mock_automation_lease_by_admission', account,
+                                        admission.admission_id)
+            if receipt_doc is None:
+                raise RuntimeError('MOCK_ACCOUNT_MEMBER_LEASE_MISSING')
+            receipt = mock_automation_lease_receipt_from_dict(receipt_doc)
+            if ((receipt.admission_id, receipt.spec_id, receipt.account_ref, receipt.execution_run_id)
+                    != (admission.admission_id, spec_id, account, value.execution_run_id)):
+                raise RuntimeError('MOCK_ACCOUNT_MEMBER_LEASE_CHANGED')
+    return selection
+
+
+def _require_account_control_change(cursor, p, value, current, account):
+    from kiwoom_monitor.application.mock_automation_admission import MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION
+    if current.get('version') == MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION and (
+            value.get('version') != current.get('version')
+            or value.get('account_selection') != current.get('account_selection')):
+        raise RuntimeError('MOCK_ACCOUNT_EXPLICIT_HANDOFF_REQUIRED')
+    running = value.get('desired_state') == 'RUNNING'
+    _account_control_selection(cursor, p, value, account, verify_admissions=running, require_current_binding=running)
 
 
 def _require_planned_resume_control(cursor, p, value, current, owner_token, now_provider):
@@ -298,7 +365,7 @@ def _save_plan_position(cursor, p, account, document, changed_at):
     )
 
 
-def _require_plan_approval(cursor, p, value, ownership, now_provider):
+def _require_plan_approval(cursor, p, value, ownership, now_provider, *, account_limits=None):
     from dataclasses import asdict
 
     from kiwoom_monitor.application.mock_automation_execution import (
@@ -374,9 +441,21 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
     ):
         raise RuntimeError("PLANNED_EXECUTION_FORWARD_PROFILE_CHANGED")
     risk = mock_automation_risk_snapshot_from_dict(risk_doc)
+    if account_limits is not None:
+        if (risk.submission_unknown_count > account_limits.maximum_submission_unknown_count
+                or risk.balance_mismatch_count > account_limits.maximum_balance_mismatch_count
+                or value['side'] == 'BUY' and (
+                    risk.daily_net_pnl_won is None
+                    or risk.daily_net_pnl_won <= -account_limits.maximum_daily_loss_won
+                    or risk.data_gap_seconds is None
+                    or risk.data_gap_seconds > account_limits.maximum_data_gap_seconds
+                    or risk.reconnect_count > account_limits.maximum_reconnect_count)):
+            raise RuntimeError('MOCK_ACCOUNT_RISK_LIMIT')
     current = mock_automation_recovery_decision_from_dict(recovery_doc)
     now = kst_now() if now_provider is None else now_provider()
-    max_age = spec.maximum_data_gap_seconds
+    max_age = (min(spec.maximum_data_gap_seconds, account_limits.maximum_data_gap_seconds)
+               if account_limits is not None and spec.maximum_data_gap_seconds is not None
+               else spec.maximum_data_gap_seconds)
     expiry = datetime.fromisoformat(value["expires_at"])
     fingerprint = mock_account_recovery_fingerprint(recovery)
     statuses = {MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED}
@@ -395,7 +474,8 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
         or current.status not in statuses
         or (gate.recovery_fingerprint, gate.account_as_of) != (fingerprint, recovery.account.as_of)
         or risk.account_as_of != recovery.account.as_of or recovery.account.account_ref != account_ref
-        or max_age is None or now >= expiry or expiry != gate.decided_at + timedelta(seconds=max(1, int(max_age)))
+        or max_age is None or now >= expiry
+        or expiry != gate.decided_at + timedelta(seconds=max(1, int(spec.maximum_data_gap_seconds)))
         or any(not 0 <= (now - at).total_seconds() <= max_age
                for at in (gate.decided_at, gate.server_now, risk.observed_at, risk.account_as_of))
         or any(order.state not in TERMINAL_ORDER_STATES for order in recovery.orders)
@@ -413,15 +493,22 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider):
     return gate.gate_id, spec, gate.action
 
 
-def _claim_plan_position(cursor, p, value, ownership, now_provider):
-    gate_id, spec, action = _require_plan_approval(cursor, p, value, ownership, now_provider)
+def _claim_plan_position(cursor, p, value, ownership, now_provider, *, control=None):
     account_ref, ref = value["account_ref"], value["plan"]
+    from kiwoom_monitor.application.mock_automation_admission import (
+        MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION, mock_automation_control_from_dict,
+    )
+    selection = (mock_automation_control_from_dict(control).account_selection
+                 if control and control.get('version') == MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION else None)
+    gate_id, spec, action = _require_plan_approval(cursor, p, value, ownership, now_provider,
+        account_limits=selection.limits if selection is not None else None)
     head = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account_ref, ref["plan_id"])
     if head is None:
         head = {
             "version": "mock_plan_position/v1", "plan_id": ref["plan_id"], "policy_ref": ref["policy_ref"],
             "run_id": value["run_id"], "symbol": value["symbol"],
             "revision": 0, "quantity": 0, "fill_cursor": 0,
+            **({'spec_id': spec.spec_id, 'capital_lots': []} if selection is not None else {}),
         }
     if (head["policy_ref"], head["run_id"], head["symbol"], head["revision"]) != (
         ref["policy_ref"], value["run_id"], value["symbol"], ref["expected_revision"],
@@ -429,6 +516,8 @@ def _claim_plan_position(cursor, p, value, ownership, now_provider):
         raise RuntimeError("EXECUTION_PLAN_REVISION_CHANGED")
     if head.get("unreconciled_sell_quantity"):
         raise RuntimeError("EXECUTION_PLAN_RECONCILIATION_REQUIRED")
+    if selection is not None and head.get('spec_id') != spec.spec_id:
+        raise RuntimeError('EXECUTION_PLAN_MEMBER_MISMATCH')
     rows = _account_active_execution_rows(cursor, "mock", account_ref, 401, p)
     if len(rows) > 400:
         raise RuntimeError("EXECUTION_ACCOUNT_OPEN_ORDERS_INCOMPLETE")
@@ -438,7 +527,7 @@ def _claim_plan_position(cursor, p, value, ownership, now_provider):
         raise RuntimeError("EXECUTION_PLAN_SUBMISSION_UNKNOWN_LIMIT")
     account = ownership["plan_recovery"].account
     if value["side"] == "BUY":
-        if any(account.positions.values()) and action != 'ADD':
+        if selection is None and any(account.positions.values()) and action != 'ADD':
             raise RuntimeError("PLANNED_ENTRY_REQUIRES_FLAT_ACCOUNT")
         if action == 'ADD' and (head['quantity'] <= 0 or account.positions.get(value['symbol'], 0) < head['quantity']):
             raise RuntimeError('PLANNED_ADDITIONAL_ENTRY_REQUIRES_OWNED_POSITION')
@@ -451,7 +540,10 @@ def _claim_plan_position(cursor, p, value, ownership, now_provider):
         required = value["quantity"] * value["limit_price"]
         free = account.available_cash_won - account.reserved_open_buy_won - reserved
         capital_limit = spec.maximum_capital_won
-        if required > free or (capital_limit is not None and reserved + required > capital_limit):
+        member_committed = reserved
+        if selection is not None:
+            member_committed = _claim_account_plan_capacity(cursor, p, value, spec, selection, active)
+        if required > free or (capital_limit is not None and member_committed + required > capital_limit):
             raise RuntimeError("EXECUTION_PLAN_CASH_UNAVAILABLE")
     else:
         sells = [row for row in active if row["side"] == "SELL" and row["symbol"] == value["symbol"]]
@@ -467,6 +559,49 @@ def _claim_plan_position(cursor, p, value, ownership, now_provider):
         datetime.fromisoformat(value["created_at"]),
     )
     return {**value, "mock_plan_approval": gate_id}
+
+
+def _claim_account_plan_capacity(cursor, p, value, spec, selection, active):
+    """Check actual open FIFO basis plus durable reservations under the account lease lock."""
+    account, run_id = value['account_ref'], value['run_id']
+    buys = [row for row in active if row['side'] == 'BUY']
+    active_ids = sorted({row['plan']['plan_id'] for row in buys})
+    run_expr = "document_json->>'run_id'" if p == '%s' else "json_extract(document_json,'$.run_id')"
+    quantity_expr = "(document_json->>'quantity')::bigint" if p == '%s' else "json_extract(document_json,'$.quantity')"
+    pending = (' OR document_key IN (' + ','.join([p] * len(active_ids)) + ')') if active_ids else ''
+    cursor.execute(f'SELECT document_json FROM central_documents WHERE collection={p} AND owner={p} '
+        f'AND {run_expr}={p} AND ({quantity_expr}>0{pending}) ORDER BY document_key LIMIT {p}',
+        (PLAN_POSITION_COLLECTION, account, run_id, *active_ids, selection.limits.maximum_concurrent_positions + 1))
+    heads = {head['plan_id']: head for row in cursor.fetchall() for head in [_json_document(row[0])]}
+    if len(heads) > selection.limits.maximum_concurrent_positions:
+        raise RuntimeError('MOCK_ACCOUNT_POSITION_LIMIT')
+    if any(identity not in heads for identity in active_ids):
+        raise RuntimeError('MOCK_ACCOUNT_PLAN_RESERVATION_UNVERIFIED')
+    basis = member_basis = 0
+    for head in heads.values():
+        lots = head.get('capital_lots')
+        if (head.get('spec_id') not in selection.member_spec_ids or lots is None
+                or head.get('unreconciled_sell_quantity') or any(
+                    len(lot) != 2 or type(lot[0]) is not int or type(lot[1]) is not int
+                    or lot[0] <= 0 or lot[1] <= 0 for lot in lots)
+                or sum(lot[0] for lot in lots) != head['quantity']):
+            raise RuntimeError('MOCK_ACCOUNT_PLAN_BASIS_UNVERIFIED')
+        cost = sum(quantity * price for quantity, price in lots)
+        basis += cost
+        if head['spec_id'] == spec.spec_id:
+            member_basis += cost
+    plan_ids = {*heads, value['plan']['plan_id']}
+    members = {head['spec_id'] for head in heads.values()} | {spec.spec_id}
+    if len(plan_ids) > selection.limits.maximum_concurrent_positions:
+        raise RuntimeError('MOCK_ACCOUNT_POSITION_LIMIT')
+    if len(members) > selection.limits.maximum_concurrent_strategies:
+        raise RuntimeError('MOCK_ACCOUNT_STRATEGY_LIMIT')
+    reserved = sum(_unfilled_quantity(row) * row['limit_price'] for row in buys)
+    required = value['quantity'] * value['limit_price']
+    if basis + reserved + required > selection.limits.maximum_capital_won:
+        raise RuntimeError('MOCK_ACCOUNT_CAPITAL_UNAVAILABLE')
+    return member_basis + sum(_unfilled_quantity(row) * row['limit_price'] for row in buys
+                              if heads[row['plan']['plan_id']]['spec_id'] == spec.spec_id)
 
 
 def _unfilled_quantity(order):
@@ -731,6 +866,19 @@ def _apply_plan_execution_event(cursor, p, intent, event, sequence):
     ):
         raise RuntimeError("EXECUTION_PLAN_POSITION_MISSING")
     if event["event_type"] == "FILL":
+        if 'capital_lots' in head:
+            lots = [list(lot) for lot in head['capital_lots']]
+            if intent['side'] == 'BUY':
+                lots.append([event['quantity'], event['price']])
+            else:
+                remaining = event['quantity']
+                while remaining and lots:
+                    taken = min(remaining, lots[0][0])
+                    remaining -= taken
+                    lots[0][0] -= taken
+                    if not lots[0][0]:
+                        lots.pop(0)
+            head = {**head, 'capital_lots': lots}
         delta = event["quantity"] if intent["side"] == "BUY" else -event["quantity"]
         quantity = head["quantity"] + delta
         if quantity < 0:
@@ -2242,13 +2390,14 @@ class SQLiteExecutionStoreMixin:
         document = _event_document(value)
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            control = {}
             stored = _require_execution_ownership(connection.cursor(), ownership, value, "?",
-                                         now_provider=getattr(self, '_execution_wall_now', None), new_intent_claim=True)
+                now_provider=getattr(self, '_execution_wall_now', None), new_intent_claim=True, control_facts=control)
             if "plan" in value:
                 if stored is not None:
                     return False
                 value = _claim_plan_position(connection.cursor(), "?", value, ownership,
-                                             getattr(self, "_execution_wall_now", None))
+                                             getattr(self, "_execution_wall_now", None), control=control)
                 document = _event_document(value)
             if ownership and ownership.get('replacement_claim') is not None:
                 value = {**value, 'mock_replacement_claim': dict(ownership['replacement_claim'])}
@@ -2432,6 +2581,7 @@ class SQLiteExecutionStoreMixin:
             current = _json_document(row[0]) if row else {}
             if int(current.get("control_revision", 0)) != expected_revision:
                 return False
+            _require_account_control_change(connection.cursor(), "?", value, current, account_ref)
             _require_planned_resume_control(connection.cursor(), "?", value, current, resume_owner_token, now_provider)
             connection.execute(
                 "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
@@ -2529,13 +2679,14 @@ class PostgresExecutionStoreMixin:
             operation="create_execution_intent", rows_attempted=1,
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+            control = {}
             stored = _require_execution_ownership(cursor, ownership, value, "%s",
-                                         now_provider=getattr(self, '_execution_wall_now', None), new_intent_claim=True)
+                now_provider=getattr(self, '_execution_wall_now', None), new_intent_claim=True, control_facts=control)
             if "plan" in value:
                 if stored is not None:
                     return False
                 value = _claim_plan_position(cursor, "%s", value, ownership,
-                                             getattr(self, "_execution_wall_now", None))
+                                             getattr(self, "_execution_wall_now", None), control=control)
             if ownership and ownership.get('replacement_claim') is not None:
                 value = {**value, 'mock_replacement_claim': dict(ownership['replacement_claim'])}
             if ownership and ownership.get('protection_claim') is not None:
@@ -2776,6 +2927,7 @@ class PostgresExecutionStoreMixin:
             current = _json_document(row[0]) if row else {}
             if int(current.get("control_revision", 0)) != expected_revision:
                 return False
+            _require_account_control_change(cursor, "%s", value, current, account_ref)
             _require_planned_resume_control(cursor, "%s", value, current, resume_owner_token, now_provider)
             cursor.execute(
                 "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "

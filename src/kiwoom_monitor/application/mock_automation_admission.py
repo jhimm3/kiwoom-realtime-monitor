@@ -12,6 +12,8 @@ from typing import Any, Mapping, Protocol
 from kiwoom_monitor.domain.execution_activation import (
     ForwardEvaluationSpec,
     MockAutomationOperatingSpec,
+    MockAutomationAccountSelection,
+    mock_automation_account_selection_from_dict,
     MockAutomationReadinessStatus,
     StrategyLifecycleStage,
     StrategyStageRevision,
@@ -23,6 +25,8 @@ from kiwoom_monitor.application.mock_automation_candidate import CandidateEligib
 MOCK_AUTOMATION_ADMISSION_VERSION = "mock_automation_admission/v1"
 MOCK_AUTOMATION_LEASE_RECEIPT_VERSION = "mock_automation_lease_receipt/v1"
 MOCK_AUTOMATION_CONTROL_VERSION = "mock_automation_control/v1"
+MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION = "mock_automation_account_control/v1"
+MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION = "mock_automation_account_admission/v1"
 
 
 class MockAutomationDesiredState(StrEnum):
@@ -42,10 +46,23 @@ class MockAutomationControl:
     reason: str
     entry_resume_required: bool = False
     planned_review_resume_id: str | None = None
+    account_selection: MockAutomationAccountSelection | None = None
 
     def __post_init__(self) -> None:
-        if self.version != MOCK_AUTOMATION_CONTROL_VERSION:
+        if self.version not in {MOCK_AUTOMATION_CONTROL_VERSION, MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION}:
             raise ValueError("unsupported mock automation control version")
+        if self.version == MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION:
+            _require_aware(self.changed_at, 'changed_at')
+            if self.account_selection is None:
+                raise ValueError('account control requires its explicit frozen selection')
+            selection = mock_automation_account_selection_from_dict(self.account_selection.to_dict())
+            if (selection.account_scope.account_ref != self.account_ref
+                    or selection.primary_spec_id != self.active_spec_id
+                    or self.execution_run_id != execution_run_id_for_spec(selection.primary_spec_id)
+                    or self.changed_at < selection.frozen_at):
+                raise ValueError('account control selection scope conflict')
+        elif self.account_selection is not None:
+            raise ValueError('standalone control cannot carry account membership')
         if not all(str(getattr(self, name)).strip() for name in (
             "account_ref", "active_spec_id", "execution_run_id", "reason",
         )):
@@ -60,6 +77,10 @@ class MockAutomationControl:
             raise ValueError("invalid planned protection resume identity")
         _require_aware(self.changed_at, "changed_at")
 
+    def includes_spec(self, spec_id: str) -> bool:
+        return (spec_id in self.account_selection.member_spec_ids if self.account_selection is not None
+                else spec_id == self.active_spec_id)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "version": self.version,
@@ -70,6 +91,7 @@ class MockAutomationControl:
             "execution_run_id": self.execution_run_id,
             "changed_at": self.changed_at.isoformat(),
             "reason": self.reason,
+            **({'account_selection': self.account_selection.to_dict()} if self.account_selection is not None else {}),
             **({"entry_resume_required": True} if self.entry_resume_required else {}),
             **({"planned_review_resume_id": self.planned_review_resume_id}
                if self.planned_review_resume_id is not None and not self.entry_resume_required else {}),
@@ -90,6 +112,7 @@ class MockAutomationAdmission:
     execution_run_id: str
     requested_at: datetime
     state: str = "REQUESTED"
+    account_selection_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -98,8 +121,15 @@ class MockAutomationAdmission:
         ):
             if not str(getattr(self, name)).strip():
                 raise ValueError(f"{name} is required")
-        if self.version != MOCK_AUTOMATION_ADMISSION_VERSION or self.state != "REQUESTED":
+        if self.version not in {MOCK_AUTOMATION_ADMISSION_VERSION, MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION} or self.state != "REQUESTED":
             raise ValueError("unsupported mock automation admission contract")
+        if self.version == MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION:
+            if (not isinstance(self.account_selection_id, str)
+                    or not self.account_selection_id.startswith('mock_automation_account_selection_')
+                    or len(self.account_selection_id.rsplit('_', 1)[-1]) != 64):
+                raise ValueError('account admission requires its frozen membership identity')
+        elif self.account_selection_id is not None:
+            raise ValueError('standalone admission cannot carry account membership')
         _require_sha256(self.candidate_package_hash, "candidate_package_hash")
         _require_sha256(self.final_result_hash, "final_result_hash")
         _require_aware(self.requested_at, "requested_at")
@@ -118,6 +148,7 @@ class MockAutomationAdmission:
             "execution_run_id": self.execution_run_id,
             "requested_at": self.requested_at.isoformat(),
             "state": self.state,
+            **({'account_selection_id': self.account_selection_id} if self.account_selection_id is not None else {}),
         }
 
 
@@ -220,10 +251,11 @@ def build_mock_automation_admission(
     spec: MockAutomationOperatingSpec,
     *,
     requested_at: datetime,
+    account_selection: MockAutomationAccountSelection | None = None,
 ) -> MockAutomationAdmission:
     _require_aware(requested_at, "requested_at")
     body = {
-        "version": MOCK_AUTOMATION_ADMISSION_VERSION,
+        "version": MOCK_AUTOMATION_ADMISSION_VERSION if account_selection is None else MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION,
         "spec_id": spec.spec_id,
         "strategy_ref": spec.strategy_ref,
         "account_ref": spec.account_scope.account_ref,
@@ -231,10 +263,14 @@ def build_mock_automation_admission(
         "final_result_hash": spec.final_result_hash,
         "final_batch_id": spec.final_batch_id,
         "final_run_id": spec.final_run_id,
-        "execution_run_id": execution_run_id_for_spec(spec.spec_id),
+        "execution_run_id": execution_run_id_for_spec(spec.spec_id if account_selection is None else account_selection.primary_spec_id),
         "requested_at": requested_at.isoformat(),
         "state": "REQUESTED",
+        **({'account_selection_id': account_selection.selection_id} if account_selection is not None else {}),
     }
+    if account_selection is not None and (spec.spec_id not in account_selection.member_spec_ids
+            or spec.account_scope != account_selection.account_scope or requested_at < account_selection.frozen_at):
+        raise ValueError('account admission member scope conflict')
     return MockAutomationAdmission(
         admission_id=_content_id("mock_automation_admission", body),
         requested_at=requested_at,
@@ -300,6 +336,8 @@ def admit_mock_automation(
         raise ValueError("mock automation runtime does not match the admitted spec")
 
     existing = repository.load_mock_automation_admission_for_spec(account_ref, spec.spec_id)
+    if existing is not None and existing.version != MOCK_AUTOMATION_ADMISSION_VERSION:
+        raise RuntimeError('explicit account membership requires the account admission path')
     admission = existing if existing is not None else build_mock_automation_admission(
         spec, requested_at=requested_at,
     )
@@ -345,8 +383,73 @@ def admit_mock_automation(
     return admission, receipt
 
 
+def admit_mock_automation_account_selection(repository, runtime, *, account_ref: str,
+        selection_id: str, requested_at: datetime, expected_control_revision: int,
+        expected_implementation_hash, lease_seconds: int = 60):
+    """Admit explicit members to one disabled account runtime, never one lease per member.
+
+    Immutable member admissions precede the single control CAS. A lost control
+    acknowledgement can be retried against those same admissions and receipts.
+    Activation/recovery and every actual order still need their native gates.
+    """
+    _require_aware(requested_at, 'requested_at')
+    if type(expected_control_revision) is not int or expected_control_revision < 0:
+        raise ValueError('expected account control revision must be a non-negative integer')
+    selection = repository.load_mock_automation_account_selection(account_ref, selection_id)
+    if selection is None:
+        raise ValueError('mock account selection is not stored')
+    if requested_at < selection.frozen_at:
+        raise ValueError('account admission predates its frozen selection')
+    run_id = execution_run_id_for_spec(selection.primary_spec_id)
+    if runtime.account_ref != account_ref or runtime.run_id != run_id:
+        raise ValueError('mock account runtime does not match its declared anchor')
+    control = repository.load_mock_automation_control(account_ref)
+    same = control is not None and control.account_selection == selection
+    if control is not None and (control.desired_state is not MockAutomationDesiredState.RUNNING
+            or control.execution_run_id != run_id or control.active_spec_id != selection.primary_spec_id
+            or not same):
+        raise RuntimeError('mock account control requires explicit resume or handoff')
+    if (control.control_revision if control is not None else 0) != expected_control_revision:
+        raise RuntimeError('mock account control changed before admission')
+    # Revalidate current binding, all READY members, exact final lineage and
+    # selected implementation even on a retry. Saved preparation grants nothing.
+    repository.publish_mock_automation_account_selection(selection,
+        expected_implementation_hash=expected_implementation_hash)
+    admissions = []
+    for spec_id in selection.member_spec_ids:
+        spec = repository.load_mock_automation_spec(account_ref, spec_id, require_canonical_document=True)
+        _verify_final_candidate(repository, spec)
+        existing = repository.load_mock_automation_admission_for_spec(account_ref, spec_id)
+        if existing is not None and (existing.execution_run_id != run_id
+                or existing.version != MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION
+                or existing.account_selection_id != selection_id):
+            raise RuntimeError('member already has a different standalone or account admission')
+        admissions.append(existing or build_mock_automation_admission(spec,
+            requested_at=requested_at, account_selection=selection))
+    # Validate the complete set before publishing any new member receipt.
+    for admission in admissions:
+        repository.save_mock_automation_admission(admission)
+    runtime.start(lease_seconds=lease_seconds, new_orders_enabled=False)
+    receipts = []
+    for admission in admissions:
+        receipt = repository.load_mock_automation_lease_for_admission(account_ref, admission.admission_id)
+        if receipt is None:
+            receipt = build_mock_automation_lease_receipt(admission, admitted_at=requested_at)
+            repository.save_mock_automation_lease_receipt(receipt)
+        receipts.append(receipt)
+    if control is None:
+        control = MockAutomationControl(MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION, account_ref,
+            MockAutomationDesiredState.RUNNING, expected_control_revision + 1, selection.primary_spec_id,
+            run_id, requested_at, 'explicit account membership admission', account_selection=selection)
+        if not repository.save_mock_automation_control(control, expected_revision=expected_control_revision):
+            raise RuntimeError('mock account control changed during admission')
+    return tuple(admissions), tuple(receipts), control
+
+
 def mock_automation_control_from_dict(value: Mapping[str, Any]) -> MockAutomationControl:
-    return MockAutomationControl(
+    if value.get('version') == MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION and type(value.get('control_revision')) is not int:
+        raise ValueError('account control revision must be an integer')
+    control = MockAutomationControl(
         version=str(value["version"]),
         account_ref=str(value["account_ref"]),
         desired_state=MockAutomationDesiredState(str(value["desired_state"])),
@@ -357,7 +460,12 @@ def mock_automation_control_from_dict(value: Mapping[str, Any]) -> MockAutomatio
         reason=str(value["reason"]),
         entry_resume_required=value.get("entry_resume_required", False),
         planned_review_resume_id=value.get("planned_review_resume_id"),
+        account_selection=(mock_automation_account_selection_from_dict(value['account_selection'])
+                           if value.get('account_selection') is not None else None),
     )
+    if control.account_selection is not None and control.to_dict() != dict(value):
+        raise ValueError('account control document is not canonical')
+    return control
 
 
 def mock_automation_admission_from_dict(value: Mapping[str, Any]) -> MockAutomationAdmission:
@@ -375,12 +483,15 @@ def mock_automation_admission_from_dict(value: Mapping[str, Any]) -> MockAutomat
         execution_run_id=str(value["execution_run_id"]),
         requested_at=requested_at,
         state=str(value["state"]),
+        account_selection_id=value.get('account_selection_id'),
     )
     expected = _content_id("mock_automation_admission", {
         key: item for key, item in admission.to_dict().items() if key != "admission_id"
     })
     if admission.admission_id != expected:
         raise ValueError("mock automation admission content does not match admission_id")
+    if admission.account_selection_id is not None and admission.to_dict() != dict(value):
+        raise ValueError('account admission document is not canonical')
     return admission
 
 
