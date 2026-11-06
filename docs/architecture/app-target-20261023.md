@@ -8,9 +8,9 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-06 · S12-05 native 멤버 체결·공통 Risk·실제 수량 소비자 연결**. AR 판정과 선행 개발은11절에 둔다.
+갱신. **2026-11-06 · S12-05 native 멤버 Episode·하나의 Runner 수명 연결**. AR 판정과 선행 개발은11절에 둔다.
 
-**현재 단계.** 기본 저장소 `main`에서 S12-01~04 수락·전체4/5, S12-05 대표3·4·5·7·9의5/11 개발 수락이다. native 멤버 ID를 실제 주문/체결·하나의 공통 Risk·멤버별 보유/매도 예약·현재 계획 수량과 인증 조회/읽기 전용 연구 codec까지 연결해 Windows403/실제PG20으로 검증했다. 기존 단일 계좌/주문 자료의 직렬화 형식·hash와 현재 조건 재판단·정정 우선·UNKNOWN 중복 제출 금지는 유지한다. 기존 완료봉 Family의 공통 경계 합성 검증이며 실제 돌파/종가베팅의 정상 자동 병행 수락은 아니다. 다음은 멤버 입장·Position/checkpoint/clock을 하나의 Runner에 연결하고 실제 전략/재진입/복구·교체·Shadow/UI/매매일지를 닫는 작업이다. 대표1·2·6·8·10·11, DD/MICRO·독립 계좌/원주문 조건과 운영 제외는 유지한다. [로드맵](section12-development-roadmap-20261105.md) · [현재 연결](#section12-native-member-risk-consumers) · [대표 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining).
+**현재 단계.** 기본 저장소 `main`에서 S12-01~04 수락·전체4/5, S12-05 대표3·4·5·7·9의5/11 개발 수락이다. 실제 멤버 입장·체결/복구 상태·복구 저장과 native 증거 소비자를 하나의 기존 Runner에 연결해 Windows261/실제PG26으로 검증했다. 실행 순서는 계좌 기준 멤버와 별도로 명시하며 하나의 권한/Task/수신·중지/종료를 유지한다. 실제 낙주 비기준 멤버의 자기 최초 트리거와 체결3주 청산도 검증했으나 실제 돌파/종가베팅의 자동 병행 수락은 아니다. 다음은 기존 공통 계좌 cut으로 알려진 다른 멤버의 주문/보유와 신규 진입·모든 멤버 복구/재개를 연결하고 명시 순서/공개 기동·Shadow/UI/매매일지·교체를 닫는 작업이다. 현재 조건 재판단·정정 우선·UNKNOWN 중복 제출 금지, 원래 대표1·2·6·8·10·11/DD/MICRO·독립 계좌/원주문 조건과 운영 제외는 유지한다. [로드맵](section12-development-roadmap-20261105.md) · [현재 연결](#section12-member-episode-single-runner) · [대표 잔여](section12-development-roadmap-20261105.md#s12-acceptance-remaining).
 
 **연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
@@ -1967,7 +1967,7 @@ MAIN139에 AR06 수락 결과의 출처 전달과 AR09 version1 owner-state를 �
 
 현재 집계는 [0절](#0-현재-기준과-진행-현황)과 이 절의 표를 따른다. **90개 중 검증 완료 83·재발 시 이관 1·잔여 6(세부 행동 17)**이다. 잔여는 전환 전 조건 5개와 별도 승인 운영 단계 AR08-C25다. OS별 배포·장후 전송의 단계별 범위는 [11.72](#portable-execution-target)에 둔다. 이 집계는 각 조건의 국소 판정이며 AR 전체 종결·운영 수락은 0절에서 별도로 본다.
 
-라이브러리와 12절의 새 제품 개발은 [최초 범위11.239](#rss-and-section12-development)와 [현재0절](#0-현재-기준과-진행-현황)을 따른다. 추가·부분 청산과 실제 연구 체인의 근거는 [11.286](#section12-leader-staged-actions)·[11.287](#section12-staged-final-source-chain)·[11.288](#section12-explicit-account-composition)·[11.289](#section12-native-shared-account-owner)·[11.290](#section12-native-member-risk-consumers)에 두며 이 표의 조건별 검증·운영 수락과 분리한다.
+라이브러리와 12절의 새 제품 개발은 [최초 범위11.239](#rss-and-section12-development)와 [현재0절](#0-현재-기준과-진행-현황)을 따른다. 추가·부분 청산과 실제 연구 체인의 근거는 [11.286](#section12-leader-staged-actions)·[11.287](#section12-staged-final-source-chain)·[11.288](#section12-explicit-account-composition)·[11.289](#section12-native-shared-account-owner)·[11.290](#section12-native-member-risk-consumers)·[11.291](#section12-member-episode-single-runner)에 두며 이 표의 조건별 검증·운영 수락과 분리한다.
 
 **정본 사용:** 이 표를 갱신하고 같은 상태 보고를 계속 덧붙이지 않는다. **완료**는 해당 국소 조건의 본 코드 연결/관련 검증 수락, **부분 완료**는 일부 본 코드/검증 수락 후 필수 조건 잔여, **미완료**는 본 코드 미수락(격리 구현 포함), **외부 환경 대기**는 필요한 실제 입력/환경·승인 미확보다. 격리 후보나 정책 문서만으로 완료를 올리지 않는다. 개별 항목은 한 담당 AR에서만 집계하며 다른 AR의 선행·참조는 중복0이다. [전체 대조 근거/현재 코드/개별 완료조건](../../tmp/ar-v1-wave48-20261028/v1-remaining-checklist/consolidated.json)에 실제 함수·기존 실행 소스·미확인 범위와 root의 선행 정정을 보존한다. 최초 체크리스트 대조에서는 제품 변경·새 검사 시작·운영 접근 없이 기존 baseline 종료만 정리했다. 이후 승인 v1 연속 진행의 격리 후보 검사와 현재 결과는 0절 및 해당 잔여행에 반영한다.
 
@@ -5006,6 +5006,22 @@ native claim이 확정한 spec_id만 별도 MemberExecutionRecord/MemberAccountE
 최초5c5c63fd의403/20도 통과했으나 새 검사 원장에 기존 수정 helper 모듈 발견12를 누락한 정적 오류가 있었다. draft306의 metadata만 보완한 뒤 hash가 달라져 같은403/20을 한 번 재검증했다. 최초 실패/보고서를 보존하고 낡은 소스를 현재 통과로 바꾸지 않았다. 개발 helper 오류2의 원 로그와 종료 영수증도 보존했으며 종료 확인 뒤 그 TEMP2만 정리했다. 최종20 Windows worker와3 PG Job의 실제 ID/발견·종료·HKCU/TEMP·DB/포트/비밀·active0을 확인했다. [소스/실행/정리](../../tmp/s12-05-member-risk/component-evidence.json) · [증분](../../tmp/s12-05-member-risk/review-execution-final.json) · [full_required 조회와 실제 범위/잔여](../../tmp/s12-05-member-risk/impact-resolution.json).
 
 멤버 scoped Position은 실제 native FILL로 검증했지만 Episode 부모/Supervisor/하나의 Runner에 아직 조립하지 않았다. 인증 계좌 event API와 읽기 전용 연구 codec은 연결했고 매매일지의 멤버 영속·UI/public 병행 기동은 남는다. 실제 돌파/CLOSE·재진입·모든 멤버의 fresh 복구/재개·기존 계획을 남기는 교체·다중 Shadow/입력 연결을 닫아야 대표1/2/6/10을 수락한다. 원래8·11/DD/MICRO·독립 계좌/원주문 조건과 전체4/5·대표5/11은 유지한다. 새 라이브러리/측정 속도 향상·실제 운영 수락은 없다.
+
+<a id="section12-member-episode-single-runner"></a>
+
+### 11.291 S12-05 대표1/2/6/10 · native 멤버 Episode·하나의 Runner 수명 — 2026-11-06
+
+멤버 Episode는 같은 bundle/Runtime에서 실제 저장된 ACCOUNT 입장과 현재 선택을 확인한 뒤 자기 FILL/Position·입장 ID·복구 저장/시계를 사용한다. 기존 collection의 member:spec_id와 원래 standalone current를 구분하고 writer와 모든 해당 native 증거 reader를 함께 연결했다. 돌파 근거는 멤버 주문 ID로 구분하되 원래 scientific 결정 ID는 바꾸지 않는다. 기존 native owner가 이미 읽은 control로 내부 검증 범위를 정하며 호출자 힌트는 덮어쓰고 새 SQL/영속 필드/공개 QueryStore 계약은 추가하지 않는다. 종가/낙주의 다른 멤버 head·snapshot은 자기 root로 읽지 않는다.
+
+기존 Runner 하나가 모든 실제 입장 멤버와 명시 실행 순서를 확인하고 하나의 Task/listener/wake·입력 attach/detach·실제 작업 합류를 맡는다. 기준 멤버나 저장 순서를 매매 우선순위로 삼지 않으며 입장된 group의 한 멤버만 실행하는 혼용은 거절한다. 멤버 오류가 있어도 다른 멤버의 원본 입력/위험 전달·최종 checkpoint 합류를 마친 뒤 오류를 드러낸다. 공통 Risk 전체 계좌 사실을 유지하며 보호 근거는 실제 자기 수량/진입가를 사용한다. 새 라이브러리·Runtime/계좌 권한/worker·table/schema는 없다.
+
+현재 소스c0106b80에서 Windows261(15모듈)/실제PG26(새3/공통12/전략11)·구조1332/retirable38·소비자·증분 실행 대조를 통과했다. 새11정의/기존1변경/총7413·원장307·원래 미결49를 보존했다. 실제 두 native 체결1@69000/1@70000이 독립 checkpoint/재시작에서 보존되고 재주문하지 않는다. 실제 공개 P0 정책의 두 운용 명세 중 비기준 멤버만 진입·부분/늦은 체결3을 받은 경우, 자기 callback 최초 트리거를 삭제하면 native 주문 전송 전에 거절하고 같은 저장본 복원 후 실제3주만 청산한다. 기준 멤버의 flat/None과 복구 원문은 유지한다. 합성 입력의 소프트웨어 검증이며 전략 성과나 돌파/CLOSE 병행 수락이 아니다.
+
+최초 Windows의 기존 키 교체/매수 취소1 실패는 변경 전b301(LFefd20b1d)에서도 재현했다. 취소 이벤트6에 비해 Risk4가 남고 정확한 cut6 대기만으로도 진행하지 않아, 취소 뒤 공통 복구 요청 누락을 확인했다. 실제 취소/checkpoint ACK 후 기존 계좌 owner의 coalesced 복구 요청1회를 연결했다. 검사는 해당 CANCEL_ACCEPTED가 Risk에 반영된 뒤 원래 대사 미완료·CANCEL_PENDING·취소1/매수1·ABANDON·입장 재개 거절·원래 계획/제어 assertion을 그대로 확인한다. boolean을 기다리거나 기존3초 대기를 늘리지 않았다. 원래 실패/계측·비교 소스와 실제 수정 후 근거를 보존한다.
+
+첫 PG3 중2통과/1은 검사 준비의 path/now 인자와0인자 factory 불일치였다. 기존 PANIC factory/주입 시계로 고쳤으며 원래 실패/정리를 보존했다. 검사 파일/원장도 source hash에 포함돼 수정 후 같은261/26을 한 번 재검증했다. 이 소스의 전략PG11은 기존 검사240초 한도에 걸려 최종 보고서가 없어 통과로 세지 않았다. 실제 종료/정리를 확인한 뒤 기존 설정360초로 해당11만 다시 통과했고 현재261/PG15는 반복하지 않았다. 외부420초·제품/검사 조건은 유지했다. 개발 fixture의 지원하지 않는 positions2와 flat0 가정도 기존 positions1/flat None 계약대로 고쳤으며 제품 guard는 완화하지 않았다. 종료 확인한 실패 TEMP8만 정리했고 개발/대조11영수증·최종15 Windows worker와3 PG Job의 실제 ID/발견·종료·HKCU/TEMP·DB/포트/비밀·active0을 확인했다. [현재 소스/실행/정리](../../tmp/s12-05-account-runner/component-evidence.json) · [증분](../../tmp/s12-05-account-runner/review-execution-final.json) · [정적 변경분/범위/실패/잔여](../../tmp/s12-05-account-runner/impact-resolution.json).
+
+이 단계는 실제 native 멤버 Episode와 한 Runner의 연결이며 공개 group 기동·실제 공통 monitor/다중 입력/Shadow/UI·매매일지 전체 수락은 아니다. 명시 순서의 동결/설정·알려진 다른 멤버 주문/보유와 신규 진입·모든 멤버 fresh 복구/재개/키 교체·돌파/CLOSE 병행과 재진입·기존 계획을 남긴 명세 교체 및 group 시간 수명의 실제 소비자를 닫아야 한다. 기존 monitor의 공통 실행 cut을 재사용하며 멤버별 broker polling이나 가짜 Risk ID를 만들지 않는다. 전체4/5·대표5/11과 원래8·11/DD/MICRO·독립 계좌/원주문 조건을 유지한다. 초기 입장 대조 외의 멤버 반복 조회 최종 통합과 성능 검증은 남고 측정 속도 향상은 주장하지 않는다.
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 

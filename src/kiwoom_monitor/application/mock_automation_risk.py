@@ -323,7 +323,7 @@ def prepare_planned_leader_protection_exit(
     )):
         raise ValueError("planned leader protection cut is stale")
     state = StrategyState(
-        status="open", symbol=symbol, entry_price=dict(risk.owned_entry_prices).get(symbol),
+        status="open", symbol=symbol, entry_price=dict(risk.entry_prices_for_spec(spec.spec_id)).get(symbol),
         position_quantity=quantity, opened_at=position_proof["entry_decided_at"],
     ).to_dict()
     snapshot = {"version": PLANNED_LEADER_PROTECTION_EXIT_VERSION, "spec_id": spec.spec_id,
@@ -451,8 +451,8 @@ def validate_mock_stop_loss_proof(proof, spec, risk=None, *, stop_loss_bps=None,
                 or ipo_candidate['close_ipo_entry_setup']['policy'] != ipo_policy.to_dict()):
             raise ValueError('ipo_structure_stop_original_setup_changed')
         if risk is not None and (
-                dict(risk.owned_position_quantities).get(proof['symbol']) != proof['quantity']
-                or dict(risk.owned_entry_prices).get(proof['symbol']) != proof['entry_price_won']
+                dict(risk.owned_for_spec(spec.spec_id)).get(proof['symbol']) != proof['quantity']
+                or dict(risk.entry_prices_for_spec(spec.spec_id)).get(proof['symbol']) != proof['entry_price_won']
                 or risk.execution_run_id != proof['execution_run_id']):
             raise ValueError('ipo_structure_stop_native_basis_changed')
         return
@@ -479,8 +479,8 @@ def validate_mock_stop_loss_proof(proof, spec, risk=None, *, stop_loss_bps=None,
             raise ValueError("leader_stop_pinned_context_changed")
         if leader_config is not None:
             validate_leader_position_proof(position, leader_config, spec, position["run_id"])
-        if risk is not None and (dict(risk.owned_position_quantities).get(proof["symbol"]) != proof["quantity"]
-                or dict(risk.owned_entry_prices).get(proof["symbol"]) != proof["entry_price_won"]
+        if risk is not None and (dict(risk.owned_for_spec(spec.spec_id)).get(proof["symbol"]) != proof["quantity"]
+                or dict(risk.entry_prices_for_spec(spec.spec_id)).get(proof["symbol"]) != proof["entry_price_won"]
                 or risk.execution_run_id != position["run_id"]):
             raise ValueError("leader_stop_native_basis_changed")
         return
@@ -499,16 +499,16 @@ def validate_mock_stop_loss_proof(proof, spec, risk=None, *, stop_loss_bps=None,
             or datetime.fromisoformat(proof['available_at']).tzinfo is None):
         raise ValueError('mock_stop_loss_proof_invalid')
     if risk is not None and (
-            dict(risk.owned_position_quantities).get(proof['symbol']) != proof['quantity']
-            or dict(risk.owned_entry_prices).get(proof['symbol']) != proof['entry_price_won']):
+            dict(risk.owned_for_spec(spec.spec_id)).get(proof['symbol']) != proof['quantity']
+            or dict(risk.entry_prices_for_spec(spec.spec_id)).get(proof['symbol']) != proof['entry_price_won']):
         raise ValueError('mock_stop_loss_native_basis_changed')
 
 
 def mock_automation_stop_loss_trigger(spec, risk, *, execution_run_id, now, price, account_positions, stop_loss_bps,
                                       ipo_policy=None, ipo_candidate=None):
     """Evaluate an admitted stop from ACKed fill basis and borrowed Collector RAM."""
-    basis = dict(risk.owned_entry_prices)
-    owned = dict(risk.owned_position_quantities)
+    basis = dict(risk.entry_prices_for_spec(spec.spec_id))
+    owned = dict(risk.owned_for_spec(spec.spec_id))
     symbol = price.get('symbol') if isinstance(price, Mapping) else None
     structure_stop = (getattr(ipo_policy, 'variant', None) == 'IPO_BREAKOUT' and ipo_candidate is not None
                       and symbol == ipo_candidate['symbol'] and type(price.get('price_won')) is int
@@ -516,7 +516,9 @@ def mock_automation_stop_loss_trigger(spec, risk, *, execution_run_id, now, pric
     age = spec.maximum_data_gap_seconds
     if spec.unfilled_execution_policy is not None:
         age = min(age, spec.unfilled_execution_policy.max_snapshot_age_seconds)
-    if (symbol not in basis or symbol not in owned or owned.get(symbol) != account_positions.get(symbol)
+    covered = (risk.reconciliation_complete and account_positions.get(symbol, 0) >= owned.get(symbol, 0)
+               if risk.member_attribution is not None else owned.get(symbol) == account_positions.get(symbol))
+    if (symbol not in basis or symbol not in owned or not covered
             or price.get('durable') is not False or price.get('market_status') != 'TRADABLE'
             or type(price.get('price_won')) is not int or price['price_won'] <= 0
             or not isinstance(price.get('available_at'), datetime) or price['available_at'].tzinfo is None
@@ -568,7 +570,7 @@ def prepare_mock_protection_exit(spec, *, run_id, control_revision, notice, risk
     trigger = notice.get('risk_trigger', {})
     if (spec.unfilled_execution_policy is None or notice.get('state') != 'PENDING'
             or not _protective_exit_trigger_valid(trigger, spec, risk)
-            or state.status != 'open' or dict(risk.owned_position_quantities) != {state.symbol: state.position_quantity}
+            or state.status != 'open' or dict(risk.owned_for_spec(spec.spec_id)) != {state.symbol: state.position_quantity}
             or price['available_at'] > risk.observed_at):
         raise ValueError('protection_exit_native_loss_or_owned_position_unverified')
     snapshot = {'version': PROTECTION_EXIT_VERSION, 'spec_id': spec.spec_id, 'execution_run_id': run_id,
@@ -795,6 +797,13 @@ class MockAutomationRiskSnapshot:
     def entry_prices_for_member(self, spec_id: str) -> tuple[tuple[str, int], ...]:
         self._require_member_attribution()
         return tuple((symbol, price) for member, symbol, quantity, price in self.member_positions if member == spec_id)
+
+    def owned_for_spec(self, spec_id: str) -> tuple[tuple[str, int], ...]:
+        """Use native member facts when present, preserving the standalone Risk contract."""
+        return self.owned_position_quantities if self.member_attribution is None else self.owned_for_member(spec_id)
+
+    def entry_prices_for_spec(self, spec_id: str) -> tuple[tuple[str, int], ...]:
+        return self.owned_entry_prices if self.member_attribution is None else self.entry_prices_for_member(spec_id)
 
     def to_dict(self) -> dict[str, Any]:
         return {

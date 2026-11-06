@@ -30,6 +30,7 @@ from kiwoom_monitor.application.mock_automation_execution import (
     unfilled_execution_policy_rejections,
     unfilled_management_control_revision, unfilled_registration_policy,
     emergency_stop_mock_automation,
+    mock_automation_intent_id,
 )
 from kiwoom_monitor.application.mock_automation_session_clock import (
     SESSION_CLOCK_VERSION, clock_exit_decision, session_clock_assessment,
@@ -43,6 +44,9 @@ from kiwoom_monitor.application.order_lifecycle import (
 )
 from kiwoom_monitor.application.mock_automation_recovery import (
     record_mock_automation_recovery_from_risk,
+)
+from kiwoom_monitor.application.mock_automation_admission import (
+    MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION, MockAutomationAdmission,
 )
 from kiwoom_monitor.application.mock_automation_risk import mock_automation_protection_trigger
 from kiwoom_monitor.application.research_families import get_research_family, parse_strategy_config
@@ -395,7 +399,7 @@ class MockAutomationCheckpoint:
     def restore_revision(self, value) -> None:
         self._revision = max(0, int(value))
 
-    def commit(self, content, store, *, account_ref, now_provider,
+    def commit(self, content, store, *, account_ref, now_provider, key="current",
                force: bool = False) -> None:
         if not force and not self._pending and content == self._acknowledged_content:
             return  # Only this runner's acknowledged content can be a no-op.
@@ -409,7 +413,7 @@ class MockAutomationCheckpoint:
         }
         store.upsert_documents(
             "execution_mock_automation_runner_current",
-            [{"owner": account_ref, "key": "current", "document": document}],
+            [{"owner": account_ref, "key": key, "document": document}],
         )
         self._acknowledged_content = content
         self._pending = False
@@ -431,19 +435,34 @@ class MockAutomationEpisode:
         price_source=None,
         leader_context_source=None,
         now_provider=None,
+        member_admission: MockAutomationAdmission | None = None,
     ) -> None:
         context = bundle.automation_context
         if (
             context is None
             or bundle.account_ref != spec.account_scope.account_ref
             or bundle.run_id != context.execution_run_id
-            or context.spec_id != spec.spec_id
+            or member_admission is None and context.spec_id != spec.spec_id
         ):
             raise ValueError("MOCK_AUTOMATION_RUNNER_CONTEXT_MISMATCH")
+        if member_admission is not None and (
+                not isinstance(member_admission, MockAutomationAdmission)
+                or member_admission.version != MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION
+                or (member_admission.account_ref, member_admission.execution_run_id,
+                    member_admission.spec_id, member_admission.strategy_ref, member_admission.candidate_package_hash,
+                    member_admission.final_result_hash, member_admission.final_batch_id, member_admission.final_run_id)
+                != (bundle.account_ref, bundle.run_id, spec.spec_id, spec.strategy_ref, spec.candidate_package_hash,
+                    spec.final_result_hash, spec.final_batch_id, spec.final_run_id)):
+            raise ValueError("MOCK_AUTOMATION_MEMBER_CONTEXT_MISMATCH")
         self._store = store
         self._now = (lambda: as_kst(now_provider())) if now_provider else (lambda: datetime.now(KST))
         self._bundle = bundle
         self._spec = spec
+        self._member_admission = member_admission
+        self._admitted_member_spec_ids = ()
+        self._admission_id = (member_admission.admission_id if member_admission is not None
+                              else getattr(context, 'admission_id', ''))
+        self._checkpoint_key = 'member:' + spec.spec_id if member_admission is not None else 'current'
         self._repository = ForwardEvaluationRepository(store)
         self._position_registered_implementation = ""
         self._position_policy_implementation = None
@@ -495,6 +514,7 @@ class MockAutomationEpisode:
         self._checkpoint = MockAutomationCheckpoint()
         self._episode_position = MockAutomationEpisodePosition(
             account_ref=bundle.account_ref, run_id=bundle.run_id,
+            member_spec_id=spec.spec_id if member_admission is not None else None,
         )
         self._status: dict[str, Any] = {
             "state": "WARMUP", "reason": "not_started", "orders_enabled": False,
@@ -523,6 +543,34 @@ class MockAutomationEpisode:
     @property
     def prepared(self) -> bool:
         return self._prepared
+
+    @property
+    def spec_id(self) -> str:
+        return self._spec.spec_id
+
+    @property
+    def admitted_member_spec_ids(self) -> tuple[str, ...]:
+        return self._admitted_member_spec_ids
+
+    def _matches_control(self, control) -> bool:
+        if (control is None or getattr(control, 'execution_run_id', self._bundle.run_id) != self._bundle.run_id):
+            return False
+        if self._member_admission is None:
+            return control.active_spec_id == self._spec.spec_id
+        selection = control.account_selection
+        return (selection is not None and selection.selection_id == self._member_admission.account_selection_id
+                and control.active_spec_id == self._bundle.automation_context.spec_id
+                and control.includes_spec(self._spec.spec_id))
+
+    def _checkpoint_document(self, collection):
+        if self._member_admission is None:
+            rows = self._store.load_documents(collection, self._bundle.account_ref, 1)
+            return rows[0].get('document') if rows else None
+        row = self._store.load_document(collection, self._bundle.account_ref, self._checkpoint_key)
+        return row.get('document') if row else None
+
+    def _leader_evidence_key(self, decision_id):
+        return mock_automation_intent_id(self._spec.spec_id, decision_id) if self._member_admission is not None else decision_id
 
     @property
     def closing(self) -> bool:
@@ -616,6 +664,15 @@ class MockAutomationEpisode:
 
     def _prepare_restore_locked(self) -> None:
         spec = self._spec
+        if self._member_admission is not None:
+            with self._repository.mock_automation_read_scope() as reader:
+                args = {} if reader is None else {'_reader': reader}
+                stored = self._repository.load_mock_automation_admission_for_spec(
+                    self._bundle.account_ref, spec.spec_id, **args)
+                control = self._repository.load_mock_automation_control(self._bundle.account_ref, **args)
+                if stored != self._member_admission or not self._matches_control(control):
+                    raise ValueError('MOCK_AUTOMATION_MEMBER_ADMISSION_CHANGED')
+                self._admitted_member_spec_ids = control.account_selection.member_spec_ids
         package = self._repository.load_mock_automation_candidate_package(
             spec.strategy_ref, spec.candidate_package_hash,
         )
@@ -656,14 +713,10 @@ class MockAutomationEpisode:
             universe_horizon=max(int(self._spec.maximum_data_gap_seconds or 0),
                 int(self._config.rank_window_seconds or 0) + int(self._config.rank_max_gap_seconds or 0)),
         )
-        rows = self._store.load_documents(
-            "execution_mock_automation_runner_current", self._bundle.account_ref, 1,
-        )
-        runner_document = rows[0].get("document") if rows else None
+        runner_document = self._checkpoint_document("execution_mock_automation_runner_current")
         restored_clock = None
         if self._config.session_exit_policy:
-            rows = self._store.load_documents(CLOCK_COLLECTION, self._bundle.account_ref, 1)
-            clock = rows[0].get("document") if rows else None
+            clock = self._checkpoint_document(CLOCK_COLLECTION)
             if isinstance(clock, Mapping) and (
                 clock.get("spec_id") == self._spec.spec_id
                 and clock.get("execution_run_id") == self._bundle.run_id
@@ -699,8 +752,7 @@ class MockAutomationEpisode:
             parameters=candidate['parameters'], price_source=self._price_source, now_provider=self._now,
             family=candidate['family'])
         self._episode_position.set_plan_fill_listener(self._minute_management.observe_fill)
-        rows = self._store.load_documents('execution_mock_automation_runner_current', self._bundle.account_ref, 1)
-        document = rows[0]['document'] if rows else None
+        document = self._checkpoint_document('execution_mock_automation_runner_current')
         matching = isinstance(document, Mapping) and (
             document.get('version'), document.get('spec_id'), document.get('execution_run_id'), document.get('candidate_package_hash')
         ) == (RUNNER_CHECKPOINT_VERSION, self._spec.spec_id, self._bundle.run_id, self._spec.candidate_package_hash)
@@ -734,6 +786,12 @@ class MockAutomationEpisode:
     def is_bound_to(self, bundle: Any) -> bool:
         """Compare the borrowed bundle identity, without claiming its lease."""
         return self._bundle is bundle
+
+    def shares_account_membership(self, other) -> bool:
+        """Compare admitted members without lending another Runtime or its state."""
+        return (isinstance(other, MockAutomationEpisode) and self._member_admission is not None
+                and other._member_admission is not None and self._bundle is other._bundle
+                and self._member_admission.account_selection_id == other._member_admission.account_selection_id)
 
     def position_shadow_observation(self, base, *, is_current: Callable[[], bool]):
         """Enrich an account-only cut from this runner's existing RAM owners.
@@ -968,6 +1026,10 @@ class MockAutomationEpisode:
         if (risk.account_as_of != account.as_of
                 or account.account_ref != self._bundle.account_ref):
             raise ValueError("mock_protection_native_recovery_mismatch")
+        if self._member_admission is not None:
+            risk.owned_for_member(self._spec.spec_id)
+            risk.entry_prices_for_member(self._spec.spec_id)
+            risk.pending_sells_for_member(self._spec.spec_id)
         self._stop_loss_cut = (risk, dict(account.positions))
         quote = self._strategy_inputs.latest_stop_quote if self._leader else None
         if quote is not None:
@@ -1004,7 +1066,7 @@ class MockAutomationEpisode:
                     'input_ref':previous_stop['input_ref'], 'durable':False, 'market_status':'TRADABLE'}
                 self.observe_automation_price(previous_stop['symbol'], price)
             else:
-                for symbol, _ in risk.owned_entry_prices:
+                for symbol, _ in risk.entry_prices_for_spec(self._spec.spec_id):
                     price = self._price_source(symbol) if self._price_source is not None else None
                     if price is not None:
                         self.observe_automation_price(symbol, price)
@@ -1068,12 +1130,12 @@ class MockAutomationEpisode:
             return  # The historical cut needs exact owned exposure before it can arm a typed stop.
         context = validate_leader_position_proof(self._leader_position_proof, self._config, self._spec, self._bundle.run_id)
         symbol = context.symbol
-        quantity = dict(risk.owned_position_quantities).get(symbol)
-        entry = dict(risk.owned_entry_prices).get(symbol)
+        quantity = dict(risk.owned_for_spec(self._spec.spec_id)).get(symbol)
+        entry = dict(risk.entry_prices_for_spec(self._spec.spec_id)).get(symbol)
         now = self._now()
         at = datetime.fromisoformat(raw["available_at"])
         staged = hasattr(self._config.execution_contract, 'position_steps')
-        position_matches = (positions.get(symbol, 0) >= quantity if staged and quantity else positions.get(symbol) == quantity)
+        position_matches = (positions.get(symbol, 0) >= quantity if (staged or self._member_admission is not None) and quantity else positions.get(symbol) == quantity)
         if (not quantity or not entry or not position_matches
                 or at < risk.account_as_of or not 0 <= (now-at).total_seconds() <= self._config.max_data_age_seconds):
             return
@@ -1170,7 +1232,7 @@ class MockAutomationEpisode:
                     await drain_thread_call(self._store.upsert_documents, "execution_leader_position_context",
                         [{"owner": self._bundle.account_ref, "key": proof["entry_intent_id"], "document": proof}])
                 await drain_thread_call(self._store.upsert_documents, "execution_leader_decisions",
-                    [{"owner": self._bundle.account_ref, "key": decision.decision_id, "document": {
+                    [{"owner": self._bundle.account_ref, "key": self._leader_evidence_key(decision.decision_id), "document": {
                         "snapshot": evaluation.snapshot.to_dict(), "decision": decision.to_dict(),
                         "observation": {"payload": payload, "received_at": received_at.isoformat(), "source": source, "approved": True},
                         "operational_revision": current.get("revision") if isinstance(current, Mapping) else None,
@@ -1210,7 +1272,7 @@ class MockAutomationEpisode:
                 or self._spec.unfilled_execution_policy is None and not self._minute_plan_mode):
             return
         risk, positions = self._stop_loss_cut
-        if symbol not in dict(risk.owned_entry_prices):
+        if symbol not in dict(risk.entry_prices_for_spec(self._spec.spec_id)):
             return
         previous = self._protection_snapshot()
         if not (previous or {}).get('risk_trigger', {}).get('stop_loss') and price['available_at'] < risk.observed_at:
@@ -1716,7 +1778,7 @@ class MockAutomationEpisode:
                 linked = self._repository.load_latest_mock_automation_recovery(self._bundle.account_ref, admission.admission_id) if admission else None
                 active = self._bundle.repository.account_active_intents(self._bundle.account_ref)
                 now = self._bundle.runtime.server_now()
-                if (current != risk or control is None or control.active_spec_id != self._spec.spec_id
+                if (current != risk or control is None or not self._matches_control(control)
                         or control.execution_run_id != self._bundle.run_id or not control_allows_resolution
                         or linked is None or linked.risk_snapshot_id != risk.snapshot_id
                         or linked.risk_reconciliation_revision != risk.reconciliation_revision
@@ -1815,7 +1877,7 @@ class MockAutomationEpisode:
                 reader_args = {} if reader is None else {'_reader': reader}
                 control = self._repository.load_mock_automation_control(self._bundle.account_ref, **reader_args)
                 if (control is None or control.desired_state.value != 'RUNNING'
-                        or control.active_spec_id != self._spec.spec_id
+                        or not self._matches_control(control)
                         or control.execution_run_id != self._bundle.run_id
                         or self._unfilled_registration is None
                             and control.control_revision != anchor['scope']['control_revision']):
@@ -1835,7 +1897,7 @@ class MockAutomationEpisode:
                 if self._unfilled_registration is not None:
                     unfilled_management_control_revision(self._repository, self._spec, control, anchor['scope'],
                         policy, root, self._unfilled_registration,
-                        admission_id=getattr(self._bundle.automation_context, 'admission_id', '')
+                        admission_id=self._admission_id
                             if control.control_revision != anchor['scope']['control_revision'] else '', **reader_args)
                 # Keep each FILL and lineage query fresh within this native read scope.
                 self._episode_position.apply_new_fills(
@@ -2009,7 +2071,7 @@ class MockAutomationEpisode:
             reader_args = {} if reader is None else {'_reader': reader}
             control = self._repository.load_mock_automation_control(self._bundle.account_ref, **reader_args)
             if (control is None or control.desired_state.value != "RUNNING"
-                    or control.active_spec_id != self._spec.spec_id
+                    or not self._matches_control(control)
                     or control.execution_run_id != self._bundle.run_id):
                 raise ValueError("unfilled_preflight_control_not_running")
             record = execution.load(policy.anchor_intent_id, **reader_args)
@@ -2028,7 +2090,7 @@ class MockAutomationEpisode:
                     scope['control_revision'] = self._unfilled_registration['control_revision']
                 unfilled_management_control_revision(self._repository, self._spec, control, scope,
                     policy, record, self._unfilled_registration,
-                    admission_id=getattr(self._bundle.automation_context, 'admission_id', '')
+                    admission_id=self._admission_id
                         if control.control_revision != scope['control_revision'] else '', **reader_args)
         proposed = prepare_unfilled_management_preflight(
             scope=scope, policy=policy, record=record, broker_snapshot=broker_snapshot,
@@ -2131,7 +2193,7 @@ class MockAutomationEpisode:
             root = load_intent(policy.anchor_intent_id, **reader_args)
             try:
                 unfilled_management_control_revision(self._repository, self._spec, control, scope, policy, root,
-                    registration, admission_id=getattr(self._bundle.automation_context, 'admission_id', ''),
+                    registration, admission_id=self._admission_id,
                     **reader_args)
             except ValueError:
                 return False
@@ -2735,6 +2797,12 @@ class MockAutomationEpisode:
             self._set_cancel_recovery(protective_cancel_recovery(record,events,inputs['policy'],
                 self._spec.unfilled_execution_policy,self._bundle.runtime.server_now()),events,inputs['policy'])
         await drain_thread_call(self._save_checkpoint)
+        # Cancellation ACK is not a terminal broker/FILL observation. Refresh
+        # through the existing coalesced account owner once per actual command;
+        # a flat BUY cancellation also invalidates the previously complete Risk.
+        request = getattr(self._bundle.monitor, 'request_automation_execution_recovery', None)
+        if callable(request):
+            request()
         return state, None
 
     def _cancel_lineage_events(self, *, _reader=None):
@@ -2923,7 +2991,7 @@ class MockAutomationEpisode:
 
                 reader_args = {} if _reader is None else {"_reader": _reader}
                 source = self._store.load_document("execution_leader_decisions", self._bundle.account_ref,
-                                                   intent.decision_id, **reader_args)["document"]
+                                                   self._leader_evidence_key(intent.decision_id), **reader_args)["document"]
                 signal_until = datetime.fromisoformat(source["snapshot"]["feature_values"][0]["value"]["valid_until"])
                 policy = anchored_unfilled_policy(intent, self._spec.unfilled_execution_policy, "BUY_OPPORTUNITY")
                 self._leader_plan_deadline = min(signal_until, policy.wait_until)
@@ -3047,7 +3115,7 @@ class MockAutomationEpisode:
                 control = await native_call(
                     self._repository.load_mock_automation_control, self._bundle.account_ref,
                 )
-            if (control is None or control.active_spec_id != self._spec.spec_id
+            if (control is None or not self._matches_control(control)
                     or getattr(control, "execution_run_id", self._bundle.run_id) != self._bundle.run_id):
                 status = {
                     **(self._status if self._input_progress.recovering else {}),
@@ -3230,7 +3298,7 @@ class MockAutomationEpisode:
 
     def _save_session_clock(self) -> None:
         self._store.upsert_documents(CLOCK_COLLECTION, [{
-            "owner": self._bundle.account_ref, "key": "current",
+            "owner": self._bundle.account_ref, "key": self._checkpoint_key,
             "document": self._session_clock,
         }])
 
@@ -3426,7 +3494,7 @@ class MockAutomationEpisode:
                 latest = await drain_thread_call(
                     self._repository.load_mock_automation_control, self._bundle.account_ref,
                 )
-                if (latest is None or latest.active_spec_id != self._spec.spec_id
+                if (latest is None or not self._matches_control(latest)
                         or latest.execution_run_id != self._bundle.run_id
                         or (latest.desired_state.value != "RUNNING"
                             and not latest.reason.startswith("session_clock:"))):
@@ -3674,7 +3742,7 @@ class MockAutomationEpisode:
 
         control = self._repository.load_mock_automation_control(self._bundle.account_ref)
         linked = (control is not None and control.desired_state.value == "RUNNING" and not control.entry_resume_required
-                and (control.active_spec_id, control.execution_run_id) == (self._spec.spec_id, self._bundle.run_id)
+                and self._matches_control(control)
                 and control.control_revision == notice["resume_from_control_revision"] + 1
                 and control.planned_review_resume_id == notice["planned_review_resume_id"] == planned_review_resume_id(notice))
         if not linked:
@@ -3737,7 +3805,7 @@ class MockAutomationEpisode:
                 self._input_progress.project_incomplete_checkpoint(content)
         self._checkpoint.commit(
             content, self._store,
-            account_ref=self._bundle.account_ref, now_provider=self._now, force=force,
+            account_ref=self._bundle.account_ref, now_provider=self._now, key=self._checkpoint_key, force=force,
         )
         if self._minute_management is not None:
             was_pending = self._minute_management.checkpoint_pending

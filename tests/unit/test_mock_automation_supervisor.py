@@ -2905,7 +2905,18 @@ class MockCredentialPurposeContinuityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1, self.transport.submit.call_count)
             self.assertEqual("ABANDON", restored.episode.status["after_cancel"])
             self.assertEqual(OrderState.CANCEL_PENDING, current.runtime.load_intent(original.intent.intent_id).state)
-            self.assertFalse(repository.load_latest_mock_automation_risk(self.account_ref).reconciliation_complete)
+            pending_events = current.repository.account_events('mock', self.account_ref)
+            cancel_cursor = next(row.accepted_sequence for row in pending_events.events
+                if row.intent_id == original.intent.intent_id and row.event_type == 'CANCEL_ACCEPTED')
+            # CANCEL/checkpoint ACK and the common Risk publication have separate
+            # owners. Await this exact native cancellation cut, not the desired
+            # reconciliation value, so the original safety assertion stays real.
+            await self._wait_until(lambda: repository.load_latest_mock_automation_risk(
+                self.account_ref).execution_event_high_watermark >= cancel_cursor)
+            pending_risk = repository.load_latest_mock_automation_risk(self.account_ref)
+            self.assertFalse(pending_risk.reconciliation_complete,
+                f'risk_revision={pending_risk.reconciliation_revision} risk_cursor={pending_risk.execution_event_high_watermark} '
+                f'account_cursor={pending_events.next_cursor}')
             self.assertEqual("UNAVAILABLE", restored.episode.status["unfilled_native_source"]["paired_ev"])
             plan = restored.episode._unfilled_attempt_plan
             self.assertEqual(registration["control_revision"], plan["anchor"]["scope"]["control_revision"])

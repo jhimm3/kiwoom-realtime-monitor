@@ -179,7 +179,8 @@ class PanicFinalPublicationTests(unittest.TestCase):
             tuple(ctx.repository.load_candidate_events(ctx.run['run_id']))))
 
 
-def prepare_panic_native(case, variant='P0', native_factory=None, *, stopped='continue_original_plan/v1', ready_http=False):
+def prepare_panic_native(case, variant='P0', native_factory=None, *, stopped='continue_original_plan/v1', ready_http=False,
+                         defer_admission=False):
     from unittest.mock import patch
     from kiwoom_monitor.application.market_session_schedule import KST
     from kiwoom_monitor.application.mock_automation_specification import build_mock_automation_publication_documents, publish_ready_mock_automation_spec
@@ -274,12 +275,14 @@ def prepare_panic_native(case, variant='P0', native_factory=None, *, stopped='co
         account_ref=ctx.spec.account_scope.account_ref, run_id=execution_run_id_for_spec(ctx.spec.spec_id),
         owner_token='panic-native-test', now_provider=lambda: ctx.clock[0])
     case.addCleanup(ctx.runtime.stop)
-    admit_mock_automation(ctx.repository, ctx.repository, ctx.runtime, account_ref=ctx.runtime.account_ref,
-        spec_id=ctx.spec.spec_id, requested_at=ctx.clock[0])
+    if not defer_admission:
+        admit_mock_automation(ctx.repository, ctx.repository, ctx.runtime, account_ref=ctx.runtime.account_ref,
+            spec_id=ctx.spec.spec_id, requested_at=ctx.clock[0])
     ctx.revision = 0
     ctx.quote = dict(price_won=ctx.event['signal_reference_price'], available_at=ctx.clock[0],
         input_ref='collector-trade:panic-forward-entry', durable=False, market_status='TRADABLE')
-    refresh_panic_cut(ctx, {})
+    if not defer_admission:
+        refresh_panic_cut(ctx, {})
     return ctx
 
 

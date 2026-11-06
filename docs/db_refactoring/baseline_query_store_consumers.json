@@ -2490,28 +2490,6 @@
     ],
     [
       "src/kiwoom_monitor/central_server/mock_automation_episode.py",
-      "MockAutomationEpisode._prepare_restore_locked",
-      "self._store",
-      "load_documents",
-      "direct_call",
-      "self._store.load_documents",
-      "",
-      "",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
-      "MockAutomationEpisode._prepare_restore_locked",
-      "self._store",
-      "load_documents",
-      "direct_call",
-      "self._store.load_documents",
-      "",
-      "",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
       "MockAutomationEpisode._preview_unfilled_execution_locked",
       "self._repository",
       "load_mock_automation_control",
@@ -5140,17 +5118,6 @@
       "reviewed_store_binding"
     ],
     [
-      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
-      "MockAutomationEpisode._prepare_minute_plan",
-      "self._store",
-      "load_documents",
-      "direct_call",
-      "self._store.load_documents",
-      "",
-      "",
-      "reviewed_store_binding"
-    ],
-    [
       "src/kiwoom_monitor/central_server/realtime_collector.py",
       "CentralRealtimeCollector._flush_snapshot_cycle",
       "self._store",
@@ -5245,6 +5212,50 @@
       "save_mock_automation_control",
       "direct_call",
       "repository.save_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._checkpoint_document",
+      "self._store",
+      "load_document",
+      "direct_call",
+      "self._store.load_document",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._checkpoint_document",
+      "self._store",
+      "load_documents",
+      "direct_call",
+      "self._store.load_documents",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._prepare_restore_locked",
+      "self._repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "self._repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._prepare_restore_locked",
+      "self._repository",
+      "mock_automation_read_scope",
+      "direct_call",
+      "self._repository.mock_automation_read_scope",
       "",
       "",
       "unresolved_candidate"
@@ -7071,6 +7082,87 @@
         "tests/unit/test_mock_automation_account_execution.py",
         "tests/integration/test_mock_automation_account_execution_postgres.py"
       ]
+    },
+    {
+      "id": "S12-05-member-episode-checkpoint-and-native-proof-scope-20261106",
+      "added": [
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._checkpoint_document",
+          "self._store",
+          "load_document",
+          "direct_call",
+          "self._store.load_document",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._checkpoint_document",
+          "self._store",
+          "load_documents",
+          "direct_call",
+          "self._store.load_documents",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._prepare_restore_locked",
+          "self._repository",
+          "load_mock_automation_control",
+          "direct_call",
+          "self._repository.load_mock_automation_control",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._prepare_restore_locked",
+          "self._repository",
+          "mock_automation_read_scope",
+          "direct_call",
+          "self._repository.mock_automation_read_scope",
+          "",
+          "",
+          "unresolved_candidate"
+        ]
+      ],
+      "removed": [
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._prepare_minute_plan",
+          "self._store",
+          "load_documents",
+          "direct_call",
+          "self._store.load_documents",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._prepare_restore_locked",
+          "self._store",
+          "load_documents",
+          "direct_call",
+          "self._store.load_documents",
+          "",
+          "",
+          "reviewed_store_binding"
+        ]
+      ],
+      "forwarding_added": [],
+      "reason": "Move the three existing Episode checkpoint/clock reader occurrences into one helper retaining the same borrowed QueryStore owner. Standalone uses the existing load_documents/current behavior; admitted members use the existing exact load_document key. No QueryStore/SQLite/PG signature changes or new public method. Preserve two new same-named unresolved candidates in the initial member preparation as ForwardEvaluationRepository control/read-scope calls, not direct QueryStore/SQL. Initial admission/control verification is required once before attachment, never on the 0B callback. Only these exact receiver identities/counts change; other bindings/candidates/forwarding and old review history are preserved.",
+      "evidence": [
+        "tmp/s12-05-account-runner/consumers-final.json",
+        "tests/unit/test_mock_automation_account_runner.py",
+        "tests/integration/test_mock_automation_account_runner_postgres.py"
+      ],
+      "execution_scope": "Native member state/stop/trigger and one Runner lifecycle; this static review does not accept public grouped start, actual leader/CLOSE concurrency, source/Shadow/UI/journal or all-member resume."
     }
   ]
 }

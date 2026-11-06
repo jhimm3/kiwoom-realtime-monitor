@@ -145,7 +145,8 @@ def prepare_leader_order_management_claim(store, runtime, execution, spec, recor
     pin = document('execution_leader_position_context', record.intent.plan.plan_id)
     source = (protection_notice['planned_leader_protection_exit']
               if record.intent.policy_version == 'mock-protection-exit/v1' and protection_notice is not None
-              else document('execution_leader_decisions', record.intent.decision_id))
+              else document('execution_leader_decisions', record.intent.intent_id
+                            if getattr(record, 'member_spec_id', None) is not None else record.intent.decision_id))
     stop_risk = (mock_automation_risk_snapshot_from_dict(document('execution_mock_automation_risk_snapshots',
         protection_notice['planned_leader_stop']['risk_snapshot_id']))
         if protection_notice is not None and record.intent.side.value == 'BUY' else None)

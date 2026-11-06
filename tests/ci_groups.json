@@ -107,6 +107,7 @@
       "tests.integration.test_mock_automation_account_selection_postgres",
       "tests.integration.test_mock_automation_account_execution_postgres",
       "tests.integration.test_mock_automation_member_risk_postgres",
+      "tests.integration.test_mock_automation_account_runner_postgres",
       "tests.integration.test_panic_mock_execution_postgres",
     "tests.integration.test_ipo_mock_execution_postgres",
     "tests.integration.test_order_amendment_postgres",

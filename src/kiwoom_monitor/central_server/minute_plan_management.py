@@ -112,7 +112,8 @@ class MinutePlanManagement:
             rows = self._store.load_documents('execution_mock_plan_positions', self._bundle.account_ref, 1000, offset)
             for row in rows:
                 head = row['document']
-                if head['run_id'] != self._bundle.run_id:
+                if (head['run_id'] != self._bundle.run_id
+                        or head.get('spec_id') is not None and head['spec_id'] != self._spec.spec_id):
                     continue
                 context = self._load_context(head['plan_id'])
                 if context is not None:
@@ -126,7 +127,8 @@ class MinutePlanManagement:
     def _load_context(self, plan_id):
         reader = self._repository.load_panic_entry_evidence if self._panic else self._repository.load_close_entry_evidence
         proof = reader(self._bundle.account_ref, plan_id)
-        if proof is None or proof['snapshot']['execution_run_id'] != self._bundle.run_id:
+        if (proof is None or proof['snapshot']['execution_run_id'] != self._bundle.run_id
+                or proof['snapshot']['spec_id'] != self._spec.spec_id):
             return None
         event = proof['snapshot'].get('candidate')
         if event is None and self._panic:

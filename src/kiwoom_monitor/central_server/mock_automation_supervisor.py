@@ -84,14 +84,30 @@ class MockAutomationSupervisor:
     def observe_automation_price(self, symbol, price):
         if self._closing:
             return
+        first_error = None
         for runner in tuple(self._runners.values()):
-            runner.episode.observe_automation_price(symbol, price)
+            for episode in runner.episodes:
+                try:
+                    episode.observe_automation_price(symbol, price)
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
+        if first_error is not None:
+            raise first_error
 
     def observe_leader_trade(self, payload, received_at, **source):
         if self._closing:
             return
+        first_error = None
         for runner in tuple(self._runners.values()):
-            runner.episode.observe_leader_trade(payload, received_at, **source)
+            for episode in runner.episodes:
+                try:
+                    episode.observe_leader_trade(payload, received_at, **source)
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
+        if first_error is not None:
+            raise first_error
 
     def position_shadow_observation(self,observation):
         """Enrich one borrowed account cut using its current registered owner only."""

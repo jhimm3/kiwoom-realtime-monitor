@@ -18,6 +18,17 @@ from kiwoom_monitor.central_server.database_codec import _event_document, _json_
 PLAN_POSITION_COLLECTION = "execution_mock_plan_positions"
 
 
+def _native_execution_scope(ownership, control):
+    """Borrow verified control facts without a second lookup or caller scope hints.
+
+    These private fields exist only in the local validator call chain. They are
+    overwritten at each native ownership/control entry and never persisted.
+    """
+    member = ownership.get('active_spec_id') if control.get('account_selection') is not None else None
+    return {**ownership, '_native_checkpoint_key': 'member:' + member if member is not None else 'current',
+            '_native_member_evidence': member is not None}
+
+
 def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
                                  value: dict[str, Any], p: str, *, now_provider=None,
                                  new_intent_claim=False, submission_claim=False, amendment_claim=False, control_facts=None):
@@ -44,6 +55,7 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
     if not row or row[0] != ownership["owner_token"] or expiry <= (
             kst_now() if now_provider is None else now_provider()):
         raise RuntimeError("EXECUTION_OWNERSHIP_LOST")
+    control = {}
     control_revision = ownership.get("control_revision")
     entry_claim = (new_intent_claim or submission_claim or amendment_claim) and value.get("side") == "BUY"
     if control_revision is not None or (entry_claim and ownership["run_id"].startswith("mock_auto_run_")):
@@ -89,6 +101,7 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
         if (entry_claim and control.get("execution_run_id") == ownership["run_id"]
                 and control.get("entry_resume_required", False)):
             raise RuntimeError("CREDENTIAL_CHANGE_REQUIRES_EXPLICIT_ENTRY_RESUME")
+    ownership = _native_execution_scope(ownership, control)
     if ownership.get('replacement_claim') is not None and 'intent_id' in value:
         _require_mock_replacement_claim(cursor, ownership, value, p, new_intent_claim=new_intent_claim,
             now_provider=now_provider)
@@ -437,7 +450,8 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider, *, account
             or profile.family_version != 'leader_breakout/v1' or gate.action not in {'ADD', 'REDUCE'})):
         raise RuntimeError('PLANNED_POSITION_ACTION_FAMILY_CHANGED')
     if gate.version == MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION:
-        source = _plan_document(cursor, p, 'execution_leader_decisions', account_ref, value['decision_id']) or {}
+        source = _plan_document(cursor, p, 'execution_leader_decisions', account_ref,
+                                value['intent_id'] if account_limits is not None else value['decision_id']) or {}
         raw = (source.get('snapshot') or {}).get('feature_values', [{}])[0].get('value', {})
         if not raw.get('position_step') or raw.get('proposal') != gate.action:
             raise RuntimeError('PLANNED_POSITION_ACTION_EVIDENCE_MISSING')
@@ -684,6 +698,7 @@ def _validate_broker_ledger_write(cursor, p, stored, intent, event, ownership, n
 
 
 def _require_minute_order_management_claim(cursor, p, stored, value, event, ownership, now_provider, control):
+    ownership = _native_execution_scope(ownership, control or {}) if ownership is not None else None
     from kiwoom_monitor.domain.execution_activation import (
         CLOSE_ORDER_MANAGEMENT_VERSION, PANIC_ORDER_MANAGEMENT_VERSION, LEADER_ORDER_MANAGEMENT_VERSION,
     )
@@ -743,7 +758,7 @@ def _require_minute_order_management_claim(cursor, p, stored, value, event, owne
                      if stored['side'] == 'SELL' else None)
     panic_trigger = claim.get('panic_trigger')
     if panic and panic_trigger is not None:
-        _require_panic_trigger_checkpoint(cursor, p, account, spec, stored['run_id'], candidate, panic_trigger)
+        _require_panic_trigger_checkpoint(cursor, p, account, spec, stored['run_id'], candidate, panic_trigger, checkpoint_key=ownership.get('_native_checkpoint_key', 'current'))
     assessed = assess(spec, run_id=stored['run_id'], parameters=package.candidate_spec['parameters'],
         event=candidate, entry_evidence=entry, record=record, head=head,
         order_events=[_json_document(row[0]) for row in _execution_event_rows(cursor, stored['intent_id'], p)],
@@ -751,7 +766,7 @@ def _require_minute_order_management_claim(cursor, p, stored, value, event, owne
         now=kst_now() if now_provider is None else now_provider(), entry_enabled=enabled, root=root,
         exit_evidence=exit_evidence, **(dict(panic_trigger=panic_trigger) if panic else dict(protection_notice=notice,
         root_fill_events=[_json_document(row[0]) for row in _execution_event_rows(cursor, root_id, p)] if notice is not None else (),
-        stop_risk=_close_native_stop_risk(cursor, p, account, spec, notice, root_id) if notice is not None else None)))
+        stop_risk=_close_native_stop_risk(cursor, p, account, spec, notice, root_id, checkpoint_key=ownership.get('_native_checkpoint_key', 'current')) if notice is not None else None)))
     expected_action = 'AMEND' if event['event_type'] == 'AMENDMENT_STARTED' else 'CANCEL'
     if (assessed != claim or claim['action'] != expected_action
             or event['broker_order_id'] != claim['broker_order_id']
@@ -817,7 +832,7 @@ def _require_leader_order_management_claim(cursor, p, stored, value, event, owne
         plan_entry_notional = sum(row['quantity'] * row['price'] for identity, events in staged_pages.items()
             if staged_orders[identity]['side'] == 'BUY' for _, row in events if row['event_type'] == 'FILL')
     if notice is not None or stored['policy_version'] == 'mock-protection-exit/v1':
-        checkpoint = document('execution_mock_automation_runner_current', 'current')
+        checkpoint = document('execution_mock_automation_runner_current', ownership.get('_native_checkpoint_key', 'current'))
         if ((checkpoint.get('spec_id'), checkpoint.get('execution_run_id'), checkpoint.get('leader_position_proof'))
                 != (spec.spec_id, stored['run_id'], pin) or checkpoint.get('protection_review') != notice):
             raise RuntimeError('LEADER_CURRENT_ORDER_PROTECTION_CHANGED')
@@ -837,7 +852,7 @@ def _require_leader_order_management_claim(cursor, p, stored, value, event, owne
             if quantity != trigger['stop_loss']['quantity']:
                 raise RuntimeError('LEADER_CURRENT_ORDER_ORIGINAL_STOP_FILLS_CHANGED')
     source = (notice['planned_leader_protection_exit'] if stored['policy_version'] == 'mock-protection-exit/v1'
-              else document('execution_leader_decisions', stored['decision_id']))
+              else document('execution_leader_decisions', stored['intent_id'] if ownership.get('_native_member_evidence') else stored['decision_id']))
     if (source.get('snapshot') or {}).get('feature_values', [{}])[0].get('value', {}).get('position_step'):
         from kiwoom_monitor.application.leader_breakout import leader_position_action_ref
         if (approval.get('version'), approval.get('position_action_ref')) != (
@@ -962,13 +977,13 @@ def _close_native_gap_observations(cursor, p, observations):
     return [rows[ref] for ref in refs]
 
 
-def _close_native_stop_risk(cursor, p, account, spec, notice, root_id):
+def _close_native_stop_risk(cursor, p, account, spec, notice, root_id, *, checkpoint_key='current'):
     """Read the acknowledged stop and the historical native fill cut, never a newer basis."""
     from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
 
     if notice is None:
         return None
-    checkpoint = _plan_document(cursor, p, 'execution_mock_automation_runner_current', account, 'current')
+    checkpoint = _plan_document(cursor, p, 'execution_mock_automation_runner_current', account, checkpoint_key)
     document = _plan_document(cursor, p, 'execution_mock_automation_risk_snapshots', account,
                               notice['risk_trigger']['snapshot_id'])
     if (checkpoint is None or document is None or checkpoint.get('protection_review') != notice
@@ -1025,7 +1040,7 @@ def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider,
         if exit_proof is None or head_doc is None or root_row is None:
             raise RuntimeError("CLOSE_EXIT_EVIDENCE_MISSING")
         notice = exit_proof['snapshot'].get('protection_notice')
-        stop_risk = _close_native_stop_risk(cursor, p, account, spec, notice, root_id)
+        stop_risk = _close_native_stop_risk(cursor, p, account, spec, notice, root_id, checkpoint_key=ownership.get('_native_checkpoint_key', 'current'))
         head = plan_position_from_document(head_doc, value["run_id"], value["symbol"], plan)
         # Creating the intent reserves exactly one head revision. Submission
         # rechecks that reservation, without treating it as a new position.
@@ -1056,9 +1071,9 @@ def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider,
                            else "CLOSE_EXIT_PROOF_OR_ORDER_CHANGED")
 
 
-def _require_panic_trigger_checkpoint(cursor, p, account, spec, run_id, candidate, trigger=None):
+def _require_panic_trigger_checkpoint(cursor, p, account, spec, run_id, candidate, trigger=None, *, checkpoint_key='current'):
     from kiwoom_monitor.application.panic_mock_execution import PANIC_INPUT_PROTOCOL, panic_entry_plan_id
-    checkpoint = _plan_document(cursor, p, 'execution_mock_automation_runner_current', account, 'current')
+    checkpoint = _plan_document(cursor, p, 'execution_mock_automation_runner_current', account, checkpoint_key)
     bound = (isinstance(checkpoint, dict) and checkpoint.get('version') == 'mock_automation_runner_checkpoint/v1'
         and (checkpoint.get('account_ref'), checkpoint.get('spec_id'), checkpoint.get('execution_run_id'),
              checkpoint.get('candidate_package_hash'), checkpoint.get('delivery_protocol'))
@@ -1088,7 +1103,7 @@ def _require_panic_execution_claim(cursor, p, value, ownership, *, now_provider,
                                                          value['plan']['plan_id'], kind='PANIC')
     now = kst_now() if now_provider is None else now_provider()
     if value['side'] == 'BUY':
-        if _require_panic_trigger_checkpoint(cursor, p, account, spec, value['run_id'], event) is not None:
+        if _require_panic_trigger_checkpoint(cursor, p, account, spec, value['run_id'], event, checkpoint_key=ownership.get('_native_checkpoint_key', 'current')) is not None:
             raise RuntimeError('PANIC_ORIGINAL_SIGNAL_ALREADY_INVALIDATED')
         settings = _plan_document(cursor, p, 'server_operational_settings', 'global', 'current')
         if not minute_current_shadow_matches(spec, event, settings):
@@ -1106,7 +1121,7 @@ def _require_panic_execution_claim(cursor, p, value, ownership, *, now_provider,
             raise RuntimeError('PANIC_EXIT_EVIDENCE_MISSING')
         trigger = exit_proof['snapshot'].get('panic_trigger')
         if trigger is not None:
-            _require_panic_trigger_checkpoint(cursor, p, account, spec, value['run_id'], event, trigger)
+            _require_panic_trigger_checkpoint(cursor, p, account, spec, value['run_id'], event, trigger, checkpoint_key=ownership.get('_native_checkpoint_key', 'current'))
         head = plan_position_from_document(head_doc, value['run_id'], value['symbol'], plan)
         if head.plan.expected_revision != plan.expected_revision + int(submission_claim):
             raise RuntimeError('PANIC_EXIT_PLAN_REVISION_CHANGED')
@@ -1158,7 +1173,7 @@ def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider
             spec.execution_plan_mode != 'leader-0b-native-plan/v1' or spec.unfilled_execution_policy is None
             or spec.unfilled_execution_policy.accepted_order_management is None):
         raise RuntimeError('STAGED_LEADER_CURRENT_ORDER_POLICY_REQUIRED')
-    record = document('execution_leader_decisions', account, value['decision_id'])
+    record = document('execution_leader_decisions', account, value['intent_id'] if ownership.get('_native_member_evidence') else value['decision_id'])
     raw = record['snapshot']['feature_values'][0]['value']
     policy = LeaderBreakoutPolicy.from_dict(record['policy'])
     configured = LeaderBreakoutConfig.from_dict({**record['policy'], 'execution_contract': config.execution_contract.to_dict()})
@@ -1289,7 +1304,7 @@ def _require_leader_position_action(cursor, p, value, spec, config, pin, raw, st
                    for leg in execution_broker_legs(previous))):
         raise RuntimeError('LEADER_PREVIOUS_POSITION_ACTION_UNCONFIRMED')
     if index:
-        prior_source = _plan_document(cursor, p, 'execution_leader_decisions', account, previous.intent.decision_id) or {}
+        prior_source = _plan_document(cursor, p, 'execution_leader_decisions', account, previous.intent.intent_id if getattr(previous, 'member_spec_id', None) is not None else previous.intent.decision_id) or {}
         prior_raw = (prior_source.get('snapshot') or {}).get('feature_values', [{}])[0].get('value', {})
         if ((prior_raw.get('position_step') or {}).get('step_key') != key
                 or prior.get('decision_id') != previous.intent.decision_id
@@ -1508,7 +1523,7 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
         return result
 
     spec = mock_automation_spec_from_dict(document('execution_mock_automation_specs', ownership['active_spec_id']))
-    checkpoint = document('execution_mock_automation_runner_current', 'current')
+    checkpoint = document('execution_mock_automation_runner_current', ownership.get('_native_checkpoint_key', 'current'))
     notice = checkpoint.get('protection_review') or {}
     workflow = notice.get('planned_leader_protection_exit') or {}
     if (workflow.get('workflow_id') != claim['workflow_id']
@@ -1699,7 +1714,7 @@ def _require_mock_protection_claim(cursor, ownership, value, p, *, now_provider=
         if not row:raise RuntimeError('MOCK_PROTECTION_NATIVE_PROOF_MISSING')
         return _json_document(row[0])
     spec=mock_automation_spec_from_dict(document('execution_mock_automation_specs',ownership['active_spec_id']))
-    checkpoint=document('execution_mock_automation_runner_current','current')
+    checkpoint=document('execution_mock_automation_runner_current',ownership.get('_native_checkpoint_key', 'current'))
     notice=checkpoint.get('protection_review') or {}
     if notice.get('planned_leader_stop') is not None:
         raise RuntimeError('MOCK_PROTECTION_REQUIRES_PLANNED_LEADER_CLAIM')
@@ -1867,7 +1882,7 @@ def _require_mock_unfilled_management_origin(cursor, ownership, value, p, *, now
         return False
     if not original_source:
         if checkpoint is None:
-            checkpoint = document('execution_mock_automation_runner_current', 'current')
+            checkpoint = document('execution_mock_automation_runner_current', ownership.get('_native_checkpoint_key', 'current'))
         plan = validate_unfilled_attempt_plan(checkpoint.get('unfilled_execution_preflight'))
     if root_value is None and not original_source:
         root_value = native_value(plan['anchor']['root_intent']['intent_id'])
@@ -1888,7 +1903,7 @@ def _require_mock_unfilled_management_origin(cursor, ownership, value, p, *, now
         # same-revision contract does not require a registered checkpoint.
         return True
     if checkpoint is None:
-        checkpoint = document('execution_mock_automation_runner_current', 'current')
+        checkpoint = document('execution_mock_automation_runner_current', ownership.get('_native_checkpoint_key', 'current'))
     plan = validate_unfilled_attempt_plan(checkpoint.get('unfilled_execution_preflight'))
     if root_value is None:
         root = _record_from_document(native_value(root.intent.intent_id))
@@ -1963,7 +1978,7 @@ def _require_planned_leader_cancel(cursor, ownership, value, event, p, *, stored
         return row
 
     spec = mock_automation_spec_from_dict(document("execution_mock_automation_specs", ownership["active_spec_id"]))
-    checkpoint = document("execution_mock_automation_runner_current", "current")
+    checkpoint = document("execution_mock_automation_runner_current", ownership.get("_native_checkpoint_key", "current"))
     notice = checkpoint.get("protection_review") or {}
     if ((checkpoint.get("spec_id"), checkpoint.get("execution_run_id")) != (spec.spec_id, value["run_id"])
             or (notice.get("spec_id"), notice.get("account_ref"), notice.get("execution_run_id"))
@@ -2055,7 +2070,7 @@ def _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, *,
     spec = mock_automation_spec_from_dict(document("execution_mock_automation_specs", ownership["active_spec_id"]))
     gate = mock_automation_decision_gate_from_dict(document("execution_mock_automation_approved_gates", claim.plan.plan_id))
     root = _record_from_document(stored)
-    source = document("execution_leader_decisions", root.intent.decision_id)
+    source = document("execution_leader_decisions", root.intent.intent_id if getattr(root, "member_spec_id", None) is not None else root.intent.decision_id)
     pin = document("execution_leader_position_context", claim.plan.plan_id)
     decision = StrategyDecision(**source["decision"])
     _validate_decision_identity(decision)
@@ -2156,12 +2171,14 @@ def _require_close_deadline_cancel(cursor, ownership, value, event, p, *, stored
         fill_events=[_json_document(row[0]) for row in _execution_event_rows(cursor, stored["intent_id"], p)],
         recovery=claim.recovery, risk=risk, now=kst_now() if now_provider is None else now_provider(),
         protection_notice=claim.protection_notice,
-        stop_risk=_close_native_stop_risk(cursor, p, account, spec, claim.protection_notice, stored['intent_id']))
+        stop_risk=_close_native_stop_risk(cursor, p, account, spec, claim.protection_notice, stored['intent_id'], checkpoint_key=ownership.get('_native_checkpoint_key', 'current')))
     return {**event, "close_entry_cancel_claim": claim.to_dict()}
 
 
 def _require_mock_cancel_retry(cursor, ownership, value, event, p, *, now_provider=None, stored=None, control_facts=None):
     """Fence a protective retry in the same native CANCEL_STARTED transaction."""
+    if ownership is not None:
+        ownership = _native_execution_scope(ownership, control_facts or {})
     if ownership is not None and ownership.get("planned_cancel_claim") is not None:
         if ownership['planned_cancel_claim'].get('version') in {
                 'close-current-order-management/v1', 'panic-current-order-management/v1', 'leader-current-order-management/v1'}:
@@ -2215,7 +2232,7 @@ def _require_mock_cancel_retry(cursor, ownership, value, event, p, *, now_provid
             raise RuntimeError('MOCK_PROTECTIVE_CANCEL_RETRY_ORDER_MISSING')
         return _record_from_document(_json_document(row[0]))
     spec = mock_automation_spec_from_dict(document('execution_mock_automation_specs',ownership['active_spec_id']))
-    checkpoint = document('execution_mock_automation_runner_current','current')
+    checkpoint = document('execution_mock_automation_runner_current',ownership.get('_native_checkpoint_key', 'current'))
     plan = validate_unfilled_attempt_plan(checkpoint.get('unfilled_execution_preflight'))
     scope = plan['anchor']['scope']
     raw = dict(plan['anchor']['policy'])
