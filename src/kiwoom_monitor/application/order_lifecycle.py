@@ -1017,7 +1017,8 @@ class OrderLifecycle:
             detailed_filled_quantity += fill.quantity
             filled_quantity = max(detailed_filled_quantity, broker_reported_filled_quantity)
             fill_ids.append(fill.execution_id)
-            state = OrderState.FILLED if filled_quantity == intent.quantity else OrderState.PARTIALLY_FILLED
+            state = (OrderState.FILLED if filled_quantity == intent.quantity else
+                     OrderState.CANCEL_PENDING if record.state is OrderState.CANCEL_PENDING else OrderState.PARTIALLY_FILLED)
             record = self._apply(
                 record, "FILL", state, broker_order_id=broker_order_id,
                 broker_execution_id=fill.execution_id, quantity=fill.quantity, price=fill.price,
@@ -1038,7 +1039,8 @@ class OrderLifecycle:
             if aggregate_quantity > 0:
                 record = self._apply(
                     record, "BROKER_FILL_AGGREGATE",
-                    OrderState.FILLED if filled_quantity == intent.quantity else OrderState.PARTIALLY_FILLED,
+                    (OrderState.FILLED if filled_quantity == intent.quantity else
+                     OrderState.CANCEL_PENDING if record.state is OrderState.CANCEL_PENDING else OrderState.PARTIALLY_FILLED),
                     broker_order_id=broker_order_id, quantity=aggregate_quantity,
                     reason="broker cumulative fill; exact execution identity unavailable",
                     occurred_at=snapshot.as_of, broker_as_of=snapshot.as_of,
@@ -1048,7 +1050,7 @@ class OrderLifecycle:
                     last_broker_as_of=snapshot.as_of, **connection_args,
                 )
 
-        final_state = self._snapshot_state(snapshot, filled_quantity, intent.quantity)
+        final_state = self._snapshot_state(snapshot, filled_quantity, intent.quantity, current_state=record.state)
         if (
             record.state is not final_state
             or record.last_broker_as_of != snapshot.as_of
@@ -1081,8 +1083,10 @@ class OrderLifecycle:
             leg = next(value for value in record.broker_legs if value.broker_order_id == snapshot.broker_order_id)
         if newer:
             reported = max(leg.broker_reported_filled_quantity, snapshot.filled_quantity)
+            state = (OrderState.CANCEL_PENDING if leg.state is OrderState.CANCEL_PENDING
+                     and snapshot.state not in TERMINAL_ORDER_STATES else snapshot.state)
             updated = replace(leg, broker_reported_filled_quantity=reported,
-                              state=snapshot.state, last_broker_as_of=snapshot.as_of)
+                              state=state, last_broker_as_of=snapshot.as_of)
             increase = updated.filled_quantity - leg.filled_quantity
             apply("BROKER_FILL_AGGREGATE" if increase else "BROKER_RECONCILED", updated,
                   quantity=increase, occurred_at=snapshot.as_of)
@@ -1117,14 +1121,16 @@ class OrderLifecycle:
             event_broker_order_id=updated_leg.broker_order_id, broker_as_of=broker_as_of, **fields)
 
     @staticmethod
-    def _snapshot_state(snapshot: BrokerOrderSnapshot, filled: int, requested: int) -> OrderState:
+    def _snapshot_state(snapshot: BrokerOrderSnapshot, filled: int, requested: int, *,
+                        current_state: OrderState | None = None) -> OrderState:
         if filled >= requested:
             return OrderState.FILLED
         if snapshot.state is OrderState.CANCELLED:
             return OrderState.CANCELLED
         if snapshot.state is OrderState.REJECTED:
             return OrderState.REJECTED
-        if snapshot.state is OrderState.CANCEL_PENDING:
+        # An open-order observation confirms exposure, never rejection of a pending cancel.
+        if snapshot.state is OrderState.CANCEL_PENDING or current_state is OrderState.CANCEL_PENDING:
             return OrderState.CANCEL_PENDING
         return OrderState.PARTIALLY_FILLED if filled else OrderState.ACCEPTED
 

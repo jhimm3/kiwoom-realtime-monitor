@@ -290,6 +290,10 @@ class MockAccountMonitor:
         self._risk_costs_initialized = False
         self._risk_cost_day = None
         self._risk_events = []
+        self._member_projection_cache = {}
+        self._member_projection_initialized = False
+        self._risk_member_selection_id = None
+        self._risk_member_projection = {}
         self._risk_event_cursor = 0
         self._position_observation = None
         self._position_session = uuid.uuid4().hex
@@ -380,13 +384,13 @@ class MockAccountMonitor:
         """Read the existing owner selection without copying its readiness."""
         return self._automation_execution_inputs_enabled
 
-    def set_automation_execution_inputs_enabled(self, enabled):
+    def set_automation_execution_inputs_enabled(self, enabled, *, request_recovery=True):
         if type(enabled) is not bool:
             raise ValueError('automation execution input selection must be boolean')
         if enabled != self._automation_execution_inputs_enabled:
             self._automation_execution_inputs_enabled = enabled
             self._invalidate_position_observation()
-            if enabled:
+            if enabled and request_recovery:
                 self._request_recovery()
 
     def request_automation_execution_recovery(self):
@@ -529,6 +533,62 @@ class MockAccountMonitor:
             raise RuntimeError("MOCK_MONITOR_CLOSED")
         return await self._recover()
 
+    async def prepare_account_selection_recovery(self, selection_id, expected_control_revision):
+        """Prepare a stored v2 selection using one real recovery; never replace control."""
+        if not self._accepting:
+            raise RuntimeError('MOCK_MONITOR_CLOSED')
+        return await self._owned(lambda: self._recover_once(projection_selection_id=selection_id,
+            projection_control_revision=expected_control_revision))
+
+    def member_projection_for_selection(self, selection_id):
+        """Immutable native proof survives invalidation of the fresh broker/Risk cut."""
+        cached = self._member_projection_cache.get(selection_id)
+        if not self._accepting or cached is None:
+            raise RuntimeError('MOCK_RETAINED_MEMBER_PROJECTION_UNAVAILABLE')
+        return dict(cached['mapping'])
+
+    def _risk_member_views(self, events, active, selection_id, expected_control_revision):
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import (
+            project_execution_record, project_account_execution_event,
+        )
+        if self._member_projection_initialized and selection_id is None and self._risk_member_selection_id is None:
+            return events, active, None
+        raw_ids = {event.intent_id for event in events}
+        raw_ids.update(record.intent.intent_id for record in active)
+        previous_id = selection_id or self._risk_member_selection_id
+        cached = self._member_projection_cache.get(previous_id, {'checked': set(), 'mapping': {}})
+        pending = sorted(raw_ids - cached['checked'])
+        with self._repository.mock_automation_read_scope() as reader:
+            selected, found = self._repository.retained_member_projection(self._runtime.account_ref,
+                selection_id=selection_id, expected_control_revision=expected_control_revision,
+                intent_ids=tuple(pending[:400]), _reader=reader)
+            if selected is None:
+                self._member_projection_initialized = True
+                self._risk_member_selection_id, self._risk_member_projection = None, {}
+                return events, active, None
+            if selected.selection_id != previous_id:
+                first_pending = pending
+                cached = self._member_projection_cache.get(selected.selection_id, {'checked': set(), 'mapping': {}})
+                pending = sorted(raw_ids - cached['checked'])
+                first = min(400, len(pending)) if pending == first_pending else 0
+                if first == 0:
+                    found = {}
+            else:
+                first = min(400, len(pending))
+            mapping = {**cached['mapping'], **found}
+            for offset in range(first, len(pending), 400):
+                again, found = self._repository.retained_member_projection(self._runtime.account_ref,
+                    selection_id=selection_id, expected_control_revision=expected_control_revision,
+                    intent_ids=tuple(pending[offset:offset+400]), _reader=reader)
+                if again is None or again.selection_id != selected.selection_id:
+                    raise RuntimeError('MOCK_RETAINED_SELECTION_CHANGED')
+                mapping.update(found)
+        self._member_projection_cache[selected.selection_id] = {'mapping': mapping, 'checked': raw_ids | cached['checked']}
+        self._member_projection_initialized = True
+        self._risk_member_selection_id, self._risk_member_projection = selected.selection_id, mapping
+        return (tuple(project_account_execution_event(event, mapping) for event in events),
+                tuple(project_execution_record(record, mapping) for record in active), selected.member_spec_ids)
+
     def _request_recovery(self) -> None:
         if self._accepting and not self._recovery_queued:
             self._recovery_queued = True
@@ -572,7 +632,7 @@ class MockAccountMonitor:
     async def _recover(self) -> MockAccountRecovery:
         return await self._owned(self._recover_once)
 
-    async def _recover_once(self) -> MockAccountRecovery:
+    async def _recover_once(self, *, projection_selection_id=None, projection_control_revision=None) -> MockAccountRecovery:
         capture_scope = self._capture_scope
         with (capture_scope(self, 'account', 'mock_account_recovery', actor_per_invocation=True)
               if capture_scope is not None else nullcontext()):
@@ -624,7 +684,8 @@ class MockAccountMonitor:
                     active, risk = await self._publish_risk(recovery, query_started_at,
                         active_records=tuple(r for r in after if r.intent.run_id == self._runtime.run_id)
                         if scope_requested and after_complete else None,
-                        first_event_page=first_event_page)
+                        first_event_page=first_event_page, projection_selection_id=projection_selection_id,
+                        projection_control_revision=projection_control_revision)
                     records = list({record.intent.intent_id: record for record in (*records, *active)}.values())
                     reconciled = risk.reconciliation_complete
                 self._position_revision += 1
@@ -638,6 +699,10 @@ class MockAccountMonitor:
                     observed_runtime_revision = self._runtime.observation_revision
                     if scope_requested:
                         try:
+                            if self._risk_member_selection_id is not None:
+                                from kiwoom_monitor.infrastructure.persistence.execution_repository import project_execution_record
+                                before = tuple(project_execution_record(record, self._risk_member_projection) for record in before)
+                                after = tuple(project_execution_record(record, self._risk_member_projection) for record in after)
                             self._position_observation = deepcopy(reconcile_position_account_observation(recovery, before, after,
                                 input_ref=input_ref, observed_at=self._aware_now(), ledger_complete=before_complete and after_complete,
                                 runtime_stable=(expected_runtime_revision == observed_runtime_revision
@@ -665,7 +730,10 @@ class MockAccountMonitor:
                                 self._automation_execution_fingerprint = facts
                             self._automation_execution_cut = {'risk': risk,
                                 'observation': self._position_observation,
-                                'recovery': replace(recovery, account=self._position_observation.account)}
+                                'recovery': replace(recovery, account=self._position_observation.account),
+                                **({'member_projection': dict(self._risk_member_projection),
+                                    'member_projection_selection_id': self._risk_member_selection_id}
+                                   if self._risk_member_selection_id is not None else {})}
                     self._position_changed()
                     self._automation_risk_changed()
                 self._recovered_once = True
@@ -695,6 +763,7 @@ class MockAccountMonitor:
     async def _publish_risk(
         self, recovery: MockAccountRecovery, query_started_at: datetime, *, active_records=None,
         first_event_page: AccountExecutionEventPage | None = None,
+        projection_selection_id=None, projection_control_revision=None,
     ) -> tuple:
         if self._account_scope is None or self._account_scope.account_ref != self._runtime.account_ref:
             raise RuntimeError("MOCK_AUTOMATION_RISK_SCOPE_MISSING")
@@ -750,6 +819,8 @@ class MockAccountMonitor:
         costs = tuple(self._risk_costs.values())
         active = active_records if active_records is not None else await asyncio.to_thread(
             self._repository.active_intents, "mock", self._runtime.account_ref, self._runtime.run_id)
+        events, active, members = await asyncio.to_thread(self._risk_member_views, events, active,
+            projection_selection_id, projection_control_revision)
         if not self._risk_revision_initialized:
             current = await asyncio.to_thread(
                 self._risk_repository.load_latest_mock_automation_risk,
@@ -770,6 +841,7 @@ class MockAccountMonitor:
             reconnect_count=self._reconnect_count,
             balance_mismatch_count=self._balance_mismatch_count,
             cost_query_complete=cost_query_complete,
+            member_spec_ids=members,
         )
         self._balance_mismatch_count = snapshot.balance_mismatch_count
         await asyncio.to_thread(

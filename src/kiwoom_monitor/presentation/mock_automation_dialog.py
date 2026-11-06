@@ -11,7 +11,7 @@ from typing import Any
 
 from PySide6.QtCore import QSettings, QThread, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
@@ -23,7 +23,10 @@ from kiwoom_monitor.application.mock_automation_specification import (
 from kiwoom_monitor.domain.execution_activation import (
     CLOSE_NATIVE_PLAN_MODE, CloseMockExecutionPolicy, ForwardCriteria, PANIC_NATIVE_PLAN_MODE, PanicMockExecutionPolicy,
     LEADER_NATIVE_PLAN_MODE, MockUnfilledExecutionPolicy,
+    MockAutomationAccountLimits, MockAutomationAccountSelection,
+    MockAutomationAccountSelectionV2, MockAutomationRetainedAdmissionRef,
 )
+from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
 from kiwoom_monitor.domain.strategy_contract import (
     LEADER_BREAKOUT_FAMILY_ID, leader_execution_contract_from_dict,
@@ -92,6 +95,12 @@ def account_preparation_reasons(context: dict[str, Any]) -> tuple[str, ...]:
     return tuple(reasons)
 
 
+def selected_account_selection(context: dict[str, Any]) -> dict[str, Any] | None:
+    identity = context.get("selected_account_selection_id")
+    return next((value for value in context.get("account_selections", ())
+                 if isinstance(value, dict) and value.get("selection_id") == identity), None)
+
+
 def operation_availability(context: dict[str, Any]) -> dict[str, bool]:
     selected = context.get("selected_profile")
     status = context.get("status")
@@ -108,6 +117,25 @@ def operation_availability(context: dict[str, Any]) -> dict[str, bool]:
         and row.get("readiness") == "READY"
         for row in specs
     )
+    selection = selected_account_selection(context)
+    if context.get("selected_account_selection_id"):
+        members = selection.get("member_spec_ids", []) if selection else []
+        order = selection.get("execution_order_spec_ids", []) if selection else []
+        binding = context.get("candidate_binding", {})
+        try:
+            same_verified_at = bool(selection) and datetime.fromisoformat(
+                selection["binding_verified_at"]) == datetime.fromisoformat(binding["verified_at"])
+        except (KeyError, TypeError, ValueError):
+            same_verified_at = False
+        ready_ids = {row["spec"].get("spec_id") for row in specs if isinstance(row, dict)
+                     and isinstance(row.get("spec"), dict) and row.get("readiness") == "READY"}
+        ready = bool(selection and members and order and len(order) == len(members)
+                     and len(set(order)) == len(order) and set(order) == set(members)
+                     and set(members) <= ready_ids and members[0] == selected_spec
+                     and selection.get("credential_profile_id") == selected.get("profile_id")
+                     and selection.get("account_scope", {}).get("account_ref") == selected.get("account_ref")
+                     and selection.get("binding_revision") == binding.get("binding_revision")
+                     and same_verified_at)
     control = status.get("control")
     desired = control.get("desired_state") if isinstance(control, dict) else None
     active_spec = str(control.get("active_spec_id", "")) if isinstance(control, dict) else ""
@@ -123,6 +151,22 @@ def operation_availability(context: dict[str, Any]) -> dict[str, bool]:
             desired == "STOPPED" or desired == "RUNNING" and control.get("entry_resume_required", False)
         ),
     }
+
+
+def replacement_available(context):
+    status = context.get('status') or {}
+    control, runner = status.get('control') or {}, status.get('runner') or {}
+    active, desired = control.get('account_selection') or {}, selected_account_selection(context) or {}
+    applied_matches = (active.get('selection_id') == runner.get('account_selection_id') and active.get('selection_id'))
+    if not active:
+        applied_matches = (control.get('active_spec_id') and (runner.get('spec_id'), runner.get('execution_run_id'))
+                           == (control.get('active_spec_id'), control.get('execution_run_id')))
+    return bool(not account_preparation_reasons(context) and not status.get('status_query_error')
+        and status.get('runtime_mode') == 'AUTOMATIC' and type(control.get('control_revision')) is int
+        and applied_matches
+        and desired.get('version') == 'mock_automation_account_selection/v2'
+        and desired.get('selection_id') != active.get('selection_id')
+        and desired.get('member_spec_ids') and desired['member_spec_ids'][0] == control.get('active_spec_id'))
 
 
 class MockAutomationWorker(QThread):
@@ -146,8 +190,26 @@ class MockAutomationWorker(QThread):
     def run(self) -> None:
         command_acknowledged = False
         try:
+            if self._operation in {'selected_status', 'selected_prepare', 'selected_accept', 'selected_stop'}:
+                operation_id = self._values['operation_id']
+                result = None
+                if self._operation != 'selected_status':
+                    if self._operation == 'selected_stop':
+                        result = self._content.stop_mock_automation(**{key: value for key, value in self._values.items()
+                            if key != 'operation_id'})
+                    else:
+                        method = (self._content.prepare_selected_order_management if self._operation == 'selected_prepare'
+                                  else self._content.accept_selected_order_management)
+                        result = method(**self._values)
+                    command_acknowledged = True
+                status = self._content.load_selected_order_management(operation_id=operation_id)
+                self.completed.emit(self._operation, {'selected_management': status, 'acknowledged': result})
+                return
             if self._operation == "publish_spec":
                 self._content.publish_mock_automation_spec(**self._values)
+                command_acknowledged = True
+            elif self._operation == "publish_account_selection":
+                self._content.publish_mock_automation_account_selection(**self._values)
                 command_acknowledged = True
             elif self._operation not in {"refresh", "prepare_publication"}:
                 method = getattr(self._content, f"{self._operation}_mock_automation")
@@ -156,7 +218,12 @@ class MockAutomationWorker(QThread):
             context = self._load_context(
                 str(self._values.get("credential_profile_id", "")),
                 str(self._values.get("spec_id", "")),
+                str(self._values.get("account_selection_id", "") or
+                    (self._values.get("selection") or {}).get("selection_id", "")),
             )
+            if self._operation == 'refresh' and self._values.get('management_operation_id'):
+                context['selected_management'] = self._content.load_selected_order_management(
+                    operation_id=self._values['management_operation_id'])
             if self._operation == "prepare_publication":
                 selected = context.get("selected_profile")
                 if not isinstance(selected, dict) or (
@@ -182,7 +249,8 @@ class MockAutomationWorker(QThread):
             else:
                 self.failed.emit(self._operation, str(error))
 
-    def _load_context(self, preferred_profile: str, preferred_spec: str) -> dict[str, Any]:
+    def _load_context(self, preferred_profile: str, preferred_spec: str,
+                      preferred_selection: str = "") -> dict[str, Any]:
         profiles = available_mock_profiles(self._credentials.load())
         selected = next(
             (value for value in profiles if value["profile_id"] == preferred_profile),
@@ -199,10 +267,16 @@ class MockAutomationWorker(QThread):
         binding = candidates_document.get("binding")
         if not isinstance(candidates, list) or not isinstance(binding, dict):
             raise RuntimeError("NAS 후보 목록 형식이 올바르지 않습니다.")
-        specs_document = self._content.load_mock_automation_specs(account_ref)
+        specs_document = self._content.load_mock_automation_specs(account_ref, include_admission_refs=True)
         specs = specs_document.get("specs", [])
         if not isinstance(specs, list):
             raise RuntimeError("NAS 운용 명세 목록 형식이 올바르지 않습니다.")
+        selection_document = self._content.load_mock_automation_account_selections(
+            account_ref, credential_profile_id=str(selected["profile_id"]),
+        )
+        selections = selection_document.get("selections")
+        if not isinstance(selections, list):
+            raise RuntimeError("계좌 구성 목록 형식이 올바르지 않습니다.")
         ready_ids = [
             str(row["spec"]["spec_id"])
             for row in specs
@@ -221,6 +295,16 @@ class MockAutomationWorker(QThread):
                       "status_query_error": str(error)}
         control = status.get("control")
         active_spec = str(control.get("active_spec_id", "")) if isinstance(control, dict) else ""
+        runner = status.get("runner")
+        active_composition = control.get("account_selection") if isinstance(control, dict) else None
+        active_selection = str(active_composition.get("selection_id", "")) if isinstance(active_composition, dict) else ""
+        if not active_selection and isinstance(runner, dict):
+            active_selection = str(runner.get("account_selection_id", ""))
+        selected_selection = active_selection or preferred_selection
+        selection = next((value for value in selections if isinstance(value, dict)
+                          and value.get("selection_id") == selected_selection), None)
+        if selection and selection.get("member_spec_ids"):
+            selected_spec = selection["member_spec_ids"][0]
         if active_spec and any(
             isinstance(row, dict) and isinstance(row.get("spec"), dict)
             and row["spec"].get("spec_id") == active_spec for row in specs
@@ -231,6 +315,7 @@ class MockAutomationWorker(QThread):
             "account_settings": account_settings, "specs": specs,
             "selected_spec_id": selected_spec, "status": status,
             "candidate_publications": candidates, "candidate_binding": binding,
+            "account_selections": selections, "selected_account_selection_id": selected_selection,
         }
 
     def _load_shadow_events(self) -> list[dict[str, Any]]:
@@ -282,6 +367,165 @@ _LIMIT_INPUTS = (
 )
 
 
+class MockAutomationAccountSelectionDialog(QDialog):
+    def __init__(self, specs: list[dict[str, Any]], binding: dict[str, Any],
+                 profile_id: str, *, now_provider, selection=None, current_selection=None, admission_refs=(),
+                 original_anchor=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("함께 운용할 명세와 공통 한도")
+        self.resize(720, 680)
+        self._binding, self._profile_id = binding, profile_id
+        self._now_provider = now_provider
+        self._member_inputs: dict[str, tuple[QCheckBox, QLineEdit]] = {}
+        self._limit_inputs: dict[str, QLineEdit] = {}
+        saved = selection or {}
+        self._current_selection = current_selection
+        self._admission_refs = tuple(MockAutomationRetainedAdmissionRef(**value) for value in admission_refs)
+        self._replacement = current_selection is not None or bool(self._admission_refs)
+        self._stored_admission_refs = {row['spec']['spec_id']: row['admission_ref'] for row in specs
+            if isinstance(row, dict) and isinstance(row.get('spec'), dict) and isinstance(row.get('admission_ref'), dict)}
+        retained_ids = {value.spec_id for value in self._admission_refs}
+        saved_members = saved.get("member_spec_ids", [])
+        saved_entries = saved.get('entry_spec_ids', saved_members)
+        saved_order = saved.get("execution_order_spec_ids", [])
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        notice = QLabel("함께 운용할 명세를 선택하고 실행 순서와 공통 한도를 입력하세요. "
+                        "계좌 기준 명세는 계좌 제어의 기준이며 매매 우선순위는 실행 순서를 따릅니다. "
+                        "저장한 뒤 별도로 시작해야 적용됩니다.")
+        notice.setWordWrap(True)
+        if self._replacement:
+            notice.setText('새로 진입할 명세를 선택하세요. 기존 명세는 선택을 해제해도 원래 주문·보유·보호 관리를 계속합니다. '
+                           '모든 명세의 실행 순서와 공통 한도를 저장한 뒤 별도로 교체를 적용하세요. 중지·재개 상태는 유지됩니다.')
+        layout.addWidget(notice)
+        members = QGroupBox("운용 명세 · 실행 순서")
+        members_form = QFormLayout(members)
+        self._anchor = QComboBox()
+        self._anchor.addItem("계좌 기준 명세를 선택하세요", None)
+        for row in specs:
+            spec = row.get("spec") if isinstance(row, dict) else None
+            if not isinstance(spec, dict) or (row.get("readiness") != "READY" and spec.get('spec_id') not in retained_ids):
+                continue
+            identity = str(spec.get("spec_id", ""))
+            label = str(spec.get("strategy_ref") or identity)
+            checked = QCheckBox(label)
+            checked.setToolTip(identity)
+            checked.setChecked(identity in saved_entries and row.get('readiness') == 'READY')
+            if identity in retained_ids:
+                checked.setText(label + ' · 기존 관리 유지 · 선택 시 신규 진입')
+                checked.setEnabled(row.get('readiness') == 'READY')
+            priority = QLineEdit()
+            priority.setPlaceholderText("실행 순서 · 1부터 입력")
+            if identity in saved_order:
+                priority.setText(str(saved_order.index(identity) + 1))
+            priority.setMaximumWidth(180)
+            self._member_inputs[identity] = checked, priority
+            line = QHBoxLayout()
+            line.addWidget(checked, 1)
+            line.addWidget(priority)
+            members_form.addRow(line)
+            individual = " · ".join(f"{text} {spec[field]:,}{unit}" for field, text, unit in (
+                ("maximum_concurrent_positions", "동시 보유", "개"),
+                ("maximum_capital_won", "투입 자금", "원"),
+                ("maximum_daily_loss_won", "일 손실", "원"),
+                ("maximum_data_gap_seconds", "자료 공백", "초"),
+            ) if type(spec.get(field)) is int)
+            if individual:
+                description = QLabel("개별 한도 · " + individual)
+                description.setWordWrap(True)
+                members_form.addRow(description)
+            self._anchor.addItem(label, identity)
+        if saved_members:
+            self._anchor.setCurrentIndex(max(0, self._anchor.findData(saved_members[0])))
+        if self._replacement:
+            anchor = original_anchor or current_selection['member_spec_ids'][0]
+            self._anchor.setCurrentIndex(self._anchor.findData(anchor))
+            self._anchor.setEnabled(False)
+        members_form.addRow("계좌 기준 명세", self._anchor)
+        layout.addWidget(members)
+        limits = QGroupBox("계좌 공통 한도")
+        limits_form = QFormLayout(limits)
+        for name, label, *_unused in _LIMIT_INPUTS:
+            field = QLineEdit()
+            field.setPlaceholderText("정수로 직접 입력하세요")
+            if name in saved.get("limits", {}):
+                field.setText(str(saved["limits"][name]))
+            self._limit_inputs[name] = field
+            limits_form.addRow(label, field)
+        layout.addWidget(limits)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+        self._error = QLabel()
+        self._error.setWordWrap(True)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("계좌 구성 저장")
+        buttons.accepted.connect(self._accept_selection)
+        buttons.rejected.connect(self.reject)
+        outer = QVBoxLayout(self)
+        outer.addWidget(scroll)
+        outer.addWidget(self._error)
+        outer.addWidget(buttons)
+        self._prepared_values = None
+
+    def publication_values(self) -> dict[str, Any]:
+        members, priorities = [], {}
+        for identity, (checked, priority) in self._member_inputs.items():
+            if not checked.isChecked() and identity not in {ref.spec_id for ref in self._admission_refs}:
+                continue
+            value = priority.text().strip()
+            if not value.isascii() or not value.isdigit():
+                raise ValueError("선택한 명세의 실행 순서를 모두 입력하세요.")
+            rank = int(value)
+            if rank in priorities:
+                raise ValueError("실행 순서는 중복 없이 입력하세요.")
+            priorities[rank] = identity
+            members.append(identity)
+        anchor = self._anchor.currentData()
+        if not members or anchor not in members:
+            raise ValueError("운용할 명세와 선택한 명세 중 계좌 기준 명세를 선택하세요.")
+        if set(priorities) != set(range(1, len(members) + 1)):
+            raise ValueError("실행 순서는 1부터 선택한 명세 수까지 빠짐없이 입력하세요.")
+        values = {}
+        for name, field in self._limit_inputs.items():
+            text_value = field.text().strip()
+            if not text_value.isascii() or not text_value.isdigit():
+                raise ValueError("계좌 공통 한도를 모두 정수로 입력하세요.")
+            values[name] = int(text_value)
+        binding = self._binding
+        refs = list(self._admission_refs)
+        entries = tuple(identity for identity, (checked, _) in self._member_inputs.items() if checked.isChecked())
+        if self._replacement:
+            for identity in entries:
+                stored = self._stored_admission_refs.get(identity)
+                if stored is not None and identity not in {ref.spec_id for ref in refs}:
+                    ref = MockAutomationRetainedAdmissionRef(**stored)
+                    if ref.execution_run_id != refs[0].execution_run_id:
+                        raise ValueError('선택한 명세는 다른 실행에 입장돼 있습니다. 원래 실행을 확인하세요.')
+                    refs.append(ref)
+        selection_type = MockAutomationAccountSelectionV2 if self._replacement else MockAutomationAccountSelection
+        selection = selection_type(
+            account_scope=AccountScope(broker="kiwoom", environment=AccountEnvironment.MOCK,
+                                       account_ref=str(binding["account_ref"])),
+            credential_profile_id=self._profile_id, binding_revision=binding["binding_revision"],
+            binding_verified_at=datetime.fromisoformat(binding["verified_at"]),
+            frozen_at=self._now_provider(), member_spec_ids=(anchor, *(value for value in members if value != anchor)),
+            execution_order_spec_ids=tuple(priorities[rank] for rank in sorted(priorities)),
+            limits=MockAutomationAccountLimits(**values),
+            **(dict(entry_spec_ids=entries, retained_admission_refs=tuple(refs)) if self._replacement else {}),
+        )
+        return {"account_ref": binding["account_ref"], "credential_profile_id": self._profile_id,
+                "expected_binding_revision": binding["binding_revision"], "selection": selection.to_dict()}
+
+    def _accept_selection(self):
+        try:
+            self._prepared_values = self.publication_values()
+        except (KeyError, TypeError, ValueError) as error:
+            self._error.setText(str(error))
+            return
+        self.accept()
+
+
 class MockAutomationPublicationDialog(QDialog):
     def __init__(
         self, candidate: dict[str, Any], binding: dict[str, Any], profile_id: str,
@@ -295,7 +539,7 @@ class MockAutomationPublicationDialog(QDialog):
         parameters = candidate_spec.get("parameters", {}) if isinstance(candidate_spec, dict) else {}
         contract = parameters.get("execution_contract") or {}
         staged = (isinstance(candidate_spec, dict) and candidate_spec.get("family") == LEADER_BREAKOUT_FAMILY_ID
-                  and contract.get("version") == 'leader_breakout_execution/v2')
+                  and contract.get("version") in {'leader_breakout_execution/v2', 'leader_breakout_execution/v3'})
         self._candidate = deepcopy(candidate) if staged else candidate
         self._binding = binding
         self._profile_id = profile_id
@@ -325,6 +569,9 @@ class MockAutomationPublicationDialog(QDialog):
                 terms.append(f"{index}. {action} {step.quantity:,}주 · {step.reference_price:,}원 {comparisons[step.trigger]}")
             if execution.position_steps is None:
                 terms.append("추가·감축 단계 미정")
+            if execution.version == 'leader_breakout_execution/v3':
+                terms.append("이전 실제 전량 청산을 확인한 뒤 새 독립 셋업으로만 재진입합니다.")
+                terms.append("같은 셋업의 시각·세대만 바꿔 재진입하지 않습니다.")
             terms.append("현재 조건을 다시 판단하며, 접수된 미체결 잔량은 정정을 우선합니다.")
             self._position_terms = QLabel('\n'.join(terms))
             self._position_terms.setTextFormat(Qt.TextFormat.PlainText)
@@ -465,18 +712,28 @@ class MockAutomationDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("모의 자동운용")
-        self.resize(680, 360)
+        self.resize(780, 600)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self._content = content_client
         self._credentials = credentials_client
         self._worker: MockAutomationWorker | None = None
         self._candidate_files_dialog: MockAutomationCandidateDialog | None = None
         self._context: dict[str, Any] = {}
+        self._management_packet = None
+        self._management_status = None
 
         self._profile = QComboBox()
         self._profile.currentIndexChanged.connect(self._profile_changed)
         self._spec = QComboBox()
         self._spec.currentIndexChanged.connect(self._spec_changed)
+        self._selection = QComboBox()
+        self._selection.currentIndexChanged.connect(self._selection_changed)
+        self._edit_selection = QPushButton("구성 작성·수정")
+        self._edit_selection.clicked.connect(self._prepare_account_selection)
+        self._selection_details = QLabel()
+        self._selection_details.setWordWrap(True)
+        self._members_status = QLabel()
+        self._members_status.setWordWrap(True)
         self._candidate = QComboBox()
         self._candidate_files = QPushButton("후보 준비·게시")
         self._candidate_files.clicked.connect(self._prepare_candidate_files)
@@ -496,21 +753,46 @@ class MockAutomationDialog(QDialog):
         candidate_row.addWidget(self._candidate_files)
         form.addRow("게시 후보", candidate_row)
         form.addRow("READY 명세", self._spec)
+        selection_row = QHBoxLayout()
+        selection_row.addWidget(self._selection, 1)
+        selection_row.addWidget(self._edit_selection)
+        form.addRow("함께 운용할 구성", selection_row)
+        form.addRow("구성 저장·적용", self._selection_details)
         form.addRow("명세 상태", self._readiness)
         form.addRow("운용 상태", self._runtime)
+        form.addRow("명세별 상태", self._members_status)
         form.addRow("작업 이유", self._reason)
+        self._management_file = QPushButton('보관 주문 파일 선택·확인')
+        self._management_file.clicked.connect(self._select_management_packet)
+        self._management_prepare = QPushButton('관리 준비')
+        self._management_prepare.clicked.connect(lambda: self._request_selected_management('selected_prepare'))
+        self._management_accept = QPushButton('현재 관리 수락')
+        self._management_accept.clicked.connect(lambda: self._request_selected_management('selected_accept'))
+        self._management_stop = QPushButton('관리 중지')
+        self._management_stop.clicked.connect(lambda: self._request_selected_management('selected_stop'))
+        self._management_label = QLabel('이 실행 컴퓨터에 설치한 보관 주문을 선택하세요. 신규 진입은 계속 꺼집니다.')
+        self._management_label.setWordWrap(True)
+        management_buttons = QHBoxLayout()
+        management_buttons.addWidget(self._management_file)
+        management_buttons.addWidget(self._management_prepare)
+        management_buttons.addWidget(self._management_accept)
+        management_buttons.addWidget(self._management_stop)
+        form.addRow('보관 주문 관리', management_buttons)
+        form.addRow('관리 준비·실행', self._management_label)
 
         self._refresh = QPushButton("새로 확인")
         self._publish = QPushButton("새 READY 명세 작성")
         self._start = QPushButton("자동운용 시작")
         self._stop = QPushButton("신규 주문 중지")
         self._resume = QPushButton("자동운용 재개")
+        self._replace_selection = QPushButton('선택 구성으로 교체')
         self._refresh.clicked.connect(lambda: self._request("refresh"))
         self._publish.clicked.connect(self._publish_selected_candidate)
         self._candidate.currentIndexChanged.connect(self._update_candidate_action)
         self._start.clicked.connect(lambda: self._request("start"))
         self._stop.clicked.connect(lambda: self._request("stop"))
         self._resume.clicked.connect(lambda: self._request("resume"))
+        self._replace_selection.clicked.connect(lambda: self._request('replace_selection'))
         buttons = QHBoxLayout()
         buttons.addWidget(self._refresh)
         buttons.addWidget(self._publish)
@@ -518,6 +800,7 @@ class MockAutomationDialog(QDialog):
         buttons.addWidget(self._start)
         buttons.addWidget(self._stop)
         buttons.addWidget(self._resume)
+        buttons.addWidget(self._replace_selection)
 
         self._message = QLabel(
             "이 화면은 모의계좌만 제어합니다. 중지 후 관리는 게시한 운용 명세를 따릅니다. "
@@ -530,7 +813,12 @@ class MockAutomationDialog(QDialog):
             "기존 완료봉 Family는 비교 정책으로 구분합니다.")
         self._strategy_scope.setWordWrap(True)
         layout.addWidget(self._strategy_scope)
-        layout.addLayout(form)
+        form_content = QWidget()
+        form_content.setLayout(form)
+        form_scroll = QScrollArea()
+        form_scroll.setWidgetResizable(True)
+        form_scroll.setWidget(form_content)
+        layout.addWidget(form_scroll)
         layout.addLayout(buttons)
         layout.addWidget(self._message)
         self._set_busy(False)
@@ -547,13 +835,179 @@ class MockAutomationDialog(QDialog):
     def _profile_changed(self) -> None:
         if self._profile.signalsBlocked() or self._worker is not None:
             return
+        self._management_status = None
         self._request("refresh")
+
+    def _select_management_packet(self):
+        if self._worker is not None:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, '설치한 보관 주문 자료 선택', '', '주문 자료 (*.json)')
+        if not path:
+            return
+        self._management_packet, self._management_status = None, None
+        try:
+            from kiwoom_monitor.domain.selected_order_evidence import (
+                MANAGEMENT_VERSION, PLAN_MANAGEMENT_VERSION, encode_selected_order_evidence)
+            packet = json.loads(Path(path).read_text(encoding='utf-8'))
+            _, digest = encode_selected_order_evidence(packet)
+            if packet['version'] not in {MANAGEMENT_VERSION, PLAN_MANAGEMENT_VERSION}:
+                raise ValueError('원래 운용 정책이 포함된 보관 주문 자료를 선택하세요.')
+            self._management_packet = dict(operation_id=packet['operation_id'], packet_sha256=digest,
+                account_ref=packet['account_ref'], symbol=packet['order']['symbol'])
+            self._management_status = None
+            self._start_worker('selected_status', {'operation_id': packet['operation_id']})
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            self._show_selected_management()
+            self._management_label.setText(str(error))
+
+    def _request_selected_management(self, operation):
+        if self._worker is not None:
+            return
+        packet, status = self._management_packet, self._management_status
+        selected, binding = self._selected_profile(), self._context.get('candidate_binding')
+        if not packet or not status or not selected or not isinstance(binding, dict):
+            self._management_label.setText('보관 주문과 현재 모의계좌를 다시 확인하세요.')
+            return
+        if operation == 'selected_stop':
+            context = (status.get('management') or {}).get('context') or {}
+            reason = self._reason.text().strip()
+            if not reason or not context:
+                self._management_label.setText('관리 중지 이유를 입력하세요.')
+                return
+            self._start_worker(operation, dict(operation_id=packet['operation_id'],
+                credential_profile_id=selected['profile_id'], account_ref=context['account_ref'],
+                spec_id=context['spec_id'], expected_control_revision=status['control']['control_revision'], reason=reason))
+            return
+        values = dict(operation_id=packet['operation_id'], packet_sha256=packet['packet_sha256'],
+            credential_profile_id=selected['profile_id'], credential_revision=selected['revision'],
+            account_ref=selected['account_ref'], binding_revision=binding['binding_revision'],
+            expected_settings_revision=self._context['account_settings']['revision'])
+        if operation == 'selected_accept':
+            values['expected_control_revision'] = status['control']['control_revision']
+        self._start_worker(operation, values)
+
+    def _show_selected_management(self):
+        status, packet = self._management_status or {}, self._management_packet or {}
+        selected, binding = self._selected_profile() or {}, self._context.get('candidate_binding') or {}
+        installation, management = status.get('installation') or {}, status.get('management') or {}
+        context, control = management.get('context') or {}, status.get('control') or {}
+        settings = self._context.get('account_settings') or {}
+        matched = bool(packet and status.get('operation_id') == packet.get('operation_id')
+            and status.get('packet_sha256') == packet.get('packet_sha256')
+            and status.get('account_ref') == packet.get('account_ref')
+            and installation.get('target_account_ref') == selected.get('account_ref')
+            and binding.get('account_ref') == selected.get('account_ref')
+            and binding.get('credential_profile_id') == selected.get('profile_id')
+            and settings.get('active_profile_id') == selected.get('profile_id')
+            and settings.get('monitor_enabled') is True)
+        prepared = bool(matched and (context.get('credential_profile_id'), context.get('credential_revision'),
+            context.get('canonical_account_ref'), context.get('binding_revision')) == (selected.get('profile_id'),
+                selected.get('revision'), selected.get('account_ref'), binding.get('binding_revision')))
+        prepared = (prepared and status.get('reconciliation_ready') is True
+                    and management.get('settings_revision') == settings.get('revision'))
+        self._management_prepare.setEnabled(self._worker is None and matched and not prepared)
+        self._management_accept.setEnabled(self._worker is None and prepared
+            and settings.get('mock_order_enabled') is True
+            and management.get('status') in {'RECONCILIATION_ONLY', 'MANAGEMENT_READY'} and control.get('desired_state') == 'STOPPED'
+            and type(control.get('control_revision')) is int)
+        self._management_stop.setEnabled(self._worker is None and prepared
+            and management.get('status') == 'MANAGEMENT_READY' and control.get('desired_state') == 'RUNNING')
+        if packet:
+            label = '설치 상태 미확인' if not installation else '자료 설치됨'
+            if prepared:
+                label = '대사 준비됨 · 관리 수락 필요'
+                if not settings.get('mock_order_enabled'):
+                    label = '대사 준비됨 · 모의주문 허용 후 다시 관리 준비가 필요합니다'
+                if management.get('status') == 'MANAGEMENT_READY':
+                    runner = (status.get('supervisor') or {}).get('runner') or {}
+                    applied = (status.get('management_ready') is True
+                        and (runner.get('spec_id'), runner.get('execution_run_id'))
+                        == (context.get('spec_id'), context.get('execution_run_id')))
+                    label = '현재 관리 수락됨 · ' + ('원주문 관리 연결됨' if applied else '실행 상태 미확인')
+                    if control.get('desired_state') == 'STOPPED':
+                        label = '현재 관리 중지됨 · 다시 관리하려면 현재 상태를 확인해 수락하세요'
+                    elif runner.get('state') in {'ERROR', 'BLOCKED'}:
+                        label = '현재 관리 보류 · 최신 계좌와 주문 상태를 확인하세요'
+                        self._management_label.setToolTip(str(runner.get('reason') or ''))
+            quantities = []
+            if type(status.get('original_quantity')) is int:
+                quantities.append('원매수 ' + str(status['original_quantity']) + '주')
+            current_order = status.get('current_order') or {}
+            for field, title in (('owned_quantity', '현재 보유'), ('working_quantity', '원주문 잔량')):
+                if current_order:
+                    quantity = current_order.get(field)
+                    quantities.append(title + (' ' + str(quantity) + '주' if type(quantity) is int else ' 미확인'))
+            prefix = str(packet.get('symbol', '')) + (' · ' + ' · '.join(quantities) if quantities else '')
+            self._management_label.setText(prefix + ' · ' + label + ' · 신규 진입 꺼짐')
 
     def _spec_changed(self) -> None:
         if self._spec.signalsBlocked():
             return
         self._context["selected_spec_id"] = str(self._spec.currentData() or "")
+        self._spec.setToolTip(self._context["selected_spec_id"])
         self._apply_button_state()
+
+    def _selection_changed(self) -> None:
+        if self._selection.signalsBlocked():
+            return
+        self._context["selected_account_selection_id"] = str(self._selection.currentData() or "")
+        selection = selected_account_selection(self._context)
+        if selection and selection.get("member_spec_ids"):
+            self._context["selected_spec_id"] = selection["member_spec_ids"][0]
+        self._apply_context()
+
+    def _prepare_account_selection(self) -> None:
+        if self._worker is not None:
+            return
+        selected = self._selected_profile()
+        binding = self._context.get("candidate_binding")
+        if not isinstance(selected, dict) or not isinstance(binding, dict):
+            self._message.setText("모의계좌와 현재 계좌 확인 정보를 먼저 조회하세요.")
+            return
+        try:
+            editor_values = self._replacement_editor_values()
+        except (KeyError, TypeError, ValueError) as error:
+            self._message.setText(str(error))
+            return
+        dialog = MockAutomationAccountSelectionDialog(
+            self._context.get("specs", []), binding, selected["profile_id"],
+            now_provider=self._content.server_now,
+            selection=selected_account_selection(self._context), parent=self,
+            **editor_values,
+        )
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            values = dialog._prepared_values or dialog.publication_values()
+        except (KeyError, TypeError, ValueError) as error:
+            self._message.setText("계좌 구성 저장 실패 · " + str(error))
+            return
+        finally:
+            dialog.deleteLater()
+        self._start_worker("publish_account_selection", values)
+
+    def _replacement_editor_values(self):
+        status = self._context.get('status') or {}
+        control = status.get('control') or {}
+        active = control.get('account_selection')
+        runner = status.get('runner') or {}
+        if not active:
+            if control and status.get('runtime_mode') == 'AUTOMATIC':
+                ref = next((row.get('admission_ref') for row in self._context.get('specs', ())
+                    if isinstance(row, dict) and (row.get('spec') or {}).get('spec_id') == control.get('active_spec_id')), None)
+                if (not isinstance(ref, dict) or ref.get('original_selection_id') is not None
+                        or (ref.get('spec_id'), ref.get('execution_run_id'))
+                        != (control.get('active_spec_id'), control.get('execution_run_id'))
+                        or (runner.get('spec_id'), runner.get('execution_run_id'))
+                        != (control.get('active_spec_id'), control.get('execution_run_id'))):
+                    raise ValueError('현재 단일 운용의 원입장과 실행 상태를 새로 확인하세요.')
+                return dict(original_anchor=control['active_spec_id'], admission_refs=[ref])
+            return {}
+        refs = runner.get('admission_refs')
+        if (runner.get('account_selection_id') != active.get('selection_id') or not isinstance(refs, list)
+                or {value.get('spec_id') for value in refs} != set(active.get('member_spec_ids', []))):
+            raise ValueError('현재 구성의 원입장 정보를 새로 확인한 뒤 교체 구성을 작성하세요.')
+        return dict(current_selection=active, admission_refs=refs)
 
     def _request(self, operation: str) -> None:
         if self._worker is not None:
@@ -561,21 +1015,26 @@ class MockAutomationDialog(QDialog):
         selected = self._selected_profile()
         spec_id = str(self._spec.currentData() or self._context.get("selected_spec_id", ""))
         values: dict[str, Any] = {}
+        if operation == 'refresh' and self._management_packet:
+            values['management_operation_id'] = self._management_packet['operation_id']
         if selected is not None:
             values.update({
                 "account_ref": str(selected["account_ref"]),
                 "credential_profile_id": str(selected["profile_id"]),
                 "spec_id": spec_id,
             })
+            selection_id = self._context.get("selected_account_selection_id")
+            if selection_id and operation in {"refresh", "start", 'replace_selection'}:
+                values["account_selection_id"] = selection_id
         if operation != "refresh":
             if selected is None or not spec_id:
                 self._message.setText("모의계좌와 READY 명세를 먼저 선택하세요.")
                 return
             settings = self._context.get("account_settings", {})
-            if operation in {"start", "resume"}:
+            if operation in {"start", "resume", 'replace_selection'}:
                 values["expected_settings_revision"] = int(settings.get("revision", -1))
                 values["credential_revision"] = int(selected["revision"])
-            if operation in {"stop", "resume"}:
+            if operation in {"stop", "resume", 'replace_selection'}:
                 control = (self._context.get("status") or {}).get("control")
                 if not isinstance(control, dict):
                     self._message.setText("현재 제어 revision을 다시 확인하세요.")
@@ -583,9 +1042,12 @@ class MockAutomationDialog(QDialog):
                 values["expected_control_revision"] = int(control["control_revision"])
                 reason = self._reason.text().strip()
                 if not reason:
-                    self._message.setText("중지·재개 이유를 입력하세요.")
+                    self._message.setText("중지·재개·교체 이유를 입력하세요.")
                     return
                 values["reason"] = reason
+        self._start_worker(operation, values)
+
+    def _start_worker(self, operation: str, values: dict[str, Any]) -> None:
         self._set_busy(True)
         worker = MockAutomationWorker(
             self._content, self._credentials, operation, values, self,
@@ -695,6 +1157,14 @@ class MockAutomationDialog(QDialog):
         worker.start()
 
     def _completed(self, operation: str, context: dict[str, Any]) -> None:
+        if operation in {'selected_status', 'selected_prepare', 'selected_accept', 'selected_stop'}:
+            self._management_status = context.get('selected_management')
+            self._show_selected_management()
+            self._message.setText('보관 주문의 최신 관리 상태를 확인했습니다.' if self._management_status
+                else '요청 수락 후 최신 관리 상태를 확인하지 못했습니다. 파일을 다시 선택해 확인하세요.')
+            return
+        if 'selected_management' in context:
+            self._management_status = context['selected_management']
         if "_publication_request" in context:
             context = {key: value for key, value in context.items() if key != "_publication_request"}
         messages = {
@@ -703,6 +1173,8 @@ class MockAutomationDialog(QDialog):
             "stop": "신규 자동 주문을 중지했습니다.",
             "resume": "모의 자동운용 재개 요청이 반영됐습니다.",
             "publish_spec": "READY 모의운용 명세를 게시했습니다. 주문은 아직 시작되지 않았습니다.",
+            "publish_account_selection": "계좌 구성을 저장했습니다. 자동운용 시작 시 적용됩니다.",
+            'replace_selection': '선택 구성을 적용했습니다. 기존 주문과 보유는 원래 명세로 관리하며 중지·재개 상태를 유지합니다.',
             "prepare_publication": "현재 선택한 후보의 게시 근거를 확인했습니다.",
         }
         if context.get("context_refresh_error"):
@@ -718,12 +1190,17 @@ class MockAutomationDialog(QDialog):
         self._apply_context()
         status = context.get("status")
         if isinstance(status, dict) and status.get("status_query_error"):
-            acknowledged = messages[operation] + " " if operation in {"start", "stop", "resume", "publish_spec"} else ""
+            acknowledged = messages[operation] + " " if operation in {"start", "stop", "resume", 'replace_selection', "publish_spec", "publish_account_selection"} else ""
             self._message.setText(acknowledged + "NAS 운용 상태를 확인하지 못했습니다. 새로 확인 후 제어하세요.")
         else:
             self._message.setText(messages.get(operation, "완료"))
 
     def _failed(self, _operation: str, message: str) -> None:
+        if _operation in {'selected_status', 'selected_prepare', 'selected_accept', 'selected_stop'}:
+            self._management_status = None
+            self._show_selected_management()
+            self._management_label.setText('관리 상태 미확인 · ' + message)
+            return
         self._context["status"] = {"status_query_error": message or "상태 미확인"}
         self._runtime.setText("상태를 확인할 수 없습니다. 새로 확인 후 제어할 수 있습니다.")
         self._runtime.setToolTip("")
@@ -745,6 +1222,7 @@ class MockAutomationDialog(QDialog):
 
     def _apply_context(self) -> None:
         self._runtime.setToolTip("")
+        self._members_status.clear()
         selected = self._context.get("selected_profile")
         profiles = self._context.get("profiles", ())
         selected_profile_id = str(selected.get("profile_id", "")) if isinstance(selected, dict) else ""
@@ -808,6 +1286,26 @@ class MockAutomationDialog(QDialog):
         self._spec.setCurrentIndex(index if index >= 0 else 0)
         self._spec.blockSignals(False)
         self._context["selected_spec_id"] = str(self._spec.currentData() or "")
+        self._spec.setToolTip(self._context["selected_spec_id"])
+
+        selected_selection_id = str(self._context.get("selected_account_selection_id", ""))
+        self._selection.blockSignals(True)
+        self._selection.clear()
+        self._selection.addItem("단일 명세 운용", "")
+        for saved in self._context.get("account_selections", ()):
+            if not isinstance(saved, dict):
+                continue
+            member_ids = saved.get("member_spec_ids", [])
+            names = [self._spec_name(identity) for identity in member_ids]
+            self._selection.addItem(" + ".join(names) + " · " + format_kst_time(saved.get("frozen_at"), missing=""),
+                                    saved.get("selection_id", ""))
+        index = self._selection.findData(selected_selection_id)
+        if selected_selection_id and index < 0:
+            self._selection.addItem("적용 구성 · 저장 목록 재확인 필요", selected_selection_id)
+            index = self._selection.count() - 1
+        self._selection.setCurrentIndex(max(0, index))
+        self._selection.blockSignals(False)
+        self._show_account_selection()
 
         selected_row = next((
             row for row in self._context.get("specs", ())
@@ -833,7 +1331,9 @@ class MockAutomationDialog(QDialog):
             if isinstance(control, dict) and control.get("entry_resume_required", False):
                 desired = str(desired) + " · 신규 진입 재개 대기"
             runner = status.get("runner")
-            runner_state = runner.get("state") if isinstance(runner, dict) else "없음"
+            runner_state = ("계좌 공통 실행" if isinstance(runner, dict)
+                            and runner.get("version") == "mock_automation_account_runner_status/v1" else
+                            runner.get("state") if isinstance(runner, dict) else "없음")
             error = str(status.get("restore_error", ""))
             latency = runner.get("latency") if isinstance(runner, dict) else None
             latency_text = ""
@@ -873,7 +1373,8 @@ class MockAutomationDialog(QDialog):
                     ("plan_id", "계획 ID"), ("plan_revision", "계획 판본"), ("intent_id", "보호 주문 의도 ID"),
                 ) if (value := protection.get(field)) is not None))
             self._runtime.setText(
-                f"모드 {status.get('runtime_mode') or '수동'} · 제어 {desired} · runner {runner_state}"
+                f"모드 {status.get('runtime_mode') or '수동'} · 제어 {desired} · "
+                + ("실행 상태 " if runner_state == "계좌 공통 실행" else "runner ") + str(runner_state)
                 + (f" · 복원 오류 {error}" if error else "")
                 + latency_text
                 + protection_text
@@ -882,16 +1383,92 @@ class MockAutomationDialog(QDialog):
             self._runtime.setText("상태를 확인할 수 없습니다.")
         self._apply_button_state()
 
+    def _spec_name(self, identity: str) -> str:
+        return next((str(row["spec"].get("strategy_ref") or identity)
+                     for row in self._context.get("specs", ()) if isinstance(row, dict)
+                     and isinstance(row.get("spec"), dict) and row["spec"].get("spec_id") == identity), identity)
+
+    def _show_account_selection(self) -> None:
+        self._selection_details.setToolTip("")
+        selection = selected_account_selection(self._context)
+        status = self._context.get("status") or {}
+        control = status.get("control") or {}
+        active = control.get("account_selection") or {}
+        runner = status.get("runner") or {}
+        active_id = active.get("selection_id")
+        runner_id = runner.get("account_selection_id")
+        lines = []
+        if selection:
+            identity = selection.get("selection_id")
+            if status.get("status_query_error") or (active_id and runner_id and active_id != runner_id):
+                lines.append("저장됨 · 적용 상태 미확인")
+            elif identity == active_id:
+                lines.append("저장됨 · 현재 제어에 적용됨")
+            else:
+                lines.append("저장됨 · 시작 전 구성")
+            members = selection.get("member_spec_ids", [])
+            if members:
+                lines.append("계좌 기준 · " + self._spec_name(members[0]))
+            order = selection.get("execution_order_spec_ids", [])
+            lines.append("실행 순서 · " + (" → ".join(self._spec_name(value) for value in order)
+                                          if order else "미지정 · 수정 후 저장하세요"))
+            limits = selection.get("limits", {})
+            if selection.get('version') == 'mock_automation_account_selection/v2':
+                lines.append('신규 진입 · ' + (' · '.join(self._spec_name(value) for value in selection.get('entry_spec_ids', [])) or '모두 중지'))
+                lines.append('기존 관리 유지 · ' + ' · '.join(self._spec_name(value['spec_id'])
+                    for value in selection.get('retained_admission_refs', [])))
+            lines.append("공통 한도 · " + " · ".join(f"{label} {limits[name]:,}" for name, label, *_ in _LIMIT_INPUTS
+                                                      if type(limits.get(name)) is int))
+            self._selection_details.setToolTip(str(identity))
+        elif self._context.get("selected_account_selection_id"):
+            lines.append("적용 구성의 저장 내용을 확인할 수 없습니다. 새로 확인하세요.")
+        else:
+            lines.append("선택한 단일 명세의 기존 한도를 사용합니다.")
+        self._selection_details.setText("\n".join(lines))
+        if runner.get("version") == "mock_automation_account_runner_status/v1":
+            member_lines = []
+            for member in runner.get("members", ()):
+                if not isinstance(member, dict):
+                    continue
+                state = str(member.get("state") or "")
+                state_label = {"READY": "준비", "STOPPED": "중지", "BLOCKED": "실행 차단", "ERROR": "오류",
+                               "WARMUP": "입력 복구 중", "RUNNING": "운용 중"}.get(state, state or "상태 미확인")
+                text = self._spec_name(str(member.get("spec_id", ""))) + " · " + state_label
+                protection = member.get("planned_protection")
+                if isinstance(protection, dict):
+                    protection_state = str(protection.get("state") or "")
+                    text += " · " + {"WAIT_NATIVE_READBACK": "원장 확인 대기", "PREPARED_NO_INTENT": "보호 준비",
+                        "SUBMISSION_UNKNOWN": "보호 매도 접수 미확인", "ACCEPTED": "보호 매도 접수",
+                        "PARTIALLY_FILLED": "보호 매도 일부 체결", "FILLED": "보호 매도 체결 완료"}.get(
+                            protection_state, "보호 매도 " + (protection_state or "상태 미확인"))
+                    for name, label in (("plan_quantity", "계획 보유"), ("reserved_quantity", "주문 예약"),
+                                        ("detailed_filled_quantity", "상세 체결"),
+                                        ("unreconciled_sell_quantity", "체결 대사 대기")):
+                        if type(protection.get(name)) is int:
+                            text += f" · {label} {protection[name]}주"
+                member_lines.append(text)
+            self._members_status.setText("\n".join(member_lines) or "명세별 상태 미확인")
+
     def _apply_button_state(self) -> None:
+        self._show_selected_management()
         state = operation_availability(self._context)
+        self._spec.setEnabled(self._worker is None and not self._context.get("selected_account_selection_id"))
         self._start.setEnabled(state["start"] and self._worker is None)
         self._stop.setEnabled(state["stop"] and self._worker is None)
         self._resume.setEnabled(state["resume"] and self._worker is None)
+        self._replace_selection.setEnabled(replacement_available(self._context) and self._worker is None)
 
     def _set_busy(self, busy: bool) -> None:
+        self._management_file.setEnabled(not busy)
+        if busy:
+            self._management_prepare.setEnabled(False)
+            self._management_accept.setEnabled(False)
+            self._management_stop.setEnabled(False)
         self._refresh.setEnabled(not busy)
         self._profile.setEnabled(not busy)
-        self._spec.setEnabled(not busy)
+        self._spec.setEnabled(not busy and not self._context.get("selected_account_selection_id"))
+        self._selection.setEnabled(not busy)
+        self._edit_selection.setEnabled(not busy and isinstance(self._context.get("candidate_binding"), dict))
         self._candidate.setEnabled(not busy)
         self._candidate_files.setEnabled(
             not busy and isinstance(self._context.get("selected_profile"), dict)
@@ -902,6 +1479,7 @@ class MockAutomationDialog(QDialog):
             self._start.setEnabled(False)
             self._stop.setEnabled(False)
             self._resume.setEnabled(False)
+            self._replace_selection.setEnabled(False)
         else:
             self._apply_button_state()
 

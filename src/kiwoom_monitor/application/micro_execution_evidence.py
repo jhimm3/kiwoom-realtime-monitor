@@ -75,6 +75,7 @@ def _receipt_time(value: object) -> datetime | None:
 
 
 MICRO_EVIDENCE_VERSION = "micro-synthetic-evidence/v1"
+MICRO_FROZEN_EVIDENCE_VERSION = 'micro-frozen-evidence/v1'
 MICRO_POLICY_VERSION = "micro-policy/v1"
 MICRO_RESULT_VERSION = "micro-execution-result/v1"
 MICRO_SHADOW_INPUT_VERSION = "micro-native-shadow-input/v1"
@@ -275,6 +276,7 @@ class _MicroEvent:
     observed_at: datetime
     available_at: datetime
     data: Mapping[str, object]
+    provenance: Mapping[str, object] | None = None
 
     @classmethod
     def from_document(cls, row: object) -> _MicroEvent:
@@ -291,7 +293,10 @@ class _MicroEvent:
             raise ValueError("MICRO event requires explicit offset-bearing times") from exc
         if observed > available:
             raise ValueError("MICRO event occurs after its availability")
-        return cls(kind, ref, observed, available, data)
+        provenance = row.get('provenance')
+        if provenance is not None and not isinstance(provenance, Mapping):
+            raise ValueError('MICRO event provenance must be an object')
+        return cls(kind, ref, observed, available, data, dict(provenance) if provenance is not None else None)
 
 
 @dataclass
@@ -499,7 +504,8 @@ class _MicroReplay:
     @staticmethod
     def _reference(event: _MicroEvent) -> dict:
         return {"kind": event.kind, "ref": event.ref,
-                "observed_at": event.observed_at.isoformat(), "available_at": event.available_at.isoformat()}
+                "observed_at": event.observed_at.isoformat(), "available_at": event.available_at.isoformat(),
+                **({'provenance': dict(event.provenance)} if event.provenance is not None else {})}
 
     def result(self) -> dict[str, object]:
         pending = next((order for order in self.orders.values() if not order.terminal), None)
@@ -534,8 +540,16 @@ def replay_micro_execution(
     scenario: Mapping[str, object], policy: Mapping[str, object], *, checkpoint=lambda: None,
 ) -> dict[str, object]:
     """Run one synthetic entry/exit episode using explicit source order and broker receipts."""
-    if scenario.get("version") != MICRO_EVIDENCE_VERSION:
+    frozen = scenario.get('version') == MICRO_FROZEN_EVIDENCE_VERSION
+    if not frozen and scenario.get("version") != MICRO_EVIDENCE_VERSION:
         raise ValueError("unsupported MICRO scenario version")
+    provenance = scenario.get('provenance') if frozen else None
+    if frozen and (not isinstance(provenance, Mapping)
+            or provenance.get('source_kind') not in {'synthetic', 'historical_reconstruction', 'historical_replay', 'hypothesis'}
+            or any(not isinstance(provenance.get(key), str) or not provenance[key].strip()
+                   for key in ('source_ref', 'source_version'))):
+        raise ValueError('MICRO frozen evidence requires its declared research source and version')
+    cut = aware_iso_kst(scenario['decision_at']) if frozen and 'decision_at' in scenario else None
     scope = tuple(scenario.get(key) for key in ("symbol", "venue", "clock_id"))
     events = scenario.get("events")
     if not all(isinstance(value, str) and value.strip() for value in scope) or not isinstance(events, (list, tuple)):
@@ -543,6 +557,7 @@ def replay_micro_execution(
     replay = _MicroReplay(_MicroPolicy.from_document(policy), scope)
     seen: dict[str, Mapping[str, object]] = {}
     previous = None
+    available_events, available_rows, unavailable = [], [], []
     for index, row in enumerate(events):
         if index % 128 == 0:
             checkpoint()
@@ -555,5 +570,35 @@ def replay_micro_execution(
             raise ValueError("MICRO events must retain recorded availability order")
         seen[event.ref] = row
         previous = event.available_at
+        if cut is not None and event.available_at > cut:
+            unavailable.append(event.ref)
+            continue
         replay.consume(row, event)
-    return replay.result()
+        available_events.append(event)
+        if frozen:
+            available_rows.append(dict(row))
+    result = replay.result()
+    if not frozen:
+        return result
+    book = replay.book.data if replay.book is not None else {}
+    tradability = book.get('tradable') if type(book.get('tradable')) is bool else None
+    ordered = replay.market_order is not None and not replay.market_issue
+    release = replay.release.data if replay.release is not None else {}
+    activation = replay.activation.data if replay.activation is not None else {}
+    release_known = (replay.policy.variant == 'BOOK_SCALP' or
+        _integer(release.get('release_price_won')) and isinstance(release.get('episode_id'), str)
+        and release['episode_id'] == activation.get('episode_id'))
+    missing = []
+    if _top_level(book.get('bids'), bids=True) is None or _top_level(book.get('asks'), bids=False) is None:
+        missing.append('quote_depth')
+    if tradability is None: missing.append('instrument_tradability')
+    if not ordered: missing.append('cross_stream_order')
+    if not release_known: missing.append('vi_release_execution_price')
+    if not any(event.kind == 'TRADE' for event in available_events): missing.append('trade_observation')
+    return {**result, 'source_kind': 'frozen_research_evidence', 'evidence_provenance': dict(provenance),
+        'evidence': available_rows,
+        'input_assessment': {'scope': 'declared_frozen_research', 'missing_inputs': missing,
+            'tradable': tradability, 'cross_stream_order': 'RECORDED' if ordered else 'UNKNOWN',
+            'vi_release_execution_price': release.get('release_price_won') if release_known else None,
+            'unavailable_event_refs': unavailable, 'native_confirmation': False},
+        'order_authorized': False}

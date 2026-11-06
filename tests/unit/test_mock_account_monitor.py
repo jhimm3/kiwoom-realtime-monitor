@@ -306,6 +306,38 @@ class AccountWideObservationMonitorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.monitor.close(); self.runtime.stop(); self.store.close()
 
+    async def test_execution_input_selection_can_borrow_one_direct_refresh_without_duplicate_queued_recovery(self):
+        await self.monitor.start(initial_read=True)
+        self.assertEqual(1, self.reader.calls)
+        self.assertIsNotNone(self.monitor.latest_position_observation)
+        with (patch.object(self.monitor, '_request_recovery', wraps=self.monitor._request_recovery) as request,
+              patch.object(self.repository, 'account_active_intents', wraps=self.repository.account_active_intents) as reads):
+            self.monitor.set_automation_execution_inputs_enabled(True, request_recovery=False)
+            self.assertTrue(self.monitor.automation_execution_inputs_enabled)
+            self.assertIsNone(self.monitor.latest_position_observation)
+            self.assertEqual(0, request.call_count)
+            self.assertEqual(0, self.monitor._queue.qsize())
+            await self.monitor.refresh_recovery()
+            await asyncio.wait_for(self.monitor._queue.join(), 2)
+            self.assertEqual(2, self.reader.calls)
+            self.assertEqual(2, reads.call_count)
+            self.assertTrue(self.monitor.latest_position_observation.open_orders_complete)
+            self.monitor.set_automation_execution_inputs_enabled(True, request_recovery=False)
+            self.assertIsNotNone(self.monitor.latest_position_observation)
+            self.assertEqual(0, request.call_count)
+            self.monitor.set_automation_execution_inputs_enabled(False, request_recovery=False)
+            self.assertIsNone(self.monitor.latest_position_observation)
+            self.assertEqual(0, request.call_count)
+            self.monitor.set_automation_execution_inputs_enabled(True)
+            self.assertEqual(1, request.call_count)
+            await asyncio.wait_for(self.monitor._queue.join(), 2)
+            self.assertEqual(3, self.reader.calls)
+            self.assertEqual(4, reads.call_count)
+            self.monitor.set_automation_execution_inputs_enabled(True)
+            await asyncio.wait_for(self.monitor._queue.join(), 2)
+            self.assertEqual(1, request.call_count)
+            self.assertEqual(3, self.reader.calls)
+
     async def test_published_native_risk_is_copied_with_account_without_additional_queries(self):
         from dataclasses import replace
         from unittest.mock import AsyncMock

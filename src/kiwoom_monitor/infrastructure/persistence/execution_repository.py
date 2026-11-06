@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Protocol
 
@@ -25,6 +25,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRe
 
 
 class ExecutionStore(Protocol):
+    def load_mock_automation_control(self, account_ref: str) -> dict[str, Any] | None: ...
     def create_execution_intent(self, value: dict[str, Any], *, ownership: dict[str, Any] | None = None) -> bool: ...
     def append_execution_event(self, intent: dict[str, Any], event: dict[str, Any], *, ownership: dict[str, Any] | None = None) -> bool: ...
     def load_execution_intent(self, intent_id: str, *, _reader: Any = None) -> dict[str, Any] | None: ...
@@ -118,6 +119,17 @@ class MemberExecutionRecord(ExecutionRecord):
     stays unchanged.
     """
     member_spec_id: str
+
+
+def project_execution_record(record, member_projection):
+    """Internal verified-selection view; the original native record stays unchanged."""
+    member = member_projection.get(record.intent.intent_id) if member_projection else None
+    if member is None or getattr(record, 'member_spec_id', None) is not None:
+        return record
+    if not isinstance(record.intent, PlannedOrderIntent):
+        raise ValueError('only a proved planned intent has retained member ownership')
+    return MemberExecutionRecord(**{field.name: getattr(record, field.name) for field in fields(ExecutionRecord)},
+                                 member_spec_id=member)
 
 
 def broker_legs_state(legs, requested, amendment=None):
@@ -255,6 +267,16 @@ class MemberAccountExecutionEvent(AccountExecutionEvent):
     member_spec_id: str
 
 
+def project_account_execution_event(event, member_projection):
+    member = member_projection.get(event.intent_id) if member_projection else None
+    if member is None or getattr(event, 'member_spec_id', None) is not None:
+        return event
+    if event.plan is None:
+        raise ValueError('only a proved planned event has retained member ownership')
+    return MemberAccountExecutionEvent(**{field.name: getattr(event, field.name) for field in fields(AccountExecutionEvent)},
+                                      member_spec_id=member)
+
+
 @dataclass(frozen=True)
 class AccountExecutionEventPage:
     events: tuple[AccountExecutionEvent, ...]
@@ -274,9 +296,53 @@ class ExecutionRepository:
         self._store = store
         self._ownership: dict[str, str] | None = None
         self._automation_control: dict[str, Any] | None = None
+        self._selected_management_context = None
+        self._selected_management_owner = None
+        self._selected_management_policy = None
+
+    @property
+    def selected_management_context(self):
+        return self._selected_management_context
+
+    @property
+    def selected_management_policy(self):
+        """Past policy data for this explicit owner; current authority is native."""
+        from copy import deepcopy
+        context = self._selected_management_context
+        if context is None:
+            return None
+        if self._selected_management_policy is None:
+            self._selected_management_policy = self._store.load_selected_order_management_policy(context.to_dict())
+        return deepcopy(self._selected_management_policy)
+
+    def bind_selected_management_context(self, context, *, current_owner):
+        from kiwoom_monitor.domain.selected_order_evidence import (
+            SelectedOrderManagementContext, selected_order_management_context_from_dict)
+        context = (context if isinstance(context, SelectedOrderManagementContext)
+                   else selected_order_management_context_from_dict(context))
+        if (not callable(current_owner) or self._selected_management_context is not None
+                and self._selected_management_context != context):
+            raise ValueError('selected management repository context is immutable')
+        self._selected_management_context, self._selected_management_owner = context, current_owner
+
+    def _selected_management_options(self):
+        if self._selected_management_context is None:
+            return {}
+        return dict(selected_management_context=self._selected_management_context.to_dict(),
+                    selected_management_owner=self._selected_management_owner)
 
     def uses_store(self, store: ExecutionStore) -> bool:
         return self._store is store
+
+    def current_automation_control(self, account_ref: str) -> dict[str, Any] | None:
+        """Read current native account control without granting execution authority."""
+        return self._store.load_mock_automation_control(account_ref)
+
+    def retained_member_projection(self, account_ref, *, selection_id=None, expected_control_revision=None,
+                                   intent_ids=None, _reader=None):
+        """Verify original immutable approvals for one actual/proposed v2 selection."""
+        return self._store.load_retained_execution_member_projection(account_ref, selection_id=selection_id,
+            expected_control_revision=expected_control_revision, intent_ids=intent_ids, _reader=_reader)
 
     def mock_automation_read_scope(self) -> AbstractContextManager[Any]:
         factory = getattr(self._store, "mock_automation_read_scope", None)
@@ -296,6 +362,7 @@ class ExecutionRepository:
         if self._ownership is None:
             return {}
         ownership: dict[str, Any] = dict(self._ownership)
+        ownership.update(self._selected_management_options())
         if self._automation_control is not None:
             ownership.update(self._automation_control)
         return {"ownership": ownership}
@@ -392,11 +459,12 @@ class ExecutionRepository:
             return self.load(record.intent.intent_id, **connection_args) or record
         return updated
 
-    def load(self, intent_id: str, *, _reader: Any = None, _connection: Any = None) -> ExecutionRecord | None:
+    def load(self, intent_id: str, *, _reader: Any = None, _connection: Any = None,
+             member_projection=None) -> ExecutionRecord | None:
         reader_args = {} if _reader is None else {'_reader': _reader}
         connection_args = {} if _connection is None else {"_connection": _connection}
         value = self._store.load_execution_intent(intent_id, **reader_args, **connection_args)
-        return _record_from_document(value) if value else None
+        return project_execution_record(_record_from_document(value), member_projection) if value else None
 
     def load_plan_position(self, account_ref, run_id, symbol, plan: OrderPlanRef, *, _reader=None) -> ExecutionPlanPosition:
         reader_args = {} if _reader is None else {"_reader": _reader}
@@ -410,13 +478,13 @@ class ExecutionRepository:
         return (_record_from_document(value), _protection_claim(value)) if value else (None, None)
 
     def active_intents(
-        self, environment: str, account_ref: str, run_id: str, *, _reader: Any = None,
+        self, environment: str, account_ref: str, run_id: str, *, _reader: Any = None, member_projection=None,
     ) -> tuple[ExecutionRecord, ...]:
         if environment != "mock" or not account_ref.strip() or not run_id.strip():
             raise ValueError("mock environment, account_ref and run_id are required")
         reader_args = {} if _reader is None else {"_reader": _reader}
         return tuple(
-            _record_from_document(value)
+            project_execution_record(_record_from_document(value), member_projection)
             for value in self._store.load_active_execution_intents(
                 environment, account_ref, run_id, **reader_args,
             )
@@ -433,11 +501,12 @@ class ExecutionRepository:
         )
         return _record_from_document(value) if value else None
 
-    def account_active_intents(self, account_ref: str, *, _reader: Any = None) -> tuple[tuple[ExecutionRecord, ...], bool]:
+    def account_active_intents(self, account_ref: str, *, _reader: Any = None,
+                               member_projection=None) -> tuple[tuple[ExecutionRecord, ...], bool]:
         """One bounded account-wide read, including QUEUED records with no events."""
         reader_args = {} if _reader is None else {"_reader": _reader}
         values = self._store.load_account_active_execution_intents("mock", account_ref, 401, **reader_args)
-        records = tuple(_record_from_document(value) for value in values[:400])
+        records = tuple(project_execution_record(_record_from_document(value), member_projection) for value in values[:400])
         if any(r.intent.account_ref != account_ref or r.intent.environment != "mock" for r in records):
             raise ValueError("account-wide ledger crossed the requested scope")
         return records, len(values) <= 400
@@ -461,6 +530,7 @@ class ExecutionRepository:
 
     def account_events(
         self, environment: str, account_ref: str, *, after_sequence: int = 0, limit: int = 500, _reader: Any = None,
+        member_projection=None,
     ) -> AccountExecutionEventPage:
         """Read one stable account page across run changes without mutating the ledger."""
         if environment != "mock" or not account_ref.strip():
@@ -476,7 +546,8 @@ class ExecutionRepository:
         has_more = len(rows) > limit
         selected = rows[:limit]
         events = tuple(
-            _account_event_from_document(row, environment=environment, account_ref=account_ref)
+            project_account_execution_event(
+                _account_event_from_document(row, environment=environment, account_ref=account_ref), member_projection)
             for row in selected
         )
         next_cursor = events[-1].accepted_sequence if events else after_sequence
@@ -520,6 +591,7 @@ class ExecutionRepository:
             return self._store.acquire_execution_runtime(
                 owner_key, lease_owner, now.isoformat(),
                 (now + timedelta(seconds=max(1, lease_seconds))).isoformat(), **connection_args,
+                **self._selected_management_options(),
             )
 
 
@@ -530,7 +602,8 @@ class ExecutionRepository:
         observer = database_observer()
         owner_key = f"{environment}:{account_ref}"
         with observer.account.source_execution_owner(owner_key, run_id) if observer is not None else nullcontext():
-            return self._store.release_execution_runtime(owner_key, f"{run_id}:{owner_token}")
+            return self._store.release_execution_runtime(owner_key, f"{run_id}:{owner_token}",
+                **self._selected_management_options())
 
 
 def plan_position_from_document(value, run_id, symbol, plan: OrderPlanRef) -> ExecutionPlanPosition:

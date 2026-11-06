@@ -30,6 +30,7 @@ def member_fill_inputs(case,store):
 
 
 def verify_member_risk_and_positions(case,store):
+    from tests.unit.test_mock_automation_account_execution import native_account_observation
     from kiwoom_monitor.application.mock_automation_execution import dispatch_mock_automation_decision_from_risk
     from kiwoom_monitor.application.mock_automation_recovery import record_mock_automation_recovery_from_risk
     from kiwoom_monitor.application.mock_automation_risk import (
@@ -61,7 +62,8 @@ def verify_member_risk_and_positions(case,store):
         case.assertEqual(max(e.accepted_sequence for e in events),state.fill_cursor)
         states.append(state)
         record_mock_automation_recovery_from_risk(data.repository,owner.runtime,recovery,risk,
-            account_ref=owner.runtime.account_ref,spec_id=spec.spec_id)
+            account_ref=owner.runtime.account_ref,spec_id=spec.spec_id,
+            observation=native_account_observation(owner,recovery,risk))
     for (spec,gate,intent) in planned:
         head=store.load_document('execution_mock_plan_positions',owner.runtime.account_ref,intent.plan.plan_id)['document']
         plan=replace(intent.plan,expected_revision=head['revision'])
@@ -258,6 +260,41 @@ class MockMemberRiskTests(unittest.TestCase):
             self.assertEqual(2,len({row['broker_order_id'] for row in fills}))
             self.assertEqual(409,client.get(url,params={**query,'expected_binding_revision':binding.binding_revision+1},
                 headers={'Authorization':'Bearer member-test'}).status_code)
+        from kiwoom_monitor.application.journal_enrichment import journal_execution_projection_page
+        from kiwoom_monitor.application.trade_history_query_service import TradeHistoryQueryService
+        from kiwoom_monitor.application.trade_history_service import TradeFill
+        from kiwoom_monitor.domain.time_basis import as_kst
+        from kiwoom_monitor.infrastructure.persistence.journal_database import JournalRepository
+        from kiwoom_monitor.journal_process import JournalWindow
+        from PySide6.QtWidgets import QApplication,QTableWidget
+
+        journal_path=Path(self.enterContext(tempfile.TemporaryDirectory()))/'journal.sqlite3'
+        journal=JournalRepository(journal_path)
+        projection=journal_execution_projection_page(document,from_cursor=0,account_scope=binding.scope)
+        journal.project_execution_event_page(projection,owner.clock[0])
+        journal=JournalRepository(journal_path)
+        rows=journal.load_execution_fill_projections(binding.scope)
+        self.assertEqual(list(data.selection.member_spec_ids),[row['member_spec_id'] for row in rows])
+        self.assertEqual(['same-raw-id']*2,[row['broker_execution_id'] for row in rows])
+        summaries=tuple(TradeFill(row['broker_order_id'],row['stock_code'],'삼성전자','매수',
+            as_kst(datetime.fromisoformat(row['occurred_at'])).replace(tzinfo=None),row['quantity'],row['price'],
+            origin_scope=binding.scope) for row in rows)
+        journal.upsert_fills(summaries,account_scope=binding.scope)
+        start=min(fill.filled_at for fill in summaries)
+        visible=TradeHistoryQueryService(journal).load(start,start+timedelta(hours=1),binding.scope)
+        self.assertEqual(dict(zip(summaries,data.selection.member_spec_ids,strict=True)),visible.execution_members)
+        self.assertEqual({buy.intent.plan for buy in buys},set(visible.execution_plans.values()))
+        type(self)._application=QApplication.instance() or QApplication([])
+        table=QTableWidget(0,9)
+        self.addCleanup(table.close)
+        screen=SimpleNamespace(_fills_table=table,_visible_execution_plans=visible.execution_plans,
+            _visible_execution_members=visible.execution_members,_select_journal_cell=lambda *_:None)
+        JournalWindow._render_fills(screen,summaries)
+        for row,(fill,spec) in enumerate(zip(summaries,data.specs,strict=True)):
+            self.assertEqual(fill.order_no,table.item(row,8).text())
+            self.assertIn(spec.spec_id,table.item(row,8).toolTip())
+            self.assertIn(visible.execution_plans[fill].plan_id,table.item(row,8).toolTip())
+        self.assertEqual(2,sum(fill.quantity for fill in visible.fills))
         self.assertEqual(2,len(owner.transport.calls))
 
     def test_standalone_dataclass_research_identity_matches_the_frozen_pre_member_shape(self):

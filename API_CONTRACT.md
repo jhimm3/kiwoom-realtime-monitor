@@ -1,5 +1,19 @@
 # NAS API 계약
 
+**S12-05 명시 계좌 구성·멤버 조회(2026-11-06).** 기존 계좌 구성의 `execution_order_spec_ids`는 선택 필드이며 있으면 모든 `member_spec_ids`의 정확한 순열이다. 기준 명세는 기존 첫 멤버이고 실행 순서와 다르다. 필드 없는 저장 문서·ID는 유지하지만 공개 병행 기동은 명시 순서를 요구한다. 기존 START 요청의 선택 `account_selection_id`로 저장된 구성을 사용하며 누락한 단일 명세 요청은 기존 형식을 유지한다. 병행 상태는 `mock_automation_account_runner_status/v1`의 구성 ID·기준 명세·명시 순서와 `members` 목록을 반환한다. 제어 응답의 `control.account_selection.selection_id`가 실제 적용 구성이다. 저장 구성·화면 선택·현재 적용을 구분한다.
+
+기존 운영 설정의 선택 `shadow_candidate_configs`는 정확한 명세 ID→기존 정책 문서의 map이다. 키 자체가 없을 때 기존 단일 설정을 사용하며, map이 있으면 빠진 멤버를 다른 정책으로 대체하지 않는다. 빈 map은 신규 후보를 만들지 않는다. 기존 공통 활성 설정과 CAS 판본을 유지하며 삭제·비활성 뒤에도 원래 보유·주문 정책은 보존한다. 계좌 이벤트의 선택 멤버 ID는 실제 native 귀속을 전달한다. 매매일지는 이를 같은 물리 체결·계획과 함께 저장·표시하며 과거 null 귀속을 추정하지 않는다. 모든 멤버의 같은 최신 계좌 컷을 확인한 명시 재개만 제어를 한 번 갱신하고 기존 단일 계좌 주문 권한을 유지한다. 실제 운영 적용은 별도다.
+
+명시 교체는 `POST /api/v1/mock-automation/replace-selection`에서 저장된 v2 구성과 현재 제어·설정·키 판본을 대조한다. `entry_spec_ids`만 새 진입할 수 있고 `retained_admission_refs`의 기존 멤버는 원래 입장·계획·늦은 체결의 관리를 계속한다. 기준 명세·실행 run·Runtime·단일 lease는 유지한다. 교체가 기존 STOPPED나 명시 재개 필요 상태를 해제하지 않는다. 이전 단일 명세의 원문·해시·체결은 멤버 문서로 재작성하지 않으며 내부의 검증된 귀속 view로 소비한다. 명세 목록의 입장 참조는 `include_admission_refs=true`를 명시한 조회에만 추가한다. 기존 조회 기본 형식은 유지한다.
+
+동결 MICRO 연구는 `POST /api/v1/research/micro-inputs?evidence_sha256=...`의 정확한 `scenario`·`policy` 문서를 사용한다. 출처·판본·가용 컷과 결측을 결과에 남기며 실시간 GET의 확인되지 않은 거래 가능 상태·교차 순서·VI 해제 체결가를 확정으로 바꾸지 않는다. DD 동결 실행 근거도 원주가 보호와 체결별 비용 출처를 보존한다. 연구 결과는 주문 승인이나 운영 실증이 아니다.
+
+선별 주문의 `POST /api/v1/mock-automation/selected-order-evidence/{operation_id}/assessment`는 저장 packet digest·원본 owner 증명·현재 대상 계좌와 키 판본·일자별 물리 주문/상세 체결을 대조한다. 자료 부족이나 서로 검증할 수 없는 identity 영역은 `UNKNOWN`이다. 별도 `/bootstrap`은 완전한 v4 단일 주문 또는 v5 단일 계획 전체 원장·정책 자료와 현재 owner 증명을 요구한다. v5는 완료된 최초 매수·추가/부분 청산을 포함한 정확한 원주문/이벤트 집합을 설치한다. 원래 사건/물리 체결 ID와 대상 커서 좌표는 분리한다. 설치 자체는 `management_ready=false`, `order_authority=false`이며 요청자의 확인 여부로 실행 권한을 만들지 않는다.
+
+`/prepare-management`는 현재 계좌의 기존 실행자를 종료하고 단일 canonical lease의 원계획 대사 실행자를 준비한다. `/accept-management`는 새로운 현재 계좌·상세 체결·Risk·복구 판본과 제어를 대조한 명시 관리 수락이며 신규 진입은 계속 OFF다. 두 요청의 `expected_settings_revision`은 기존 계좌 설정의 저장/적용 판본이다. 실제 취소·정정·보호 매도는 현재 모니터/주문 허용 설정을 따르며 전역 OFF를 수락 요청으로 덮어쓰지 않는다. 설정 변경은 기존 작업을 drain한 뒤 현재 대상의 조회 실행자로 돌아가며 원계획 관리는 다시 준비·수락해야 한다. 과거 영수증과 현재 실행 상태를 구분한다.
+
+일자와 상세 체결은 서버의 기존 읽기 브로커를 사용한다. 서명된 원본 근거의 거래일만 `kt00007`·`kt00009`로 조회하고 `ka10075`·`ka10076`의 현재 관측과 대조한다. 집계 수량에서 체결 ID·시각을 만들거나 현재 날짜를 원주문 일자로 추정하지 않는다. 실제 브로커의 해당 API 지원·운영 자료/권한 수락은 별도다.
+
 > **API 적용 범위.** API와 이벤트 형식은 해당 소스·실행 모드에서 확인한다. 새 역할 연결은 공개 인증·조회·저장 수락을 재사용하고, 최초 수락·중복 전달·지연 판본과 원시각/수락시각을 구분한다. [관련 계약](docs/architecture/r3-ownership.md).
 
 `search_calls`는 연구 요청의 검색 동작 시도 건수다. 완료되지 않은 웹 동작은 안전한 URL 근거에 포함하지 않고 기존 web_actions 항목의 선택 status에 failed/in_progress/incomplete/unknown을 남긴다. 완료된 모델 텍스트·사용량은 검색 동작/출처 부재로 버리지 않는다. 일반 기사 AI 응답 경로와 인증·전송 오류는 바꾸지 않는다.

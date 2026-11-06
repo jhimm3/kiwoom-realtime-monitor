@@ -1642,7 +1642,7 @@ def _evaluate_frozen_daily_decline_setup(request, scenario, descriptor_size, gua
 
     required = {"version", "frozen_dataset", "symbol", "venue", "signal_day", "cut",
                 "strategy_references", "basis", "benchmark"}
-    if not required <= scenario.keys() or scenario.keys() - required - {"catalyst"}:
+    if not required <= scenario.keys() or scenario.keys() - required - {"catalyst", "execution_evidence"}:
         raise ValueError("invalid DD native setup descriptor")
     reference = _mapping(scenario["frozen_dataset"], "frozen_dataset")
     manifest_sha = reference.get("manifest_sha256")
@@ -1706,6 +1706,10 @@ def _evaluate_frozen_daily_decline_setup(request, scenario, descriptor_size, gua
 
     identity = {"frozen_manifest_sha256": manifest_sha, "frozen_dataset_id": frozen.manifest["dataset_id"],
                 "revision_ids_hash": frozen.manifest["revision_ids_hash"]}
+    if 'execution_evidence' in scenario:
+        from kiwoom_monitor.application.daily_decline import replay_frozen_daily_decline
+        return replay_frozen_daily_decline(frozen.observations, scenario, request.policy, decision,
+                                          checkpoint=checkpoint), identity
     return {"version": "dd-native-setup-result/v1", "symbol": symbol, "venue": venue,
             "signal_day": inputs["signal_day"].isoformat(), "cut": cut.isoformat(),
             "setup": decision.to_document()}, identity
@@ -1728,6 +1732,8 @@ def _execute_evidence_experiment(request, guard, cancelled) -> dict[str, Any]:
     if request.mode == "daily_decline_experiment" and scenario.get("version") == DAILY_DECLINE_NATIVE_SETUP_VERSION:
         result, identity = _evaluate_frozen_daily_decline_setup(request, scenario, len(encoded), guard, checkpoint)
         source_kind, scope = "frozen_native_daily_observations", "native_setup_assessment"
+        if 'execution_evidence' in scenario:
+            source_kind, scope = 'frozen_research_evidence', 'frozen_daily_execution_research'
     else:
         if request.mode == "micro_experiment":
             from kiwoom_monitor.application.micro_execution_evidence import replay_micro_execution as replay
@@ -1736,6 +1742,8 @@ def _execute_evidence_experiment(request, guard, cancelled) -> dict[str, Any]:
         else:
             from kiwoom_monitor.application.account_risk_research import replay_account_risk_experiment as replay
         result = replay(scenario, request.policy, checkpoint=checkpoint)
+        if request.mode == 'micro_experiment' and result.get('source_kind') == 'frozen_research_evidence':
+            source_kind, scope = 'frozen_research_evidence', 'frozen_micro_execution_research'
 
     checkpoint()
     spec = {
@@ -1760,6 +1768,8 @@ def _execute_evidence_experiment(request, guard, cancelled) -> dict[str, Any]:
                "dataset_sha256": spec["dataset_sha256"], "execution_scope": scope, **identity}
     if isinstance(result.get("variant"), str):
         context["variant"] = result["variant"]
+    if 'evidence_provenance' in result:
+        context['evidence_provenance'] = result['evidence_provenance']
     return {"status": "ok", "kind": request.mode, "run_id": run_id, "manifest": str(manifest),
             "result": result, "order_authorized": False, "section12": context}
 

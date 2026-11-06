@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import uuid
 from contextlib import closing
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -264,6 +265,118 @@ class JournalExecutionProjectionTests(unittest.TestCase):
             self.scope,
         )[0]["broker_execution_id"])
 
+    def test_member_fills_keep_native_attribution_across_late_detail_restart_and_query(self) -> None:
+        member_a = "mock_automation_spec_" + "a" * 64
+        member_b = "mock_automation_spec_" + "b" * 64
+        plan_a = {"plan_id": "leader-plan", "policy_ref": "leader/v2", "expected_revision": 2}
+        plan_b = {"plan_id": "close-plan", "policy_ref": "close/v1", "expected_revision": 3}
+
+        def native(sequence, member, plan, order, intent, event_type="FILL", quantity=1):
+            return {
+                **_event(self.scope, sequence, event_type, intent_id=intent, order_id=order,
+                         execution_id=f"fill-{sequence}" if event_type == "FILL" else "",
+                         quantity=quantity, price=70_000 if event_type == "FILL" else 0),
+                "member_spec_id": member, "plan": plan,
+            }
+
+        aggregate = self.repository.project_execution_event_page(_page(self.scope, 0, [
+            native(1, member_a, plan_a, "order-a", "intent-a", "BROKER_FILL_AGGREGATE", 3),
+            native(2, member_b, plan_b, "order-b", "intent-b", "BROKER_FILL_AGGREGATE", 2),
+        ]), NOW)
+        self.assertEqual({"intent-a": 3, "intent-b": 2}, aggregate.unresolved_quantity_by_intent)
+        details = _page(self.scope, 2, [
+            native(3, member_a, plan_a, "order-a", "intent-a"),
+            native(4, member_b, plan_b, "order-b", "intent-b", quantity=2),
+            native(5, member_a, plan_a, "order-a", "intent-a", quantity=2),
+        ])
+        journal = JournalRepository(self.path)
+        result = journal.project_execution_event_page(details, NOW + timedelta(seconds=1))
+        self.assertEqual({"intent-a": 0, "intent-b": 0}, result.unresolved_quantity_by_intent)
+        self.assertEqual(0, journal.project_execution_event_page(details, NOW).inserted_event_count)
+        rows = JournalRepository(self.path).load_execution_fill_projections(self.scope)
+        self.assertEqual([member_a, member_b, member_a], [row["member_spec_id"] for row in rows])
+        self.assertEqual([plan_a, plan_b, plan_a], [row["plan"] for row in rows])
+        self.assertEqual([NOW.isoformat()] * 3, [row["occurred_at"] for row in rows])
+
+        at = NOW.replace(tzinfo=None)
+        fills = (
+            TradeFill("order-a", "005930", "삼성전자", "매수", at, 3, 70_000, origin_scope=self.scope),
+            TradeFill("order-b", "005930", "삼성전자", "매수", at, 2, 70_000, origin_scope=self.scope),
+        )
+        journal.upsert_fills(fills, account_scope=self.scope)
+        query = TradeHistoryQueryService(journal)
+        visible = query.load(at, at + timedelta(hours=1), self.scope)
+        self.assertEqual({fills[0]: member_a, fills[1]: member_b}, visible.execution_members)
+        self.assertEqual({fills[0]: OrderPlanRef(**plan_a), fills[1]: OrderPlanRef(**plan_b)}, visible.execution_plans)
+        reconciled = query.load_reconciled(at, at + timedelta(hours=1), self.scope)
+        self.assertEqual(5, sum(fill.quantity for fill in reconciled.reconciliation.fills))
+        self.assertEqual({member_a, member_b}, {
+            detail.member_spec_id for group in reconciled.reconciliation.groups for detail in group.detailed_fills
+        })
+
+    def test_same_physical_fill_cannot_be_reassigned_to_another_member(self) -> None:
+        first = {**_event(self.scope, 1, "FILL", execution_id="fill-a"), "member_spec_id": "member-a"}
+        self.repository.project_execution_event_page(_page(self.scope, 0, [first]), NOW)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "conflicting content"):
+            self.repository.project_execution_event_page(_page(self.scope, 1, [
+                {**_event(self.scope, 2, "FILL", execution_id="fill-new"), "member_spec_id": "member-b"},
+                {**_event(self.scope, 3, "FILL", execution_id="fill-a", run_id="other-run"),
+                 "member_spec_id": "member-b"},
+            ]), NOW)
+        self.assertEqual(1, self.repository.load_execution_projection_cursor(JOURNAL_EXECUTION_PROJECTION, self.scope))
+        [row] = self.repository.load_execution_fill_projections(self.scope)
+        self.assertEqual(("fill-a", "member-a"), (row["broker_execution_id"], row["member_spec_id"]))
+
+    def test_prior_entry_keeps_its_member_when_selected_period_only_contains_exit(self) -> None:
+        tomorrow = NOW + timedelta(days=1)
+        plan = {"plan_id": "overnight", "policy_ref": "close/v1", "expected_revision": 1}
+        self.repository.project_execution_event_page(_page(self.scope, 0, [
+            {**_event(self.scope, 1, "FILL", order_id="buy", execution_id="buy-fill", quantity=2),
+             "member_spec_id": "member-a", "plan": plan},
+            {**_event(self.scope, 2, "FILL", order_id="sell", execution_id="sell-fill", quantity=2,
+                      occurred_at=tomorrow), "side": "SELL", "member_spec_id": "member-a", "plan": plan},
+        ]), tomorrow)
+        buy = TradeFill("buy", "005930", "삼성전자", "매수", NOW.replace(tzinfo=None), 2, 70_000, origin_scope=self.scope)
+        sell = TradeFill("sell", "005930", "삼성전자", "매도", tomorrow.replace(tzinfo=None), 2, 70_000, origin_scope=self.scope)
+        self.repository.upsert_fills((buy, sell), account_scope=self.scope)
+
+        visible = TradeHistoryQueryService(self.repository).load(
+            tomorrow.replace(tzinfo=None, hour=0), tomorrow.replace(tzinfo=None, hour=0) + timedelta(days=1), self.scope,
+        )
+
+        self.assertEqual({buy, sell}, set(visible.episodes[0].fills))
+        self.assertEqual({buy: "member-a", sell: "member-a"}, visible.execution_members)
+        self.assertEqual({buy: OrderPlanRef(**plan), sell: OrderPlanRef(**plan)}, visible.execution_plans)
+
+    def test_unmatched_summary_is_not_labeled_with_member_ownership(self) -> None:
+        self.repository.project_execution_event_page(_page(self.scope, 0, [{
+            **_event(self.scope, 1, "FILL", execution_id="fill-a"), "member_spec_id": "member-a",
+        }]), NOW)
+        at = NOW.replace(tzinfo=None)
+        summary = TradeFill("order-1", "005930", "삼성전자", "매수", at, 3, 70_000, origin_scope=self.scope)
+        self.repository.upsert_fills((summary,), account_scope=self.scope)
+        query = TradeHistoryQueryService(self.repository)
+        visible = query.load(at, at + timedelta(hours=1), self.scope)
+        self.assertEqual({}, getattr(visible, "execution_members", {}))
+        self.assertEqual((summary,), visible.fills)
+        [group] = query.load_reconciled(at, at + timedelta(hours=1), self.scope).reconciliation.groups
+        self.assertEqual(("PARTIAL", "member-a"), (group.status, group.detailed_fills[0].member_spec_id))
+
+    def test_member_extension_preserves_standalone_shape_physical_hash_and_strict_plan(self) -> None:
+        source = _event(self.scope, 1, "FILL", execution_id="fill-a")
+        standalone = _page(self.scope, 0, [source]).events[0]
+        member = _page(self.scope, 0, [{**source, "member_spec_id": "member-a"}]).events[0]
+        self.assertNotIn("member_spec_id", asdict(standalone))
+        self.assertEqual((standalone.fill_identity, standalone.content_hash), (member.fill_identity, member.content_hash))
+        for invalid in (None, "", "  ", 1):
+            with self.subTest(member=invalid), self.assertRaisesRegex(ValueError, "member reference"):
+                _page(self.scope, 0, [{**source, "member_spec_id": invalid}])
+        with self.assertRaisesRegex(ValueError, "plan reference"):
+            _page(self.scope, 0, [{**source, "plan": {
+                "plan_id": "plan", "policy_ref": "policy/v1", "expected_revision": 1,
+                "member_spec_id": "member-a",
+            }}])
+
     def test_v11_projection_preserves_legacy_row_and_shows_only_matched_plan(self) -> None:
         self.repository.project_execution_event_page(_page(self.scope, 0, [
             _event(self.scope, 1, "FILL", order_id="legacy-order", execution_id="legacy-fill"),
@@ -293,6 +406,38 @@ class JournalExecutionProjectionTests(unittest.TestCase):
         visible = query.load(fill_at, fill_at + timedelta(hours=1), self.scope)
         self.assertEqual((summary,), visible.fills)
         self.assertEqual({summary: OrderPlanRef(**plan)}, visible.execution_plans)
+
+    def test_v12_member_migration_is_atomic_preserves_existing_evidence_and_does_not_guess_attribution(self) -> None:
+        self.repository.project_execution_event_page(_page(self.scope, 0, [
+            _event(self.scope, 1, "FILL", execution_id="old-fill"),
+        ]), NOW)
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("ALTER TABLE journal_execution_event_projections DROP COLUMN member_spec_id")
+            connection.execute("DELETE FROM journal_schema_migrations WHERE version=13")
+            before = connection.execute("SELECT * FROM journal_execution_event_projections").fetchall()
+            states = connection.execute("SELECT * FROM journal_execution_projection_states").fetchall()
+            receipts = connection.execute("SELECT * FROM journal_schema_migrations ORDER BY version").fetchall()
+            connection.execute("CREATE TRIGGER reject_v13 BEFORE INSERT ON journal_schema_migrations WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'member receipt rejected'); END")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "member receipt rejected"):
+            JournalRepository(self.path)
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            self.assertNotIn("member_spec_id", {row[1] for row in connection.execute("PRAGMA table_info(journal_execution_event_projections)")})
+            self.assertEqual(before, connection.execute("SELECT * FROM journal_execution_event_projections").fetchall())
+            self.assertEqual(receipts, connection.execute("SELECT * FROM journal_schema_migrations ORDER BY version").fetchall())
+            connection.execute("DROP TRIGGER reject_v13")
+        journal = JournalRepository(self.path)
+        JournalRepository(self.path)
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual([(*row, None) for row in before], connection.execute("SELECT * FROM journal_execution_event_projections").fetchall())
+            self.assertEqual(states, connection.execute("SELECT * FROM journal_execution_projection_states").fetchall())
+            self.assertEqual(receipts, connection.execute("SELECT * FROM journal_schema_migrations WHERE version<=12 ORDER BY version").fetchall())
+        [legacy] = journal.load_execution_fill_projections(self.scope)
+        self.assertNotIn("member_spec_id", legacy)
+        with self.assertRaises(sqlite3.IntegrityError):
+            journal.project_execution_event_page(_page(self.scope, 1, [{
+                **_event(self.scope, 2, "FILL", execution_id="old-fill"), "member_spec_id": "new-member",
+            }]), NOW)
+        self.assertEqual(1, journal.load_execution_projection_cursor(JOURNAL_EXECUTION_PROJECTION, self.scope))
 
     def test_cancellation_after_page_fetch_keeps_last_committed_cursor(self) -> None:
         source = _Source([

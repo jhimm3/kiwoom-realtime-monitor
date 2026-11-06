@@ -91,8 +91,9 @@ class JournalTradeRepositoryMixin:
                     raise ValueError("execution projection page has a cursor gap")
                 for event in page.events:
                     plan_json = json.dumps(asdict(event.plan), ensure_ascii=False, sort_keys=True) if event.plan else None
+                    member_spec_id = getattr(event, "member_spec_id", None)
                     existing = connection.execute(
-                        "SELECT source_event_id,content_hash,order_plan_json FROM journal_execution_event_projections WHERE "
+                        "SELECT source_event_id,content_hash,order_plan_json,member_spec_id FROM journal_execution_event_projections WHERE "
                         "origin_broker=? AND origin_environment=? AND origin_account_ref=? "
                         "AND source_event_id=?",
                         (
@@ -102,7 +103,7 @@ class JournalTradeRepositoryMixin:
                     ).fetchone()
                     if existing is None and event.fill_identity is not None:
                         existing = connection.execute(
-                            "SELECT source_event_id,content_hash,order_plan_json FROM journal_execution_event_projections WHERE "
+                            "SELECT source_event_id,content_hash,order_plan_json,member_spec_id FROM journal_execution_event_projections WHERE "
                             "origin_broker=? AND origin_environment=? AND origin_account_ref=? "
                             "AND fill_identity=?",
                             (
@@ -111,8 +112,8 @@ class JournalTradeRepositoryMixin:
                             ),
                         ).fetchone()
                     if existing is not None:
-                        source_event_id, content_hash, stored_plan = existing
-                        if content_hash != event.content_hash or (
+                        source_event_id, content_hash, stored_plan, stored_member = existing
+                        if content_hash != event.content_hash or stored_member != member_spec_id or (
                             source_event_id == event.source_event_id and stored_plan is not None and stored_plan != plan_json
                         ):
                             raise sqlite3.IntegrityError(
@@ -125,7 +126,7 @@ class JournalTradeRepositoryMixin:
                         "projection_name,source_event_id,accepted_sequence,event_type,trading_date,"
                         "intent_id,run_id,decision_id,broker_order_id,broker_execution_id,stock_code,"
                         "venue,side,occurred_at,received_at,quantity,price,broker_as_of,fill_identity,"
-                        "content_hash,projected_at,order_plan_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "content_hash,projected_at,order_plan_json,member_spec_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             scope.broker, scope.environment.value, scope.account_ref,
                             canonical.account_ref, page.projection_name, event.source_event_id,
@@ -135,7 +136,7 @@ class JournalTradeRepositoryMixin:
                             event.venue, event.side, event.occurred_at.isoformat(),
                             event.received_at.isoformat(), event.quantity, event.price,
                             event.broker_as_of.isoformat() if event.broker_as_of else None,
-                            event.fill_identity, event.content_hash, projected_at, plan_json,
+                            event.fill_identity, event.content_hash, projected_at, plan_json, member_spec_id,
                         ),
                     )
                     inserted += 1
@@ -195,7 +196,7 @@ class JournalTradeRepositoryMixin:
                 "SELECT origin_broker,origin_environment,origin_account_ref,canonical_account_ref,"
                 "source_event_id,accepted_sequence,trading_date,intent_id,run_id,decision_id,"
                 "broker_order_id,broker_execution_id,stock_code,venue,side,occurred_at,received_at,"
-                "quantity,price,fill_identity,order_plan_json FROM journal_execution_event_projections WHERE "
+                "quantity,price,fill_identity,order_plan_json,member_spec_id FROM journal_execution_event_projections WHERE "
                 "origin_broker=? AND origin_environment=? AND canonical_account_ref=? "
                 "AND event_type='FILL'" + date_sql + " ORDER BY accepted_sequence",
                 (
@@ -210,8 +211,9 @@ class JournalTradeRepositoryMixin:
             "side", "occurred_at", "received_at", "quantity", "price", "fill_identity",
         )
         values = tuple({
-            **dict(zip(keys, row[:-1], strict=True)),
-            **({"plan": json.loads(row[-1])} if row[-1] is not None else {}),
+            **dict(zip(keys, row[:-2], strict=True)),
+            **({"plan": json.loads(row[-2])} if row[-2] is not None else {}),
+            **({"member_spec_id": row[-1]} if row[-1] is not None else {}),
         } for row in rows)
         if start is None and end is None:
             return values

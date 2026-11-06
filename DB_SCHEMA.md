@@ -1,5 +1,13 @@
 > **스키마 적용 범위.** 아래 DDL·저장 계약은 구현 판본별 근거다. 운영 PostgreSQL 카탈로그와 선별 이전 대상은 별도로 대조한다. 원자료의 의미·판본·관계를 보존하고 빈 설치와 실제 선별 이전을 따로 수락한다. [관련 계약](docs/architecture/app-target-20261023.md#1112-데이터-보존과-db-구조-재설계--2026-10-24).
 
+**S12-05 매매일지 schema 13(2026-11-06).** 기존 SQLite `journal_execution_event_projections`에 nullable `member_spec_id`를 추가한다. v12 자료의 원본·물리 체결 identity·내용 hash·계획 JSON·커서·시각을 바꾸지 않고, 기존 행은 null로 유지한다. 같은 물리 체결의 다른 멤버 재귀속은 페이지 transaction 전체를 거절한다. 새 설치와 v12 재개방은 같은 열을 사용한다. 중앙 PostgreSQL DDL은 이 일지 확장 때문에 바꾸지 않는다. 중앙의 기존 불변 문서에는 선택한 계좌 구성/실행 순서, 버전이 구분된 멤버 복구, 그룹의 명세별 재개 영수증을 저장한다. 실계좌·운영 자료 이전/DDL 적용은 실행하지 않는다.
+
+v2 명시 구성은 원래 입장 참조와 새 진입 명세를 분리한다. 원 단일 명세의 주문·상세 체결·승인 hash와 `current` checkpoint 좌표는 보존한다. 현재 계좌 귀속과 공통 원금 대조에 필요한 멤버·FIFO는 원입장/승인과 실제 FILL을 검증한 읽기 view로 복원하며 원 head에 추정값을 저장하지 않는다. 명시 v3 돌파의 독립 셋업 재진입은 기존 불변 문서 저장에 단일 셋업 claim을 추가하고 v1/v2 계약을 유지한다.
+
+선별 주문 v4는 단일 원주문 정책 자료를, v5 `single-plan-ledger/v1`은 해당 계획의 전체 주문·이벤트·원정책/claim·최초 보호와 참조 자료를 과거 증거로 보존한다. v5 서명은 정확한 원주문 집합과 전체 canonical 이벤트를 native 원본에 대조한다. 격리 설치의 원 event ID와 물리 체결은 유지하고 대상 `accepted_sequence`를 별도로 발급한다. 설치 영수증은 원/대상 커서 대응과 정책 자료 hash를 보존하며 새 STOPPED·신규 진입 재개 필요 상태만 만든다. 원래 승인·RUNNING 제어·lease를 복사하지 않는다.
+
+현재 관리의 준비·수락은 기존 불변 문서와 현재 포인터에 저장한다. 원 spec/입장/계획의 식별자와 대상의 현재 credential/binding·계좌 설정 판본, 새 canonical lease·Risk/복구·제어 판본을 분리한다. 원 Risk/hash/커서는 재작성하지 않으며 원 FILL 범위를 검증할 때만 명시한 원/대상 event 좌표를 사용한다. 준비는 대사만 허용하고 새 관리 수락도 신규 BUY·ADD·REENTER를 허용하지 않는다. 설정 OFF 뒤 이미 시작한 명령의 실제 응답·상세 FILL은 보존한다. 설치와 현재 관리 실행 수락은 별도다.
+
 <a id="selected-full-store"></a>
 
 **AR04/07 시각조회273:** schema24/원시각/hash/판본은유지한다. SQLite 연구export는기존index용보수범위뒤exact microsecond key로같은순간을선택·정렬하며frozen목록metadata만원transaction에저장한다. 원자료변환/DBmigration·PG변경없음. [현구현·검증·한계](docs/architecture/app-target-20261023.md#ar04-ar07-time-query270).

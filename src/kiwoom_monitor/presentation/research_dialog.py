@@ -53,6 +53,8 @@ _SECTION12_SCOPES = {
     "shadow_only": "동결 Shadow 재생 · 판단만 기록",
     "synthetic_evidence": "합성 증거 재생",
     "native_setup_assessment": "동결 일봉 · DD 셋업 평가",
+    'frozen_daily_execution_research': '동결 일봉 · 명시 체결 연구',
+    'frozen_micro_execution_research': '동결 MICRO 근거 연구',
 }
 _SECTION12_MINUTE_COLUMNS = ("구간·역할", "평가 상태", "순손익", "제출/체결", "미완료·거절", "무거래", "사유")
 _BREAKOUT_COMPARISON_COLUMNS = ("변형·구간", "평가 상태", "기준 손익", "필터 손익", "차이", "회피 손실", "놓친 이익")
@@ -1047,9 +1049,9 @@ class ResearchDialog(QDialog):
             label = {"micro_experiment": "MICRO", "daily_decline_experiment": "DD",
                      "account_risk_experiment": "계좌 자금·위험"}[request.mode]
             family = EVIDENCE_EXPERIMENT_FAMILIES[request.mode]
-            self._summary.setText(f"{label} ({family}) · 합성 증거 재생 · 계좌 주문 없음 · {request.dataset.name}")
+            self._summary.setText(f"{label} ({family}) · 명시 연구 증거 재생 · 계좌 주문 없음 · {request.dataset.name}")
             self._summary.setToolTip(f"요청 자료 SHA256 {request.dataset_sha256}")
-            self._run.setText("합성 자료 재생")
+            self._run.setText("연구 증거 재생")
             self._run.setEnabled(not self._manager.is_running and self._registration is None)
             self._settings.setValue("request_path", str(path))
             return True
@@ -1274,7 +1276,7 @@ class ResearchDialog(QDialog):
             references = [f"{label} {value}" for key, label in (
                 ("input_dataset_id", "자료 ID"), ("input_revision_ids_hash", "자료 판본 SHA256"),
                 ("strategy_reference_sha256", "근거 SHA256"),
-                ("dataset_sha256", "입력 명세 SHA256" if native_dd else "합성 자료 SHA256"),
+                ("dataset_sha256", "입력 명세 SHA256"),
                 ("frozen_dataset_id", "동결 자료 ID"), ("revision_ids_hash", "자료 판본 SHA256"),
                 ("frozen_manifest_sha256", "동결 자료 SHA256"),
             ) if (value := context.get(key))]
@@ -1311,6 +1313,11 @@ class ResearchDialog(QDialog):
                 item = QTableWidgetItem(value)
                 if minute_result or kind in EVIDENCE_EXPERIMENT_FAMILIES or kind in {'leader_breakout','leader_breakout_campaign'}:
                     item.setToolTip(value)
+                if column == 4 and has_context and context.get('source_kind') == 'frozen_research_evidence':
+                    trace = result.get('result', {})
+                    evidence = {key: trace[key] for key in ('evidence_provenance', 'execution_evidence',
+                        'state', 'evidence', 'input_assessment') if key in trace}
+                    item.setToolTip(value + '\n' + json.dumps(evidence, ensure_ascii=False, indent=2))
                 self._table.setItem(row_index, column,item)
 
     def stop(self) -> None:
@@ -1376,7 +1383,8 @@ def _section12_result_summary(context: Mapping[str, Any], report: object) -> str
     variant = " → ".join(variants) if isinstance(variants, (list, tuple)) else context.get("variant")
     scope = _SECTION12_SCOPES.get(context.get("execution_scope"))
     source = {"historical_reconstruction": "역사 자료 재구성", "historical_replay": "동결 관측 자료",
-              "frozen_native_daily_observations": "동결 일봉 원본"}.get(context.get("source_kind"))
+              "frozen_native_daily_observations": "동결 일봉 원본",
+              'frozen_research_evidence': '동결 연구 근거 · 운영 확인 아님'}.get(context.get("source_kind"))
     clock = {"reconstructed_completed_bar_end_proxy": "재구성 완료봉 종료시각 기준",
              "observation_available_at": "기록된 관측 가용시각 기준"}.get(context.get("source_clock"))
     range_text = ""
@@ -1451,9 +1459,26 @@ def format_research_result_rows(result: Mapping[str, Any]) -> tuple[tuple[str, .
         else:
             pending_label = summary.get("pending_action_id") or ("없음" if "pending_order" in summary or "pending_action_id" in summary else "N/A")
         evidence = " · ".join(str(trace[key]) for key in ("market_issue", "broker_issue") if trace.get(key))
+        source_label = '합성'
+        if isinstance(context, Mapping) and context.get('source_kind') == 'frozen_research_evidence':
+            provenance = trace.get('evidence_provenance', {})
+            declared = provenance.get('execution', provenance) if isinstance(provenance, Mapping) else {}
+            source_label = {'synthetic': '동결 합성', 'historical_reconstruction': '동결 복원',
+                            'historical_replay': '동결 관측 연구', 'hypothesis': '동결 가설'}.get(
+                                declared.get('source_kind'), '동결 연구')
+            references = [str(declared[key]) for key in ('source_ref', 'source_version') if declared.get(key)]
+            state = trace.get('state', {})
+            fills = state.get('fills', ()) if isinstance(state, Mapping) else ()
+            fees = sum(fill['fee_won'] for fill in fills if isinstance(fill, Mapping)
+                       and type(fill.get('fee_won')) is int)
+            if fills: references.append(f'상세 체결 비용 {fees:,}원')
+            inputs = trace.get('input_assessment', {})
+            if isinstance(inputs, Mapping) and inputs.get('missing_inputs'):
+                references.append('미확인: ' + ', '.join(inputs['missing_inputs']))
+            evidence = ' · '.join(filter(None, (evidence, *references)))
         return ((identity, str(summary.get("status") or setup_status or "미확인"),
                  _section12_count(summary.get("position_quantity", summary.get("owned_quantity"))),
-                 str(pending_label), evidence, "합성", str(summary.get("reason") or summary.get("exit_reason") or "")),)
+                 str(pending_label), evidence, source_label, str(summary.get("reason") or summary.get("exit_reason") or "")),)
     if result.get("kind") == "leader_breakout_performance" and result.get("status") == "blocked":
         return tuple(("실행 준비", "BLOCKED", "미산출", "미산출", "", "분봉", str(reason))
                      for reason in result.get("configuration_missing", ()))

@@ -258,6 +258,10 @@ class _Runner:
         self.attached = False
         self.closed = False
 
+    @property
+    def status(self):
+        return self.episode.status
+
     def attach_inputs(self):
         if not self.episode.prepared:
             raise AssertionError("runner attached before native preparation")

@@ -370,10 +370,29 @@ class CentralContentClient:
             "operating_spec": operating_spec,
         })
 
-    def load_mock_automation_specs(self, account_ref: str) -> dict[str, Any]:
+    def load_mock_automation_specs(self, account_ref: str, *, include_admission_refs: bool = False) -> dict[str, Any]:
         encoded_ref = quote(account_ref, safe="")
         return self._request(
-            "GET", f"/api/v1/research/mock-automation-specs/{encoded_ref}",
+            "GET", f"/api/v1/research/mock-automation-specs/{encoded_ref}"
+            + ('?include_admission_refs=true' if include_admission_refs else ''),
+        )
+
+    def publish_mock_automation_account_selection(
+        self, *, account_ref: str, credential_profile_id: str,
+        expected_binding_revision: int, selection: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._request("POST", "/api/v1/research/mock-automation-account-selections", {
+            "account_ref": account_ref, "credential_profile_id": credential_profile_id,
+            "expected_binding_revision": expected_binding_revision, "selection": selection,
+        })
+
+    def load_mock_automation_account_selections(
+        self, account_ref: str, *, credential_profile_id: str,
+    ) -> dict[str, Any]:
+        encoded_ref = quote(account_ref, safe="")
+        query = urlencode({"credential_profile_id": credential_profile_id})
+        return self._request(
+            "GET", f"/api/v1/research/mock-automation-account-selections/{encoded_ref}?{query}",
         )
 
     def load_mock_automation_status(
@@ -384,6 +403,28 @@ class CentralContentClient:
         return self._request(
             "GET", f"/api/v1/mock-automation/accounts/{encoded_ref}?{query}",
         )
+
+    def load_selected_order_management(self, *, operation_id: str) -> dict[str, Any]:
+        return self._request('GET', '/api/v1/mock-automation/selected-order-evidence/'
+            + quote(operation_id, safe='') + '/management')
+
+    def prepare_selected_order_management(self, *, operation_id: str, credential_profile_id: str,
+            credential_revision: int, account_ref: str, binding_revision: int, packet_sha256: str,
+            expected_settings_revision: int) -> dict[str, Any]:
+        return self._request('POST', '/api/v1/mock-automation/selected-order-evidence/'
+            + quote(operation_id, safe='') + '/prepare-management', dict(credential_profile_id=credential_profile_id,
+                credential_revision=credential_revision, account_ref=account_ref,
+                binding_revision=binding_revision, packet_sha256=packet_sha256,
+                expected_settings_revision=expected_settings_revision))
+
+    def accept_selected_order_management(self, *, operation_id: str, credential_profile_id: str,
+            credential_revision: int, account_ref: str, binding_revision: int, packet_sha256: str,
+            expected_control_revision: int, expected_settings_revision: int) -> dict[str, Any]:
+        return self._request('POST', '/api/v1/mock-automation/selected-order-evidence/'
+            + quote(operation_id, safe='') + '/accept-management', dict(credential_profile_id=credential_profile_id,
+                credential_revision=credential_revision, account_ref=account_ref, binding_revision=binding_revision,
+                packet_sha256=packet_sha256, expected_control_revision=expected_control_revision,
+                expected_settings_revision=expected_settings_revision))
 
     def prepare_native_unfilled_population(self, research_database, selections, *, decision_time,
             horizon_seconds, population_ref, symbol, development_role, account_ref, credential_profile_id,
@@ -425,14 +466,18 @@ class CentralContentClient:
         spec_id: str,
         expected_settings_revision: int,
         credential_revision: int,
+        account_selection_id: str | None = None,
     ) -> dict[str, Any]:
-        return self._request("POST", "/api/v1/mock-automation/start", {
+        document = {
             "account_ref": account_ref,
             "credential_profile_id": credential_profile_id,
             "spec_id": spec_id,
             "expected_settings_revision": expected_settings_revision,
             "credential_revision": credential_revision,
-        })
+        }
+        if account_selection_id is not None:
+            document["account_selection_id"] = account_selection_id
+        return self._request("POST", "/api/v1/mock-automation/start", document)
 
     def stop_mock_automation(
         self,
@@ -471,6 +516,14 @@ class CentralContentClient:
             "credential_revision": credential_revision,
             "reason": reason,
         })
+
+    def replace_selection_mock_automation(self, *, account_ref: str, credential_profile_id: str, spec_id: str,
+            account_selection_id: str, expected_control_revision: int, expected_settings_revision: int,
+            credential_revision: int, reason: str) -> dict[str, Any]:
+        return self._request('POST', '/api/v1/mock-automation/replace-selection', dict(
+            account_ref=account_ref, credential_profile_id=credential_profile_id, spec_id=spec_id,
+            account_selection_id=account_selection_id, expected_control_revision=expected_control_revision,
+            expected_settings_revision=expected_settings_revision, credential_revision=credential_revision, reason=reason))
 
     def capabilities(self) -> dict[str, bool]:
         document = self._request("GET", "/api/v1/capabilities")

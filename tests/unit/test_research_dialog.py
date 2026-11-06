@@ -226,6 +226,37 @@ class ResearchDialogTests(unittest.TestCase):
                 dialog.stop()
                 dialog.deleteLater()
 
+    def test_frozen_dd_micro_show_declared_sources_costs_and_unknowns_as_research(self):
+        provenance = {"source_kind": "historical_reconstruction", "source_ref": "case-17", "source_version": "frozen/v2"}
+        cases = (
+            ("daily_decline_experiment", "frozen_daily_execution_research", {
+                "setup": {"status": "QUALIFIED"}, "summary": {"owned_quantity": 2},
+                "state": {"fills": [{"fee_won": 7}, {"fee_won": 5}]},
+                "evidence_provenance": {"execution": provenance}}, "상세 체결 비용 12원"),
+            ("micro_experiment", "frozen_micro_execution_research", {
+                "status": "UNKNOWN", "position_quantity": 0, "evidence_provenance": provenance,
+                "input_assessment": {"missing_inputs": ["cross_stream_order"], "native_confirmation": False}},
+                "미확인: cross_stream_order"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            dialog = ResearchDialog(Path(directory))
+            try:
+                for kind, scope, trace, detail in cases:
+                    result = {"status": "ok", "kind": kind, "result": trace, "order_authorized": False,
+                        "section12": {"source_kind": "frozen_research_evidence", "execution_scope": scope}}
+                    row, = format_research_result_rows(result)
+                    self.assertEqual("동결 복원", row[5])
+                    self.assertIn("case-17 · frozen/v2", row[4])
+                    self.assertIn(detail, row[4])
+                    dialog._apply_result(result)
+                    self.assertIn("동결 연구 근거 · 운영 확인 아님", dialog._summary.text())
+                    self.assertIn("계좌 주문 없음", dialog._summary.text())
+                    self.assertEqual("동결 복원", dialog._table.item(0, 5).text())
+                    self.assertIn('"source_version": "frozen/v2"', dialog._table.item(0, 4).toolTip())
+            finally:
+                dialog.stop()
+                dialog.deleteLater()
+
     def test_market_regime_summary_keeps_unknown_reason_visible(self) -> None:
         text = format_market_regime_summary({
             "value": {

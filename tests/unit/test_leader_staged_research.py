@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 
-def staged_final(case, *, eligibility_min_trades=1):
+def staged_final(case, *, eligibility_min_trades=1, config=None):
     from tests.unit.test_research_final_preparation import FinalPreparationTests
     from tests.unit.test_research_bundle_execution import child, rows_for
     from tests.unit.test_leader_position_steps import staged_config
@@ -32,7 +32,7 @@ def staged_final(case, *, eligibility_min_trades=1):
     relative=child(parent,day,rows)
     dataset=parent/relative
     fixture.source=load_research_input(dataset,session_profile=fixture.request.session_profile)
-    config=staged_config(reduce_quantity=2)
+    config=config or staged_config(reduce_quantity=2)
     config=replace(config,contexts=(replace(config.contexts[0],
         available_at='2026-09-14T09:00:00+09:00',valid_until='2026-09-14T10:00:00+09:00'),))
     fixture.evaluation=replace(fixture.evaluation,folds=(replace(fixture.evaluation.folds[0],

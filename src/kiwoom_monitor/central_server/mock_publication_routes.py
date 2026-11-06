@@ -228,11 +228,13 @@ def create_mock_publication_router(
         "/api/v1/research/mock-automation-specs/{account_ref}",
         dependencies=[Depends(authorize)],
     )
-    async def list_mock_automation_specs(account_ref: str) -> dict[str, object]:
+    async def list_mock_automation_specs(account_ref: str, include_admission_refs: bool = False) -> dict[str, object]:
         from kiwoom_monitor.domain.execution_activation import assess_mock_automation_readiness
         specs = await asyncio.to_thread(repository.load_mock_automation_specs, account_ref)
         values = []
         for spec in specs:
+            admission = (await asyncio.to_thread(repository.load_mock_automation_admission_for_spec, account_ref, spec.spec_id)
+                         if include_admission_refs else None)
             profile = await asyncio.to_thread(
                 repository.load_profile, spec.strategy_ref, spec.forward_profile_id,
             )
@@ -245,6 +247,9 @@ def create_mock_publication_router(
                 "spec": spec.to_dict(),
                 "readiness": readiness.status.value if readiness is not None else "BLOCKED",
                 "reasons": list(readiness.reasons) if readiness is not None else ["FORWARD_PROFILE_MISSING"],
+                **({'admission_ref': dict(spec_id=admission.spec_id, admission_id=admission.admission_id,
+                    original_selection_id=admission.account_selection_id, execution_run_id=admission.execution_run_id)}
+                   if admission is not None else {}),
             })
         return {"account_ref": account_ref, "specs": values}
 

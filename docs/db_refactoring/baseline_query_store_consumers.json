@@ -2424,17 +2424,6 @@
     ],
     [
       "src/kiwoom_monitor/central_server/mock_automation_episode.py",
-      "MockAutomationEpisode._read_leader_plan_root",
-      "self._store",
-      "load_document",
-      "direct_call",
-      "self._store.load_document",
-      "",
-      "",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
       "MockAutomationInputProgress.bootstrap",
       "store",
       "load_observation_bootstrap",
@@ -2693,28 +2682,6 @@
       "load_mock_automation_control",
       "direct_call",
       "self._repository.load_mock_automation_control",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
-      "MockAutomationSupervisor.stop",
-      "self._repository",
-      "load_mock_automation_control",
-      "bound_reference",
-      "",
-      "",
-      "",
-      "unresolved_candidate"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
-      "MockAutomationSupervisor.stop",
-      "self._repository",
-      "load_mock_automation_control",
-      "bound_reference",
-      "",
       "",
       "",
       "unresolved_candidate"
@@ -5162,17 +5129,6 @@
       "reviewed_store_binding"
     ],
     [
-      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
-      "MockAutomationEpisode._read_leader_staged_facts",
-      "self._store",
-      "load_document",
-      "direct_call",
-      "self._store.load_document",
-      "",
-      "",
-      "reviewed_store_binding"
-    ],
-    [
       "src/kiwoom_monitor/infrastructure/persistence/forward_evaluation_repository.py",
       "ForwardEvaluationRepository.load_mock_automation_account_selections",
       "self._store",
@@ -5258,6 +5214,688 @@
       "self._repository.mock_automation_read_scope",
       "",
       "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_execution.py",
+      "resume_mock_automation",
+      "repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_execution.py",
+      "resume_mock_automation",
+      "repository",
+      "mock_automation_read_scope",
+      "getattr_reference",
+      "getattr",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_execution.py",
+      "resume_mock_automation",
+      "repository",
+      "save_mock_automation_control",
+      "direct_call",
+      "repository.save_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_recovery.py",
+      "_recovery_inputs",
+      "repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_recovery.py",
+      "record_mock_automation_account_recovery_from_cut",
+      "repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_recovery.py",
+      "record_mock_automation_account_recovery_from_cut",
+      "repository",
+      "mock_automation_read_scope",
+      "getattr_reference",
+      "getattr",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor._load_managed_account_admissions",
+      "self._repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "self._repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor._load_managed_account_admissions",
+      "self._repository",
+      "mock_automation_read_scope",
+      "direct_call",
+      "self._repository.mock_automation_read_scope",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/infrastructure/persistence/execution_repository.py",
+      "ExecutionRepository.current_automation_control",
+      "self._store",
+      "load_mock_automation_control",
+      "direct_call",
+      "self._store.load_mock_automation_control",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_admission.py",
+      "prepare_mock_automation_account_replacement",
+      "repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_execution.py",
+      "commit_mock_automation_account_replacement",
+      "repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_execution.py",
+      "commit_mock_automation_account_replacement",
+      "repository",
+      "mock_automation_read_scope",
+      "direct_call",
+      "repository.mock_automation_read_scope",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/application/mock_automation_specification.py",
+      "validate_mock_automation_account_selection",
+      "repository",
+      "load_mock_automation_control",
+      "direct_call",
+      "repository.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_documents.py",
+      "PostgresDocumentStoreMixin.load_selected_management_fences",
+      "self",
+      "mock_automation_read_scope",
+      "direct_call",
+      "self.mock_automation_read_scope",
+      "",
+      "",
+      "store_internal_delegate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_documents.py",
+      "PostgresDocumentStoreMixin.load_selected_order_management_policy",
+      "self",
+      "mock_automation_read_scope",
+      "direct_call",
+      "self.mock_automation_read_scope",
+      "",
+      "",
+      "store_internal_delegate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_documents.py",
+      "SQLiteDocumentStoreMixin.load_selected_management_fences",
+      "self",
+      "mock_automation_read_scope",
+      "direct_call",
+      "self.mock_automation_read_scope",
+      "",
+      "",
+      "store_internal_delegate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_documents.py",
+      "SQLiteDocumentStoreMixin.load_selected_order_management_policy",
+      "self",
+      "mock_automation_read_scope",
+      "direct_call",
+      "self.mock_automation_read_scope",
+      "",
+      "",
+      "store_internal_delegate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_documents.py",
+      "_selected_order_identity_context",
+      "store",
+      "load_document",
+      "direct_call",
+      "store.load_document",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_documents.py",
+      "_selected_order_identity_context",
+      "store",
+      "load_document",
+      "direct_call",
+      "store.load_document",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_documents.py",
+      "_selected_order_identity_context",
+      "store",
+      "load_document",
+      "direct_call",
+      "store.load_document",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_documents.py",
+      "_selected_order_identity_context",
+      "store",
+      "load_document",
+      "direct_call",
+      "store.load_document",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_documents.py",
+      "_selected_order_identity_context",
+      "store",
+      "load_document",
+      "direct_call",
+      "store.load_document",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_documents.py",
+      "_selected_order_identity_context",
+      "store",
+      "load_execution_intent",
+      "direct_call",
+      "store.load_execution_intent",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_documents.py",
+      "_selected_order_identity_context",
+      "store",
+      "load_latest_account_binding",
+      "direct_call",
+      "store.load_latest_account_binding",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_documents.py",
+      "_selected_order_identity_context",
+      "store",
+      "load_mock_automation_control",
+      "direct_call",
+      "store.load_mock_automation_control",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/database_documents.py",
+      "_selected_order_identity_context",
+      "store",
+      "mock_automation_read_scope",
+      "direct_call",
+      "store.mock_automation_read_scope",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_account_monitor.py",
+      "MockAccountMonitor._risk_member_views",
+      "self._repository",
+      "mock_automation_read_scope",
+      "direct_call",
+      "self._repository.mock_automation_read_scope",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._checkpoint_document",
+      "self._store",
+      "load_document",
+      "direct_call",
+      "self._store.load_document",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+      "MockAutomationEpisode._original_policy_document",
+      "self._store",
+      "load_document",
+      "direct_call",
+      "self._store.load_document",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.accept_selected_order_management",
+      "self._store",
+      "load_document",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.accept_selected_order_management",
+      "self._store",
+      "load_document",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.accept_selected_order_management",
+      "self._store",
+      "load_document",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.accept_selected_order_management.accept.commit",
+      "repository",
+      "load_mock_automation_control",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.accept_selected_order_management.accept.commit",
+      "self._store",
+      "load_document",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.replace_selection",
+      "self._repository",
+      "load_mock_automation_control",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.replace_selection",
+      "self._repository",
+      "load_mock_automation_control",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.replace_selection",
+      "self._repository",
+      "load_mock_automation_control",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.stop",
+      "repository",
+      "load_mock_automation_control",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.stop",
+      "repository",
+      "load_mock_automation_control",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_runtime.py",
+      "MockCredentialOwner.install_verified_selected_order",
+      "self.store",
+      "load_document",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_runtime.py",
+      "MockCredentialOwner.install_verified_selected_order",
+      "self.store",
+      "load_latest_account_binding",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_runtime.py",
+      "MockCredentialOwner.prepare_selected_order_management",
+      "self.store",
+      "load_document",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_runtime.py",
+      "MockCredentialOwner.prepare_selected_order_management",
+      "self.store",
+      "load_document",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_runtime.py",
+      "MockCredentialOwner.prepare_selected_order_management",
+      "self.store",
+      "load_document",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_runtime.py",
+      "MockCredentialOwner.prepare_selected_order_management.prepare",
+      "self.store",
+      "load_account_settings",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_runtime.py",
+      "MockCredentialOwner.prepare_selected_order_management.prepare",
+      "self.store",
+      "load_document",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_runtime.py",
+      "MockCredentialOwner.prepare_selected_order_management.prepare",
+      "self.store",
+      "load_document",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+      "accept_selected_order_management",
+      "store",
+      "load_execution_events",
+      "direct_call",
+      "store.load_execution_events",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+      "accept_selected_order_management",
+      "store",
+      "load_execution_intent",
+      "direct_call",
+      "store.load_execution_intent",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+      "accept_selected_order_management",
+      "store",
+      "load_latest_account_binding",
+      "direct_call",
+      "store.load_latest_account_binding",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+      "install_selected_order_management",
+      "store",
+      "load_latest_account_binding",
+      "direct_call",
+      "store.load_latest_account_binding",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+      "install_selected_order_management",
+      "store",
+      "load_latest_account_binding",
+      "direct_call",
+      "store.load_latest_account_binding",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+      "prepare_selected_order_management",
+      "store",
+      "load_latest_account_binding",
+      "direct_call",
+      "store.load_latest_account_binding",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+      "prepare_selected_order_management",
+      "store",
+      "load_latest_account_binding",
+      "direct_call",
+      "store.load_latest_account_binding",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+      "create_selected_order_recovery_router.evaluate",
+      "store",
+      "load_document",
+      "bound_reference",
+      "",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+      "create_selected_order_recovery_router.management_status.read",
+      "store",
+      "load_document",
+      "direct_call",
+      "store.load_document",
+      "GET",
+      "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+      "create_selected_order_recovery_router.management_status.read",
+      "store",
+      "load_document",
+      "direct_call",
+      "store.load_document",
+      "GET",
+      "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+      "create_selected_order_recovery_router.management_status.read",
+      "store",
+      "load_document",
+      "direct_call",
+      "store.load_document",
+      "GET",
+      "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+      "create_selected_order_recovery_router.management_status.read",
+      "store",
+      "load_document",
+      "direct_call",
+      "store.load_document",
+      "GET",
+      "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+      "create_selected_order_recovery_router.management_status.read",
+      "store",
+      "load_execution_intent",
+      "direct_call",
+      "store.load_execution_intent",
+      "GET",
+      "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+      "create_selected_order_recovery_router.management_status.read",
+      "store",
+      "load_mock_automation_control",
+      "direct_call",
+      "store.load_mock_automation_control",
+      "GET",
+      "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+      "create_selected_order_recovery_router.management_status.read",
+      "store",
+      "mock_automation_read_scope",
+      "direct_call",
+      "store.mock_automation_read_scope",
+      "GET",
+      "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
       "unresolved_candidate"
     ]
   ],
@@ -6350,6 +6988,72 @@
       "",
       "",
       "central-mock-episode-store"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor._assemble_runner",
+      "MockAutomationEpisode",
+      "self._store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-mock-supervisor"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app",
+      "create_selected_order_recovery_router",
+      "store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-app-store-closure"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.accept_selected_order_management.accept",
+      "ForwardEvaluationRepository",
+      "self._store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-mock-supervisor"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.replace_selection",
+      "MockAutomationEpisode",
+      "self._store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-mock-supervisor"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+      "MockAutomationSupervisor.stop",
+      "ForwardEvaluationRepository",
+      "self._store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-mock-supervisor"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/mock_runtime.py",
+      "MockCredentialOwner.prepare_selected_order_management.prepare",
+      "MockAccountBundle",
+      "self.store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-mock-runtime"
     ]
   ],
   "contracts": {
@@ -6360,7 +7064,7 @@
       "_mock_automation_risk_write_scope": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [\"Name(id='contextmanager', ctx=Load())\"], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "_observation_safe_frontier": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='cursor'), arg(arg='connection')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[BinOp(left=Name(id='int', ctx=Load()), op=BitOr(), right=Constant(value=None)), Name(id='bool', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "_replace_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='table', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='minute', annotation=Name(id='bool', ctx=Load())), arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None, Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "acquire_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='_connection', annotation=Name(id='Any', ctx=Load()))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "acquire_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='_connection', annotation=Name(id='Any', ctx=Load())), arg(arg='selected_management_context'), arg(arg='selected_management_owner')], kw_defaults=[Constant(value=None), Constant(value=None), Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "analyze_news_job_claim_read_only": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='stage', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "append_account_binding": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "append_execution_event": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='intent', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())), arg(arg='event', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='ownership', annotation=BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='str', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))), arg(arg='_connection', annotation=Name(id='Any', ctx=Load()))], kw_defaults=[Constant(value=None), Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -6438,7 +7142,7 @@
       "register_account_identity": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='str', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "register_account_scope_alias": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "register_credential_profile": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='provider', annotation=Name(id='str', ctx=Load())), arg(arg='profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='created_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
-      "release_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "release_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='selected_management_context'), arg(arg='selected_management_owner')], kw_defaults=[Constant(value=None), Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "rename_credential_profile": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='provider', annotation=Name(id='str', ctx=Load())), arg(arg='profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='label', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "replace_daily_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='str', ctx=Load()), Name(id='str', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "replace_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
@@ -6488,7 +7192,16 @@
       "save_news_body_revision_receipt": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "mock_automation_read_scope": "{\"arguments\": \"arguments(args=[arg(arg='self')], kwonlyargs=[arg(arg='_connection', annotation=Name(id='Any', ctx=Load()))], kw_defaults=[Constant(value=None)])\", \"decorators\": [\"Name(id='contextmanager', ctx=Load())\"], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "publish_mock_automation_current_risk": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected', annotation=BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))), arg(arg='_connection', annotation=Name(id='Any', ctx=Load()))], kw_defaults=[None, Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "load_close_gap_observations": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='closing_start', annotation=Name(id='datetime', ctx=Load())), arg(arg='closing_end', annotation=Name(id='datetime', ctx=Load())), arg(arg='next_open', annotation=Name(id='datetime', ctx=Load())), arg(arg='as_of', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+      "load_close_gap_observations": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='closing_start', annotation=Name(id='datetime', ctx=Load())), arg(arg='closing_end', annotation=Name(id='datetime', ctx=Load())), arg(arg='next_open', annotation=Name(id='datetime', ctx=Load())), arg(arg='as_of', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "accept_selected_order_evidence": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='packet')], kwonlyargs=[arg(arg='expected_sha256'), arg(arg='account_ref'), arg(arg='run_id')], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "accept_selected_order_management": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='context')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "install_selected_order_management": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='packet')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "load_retained_execution_member_projection": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref')], kwonlyargs=[arg(arg='selection_id'), arg(arg='expected_control_revision'), arg(arg='intent_ids'), arg(arg='_reader')], kw_defaults=[Constant(value=None), Constant(value=None), Constant(value=None), Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "load_selected_management_fences": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='management')], kwonlyargs=[arg(arg='_reader')], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "load_selected_order_identity_context": "{\"arguments\": \"arguments(args=[arg(arg='self')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "load_selected_order_management_policy": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='context')], kwonlyargs=[arg(arg='_reader')], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "prepare_selected_order_management": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='operation_id')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "replace_mock_automation_control": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load())), arg(arg='expected_selection_id', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     },
     "QueryStore": {
       "acquire_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -6621,7 +7334,7 @@
       "_connect": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Attribute(value=Name(id='sqlite3', ctx=Load()), attr='Connection', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "_connection": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [\"Name(id='contextmanager', ctx=Load())\"], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "_replace_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='table', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='minute', annotation=Name(id='bool', ctx=Load())), arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None, Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "acquire_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "acquire_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='selected_management_context'), arg(arg='selected_management_owner')], kw_defaults=[Constant(value=None), Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "append_account_binding": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "append_execution_event": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='intent', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())), arg(arg='event', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='ownership', annotation=BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='str', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "append_upper_limit_facts": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='int', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -6697,7 +7410,7 @@
       "register_account_identity": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='str', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "register_account_scope_alias": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "register_credential_profile": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='provider', annotation=Name(id='str', ctx=Load())), arg(arg='profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='created_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
-      "release_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "release_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='selected_management_context'), arg(arg='selected_management_owner')], kw_defaults=[Constant(value=None), Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "rename_credential_profile": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='provider', annotation=Name(id='str', ctx=Load())), arg(arg='profile_id', annotation=Name(id='str', ctx=Load())), arg(arg='label', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "replace_daily_bars": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='observations', annotation=BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Subscript(value=Name(id='MarketDataObservation', ctx=Load()), slice=Name(id='object', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='str', ctx=Load()), Name(id='str', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "replace_documents": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='collection', annotation=Name(id='str', ctx=Load())), arg(arg='values', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
@@ -6747,7 +7460,15 @@
       "mock_automation_read_scope": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [\"Name(id='contextmanager', ctx=Load())\"], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "publish_mock_automation_current_risk": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected', annotation=BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "accept_selected_order_evidence": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='packet', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_sha256', annotation=Name(id='str', ctx=Load())), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='run_id', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "load_close_gap_observations": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='closing_start', annotation=Name(id='datetime', ctx=Load())), arg(arg='closing_end', annotation=Name(id='datetime', ctx=Load())), arg(arg='next_open', annotation=Name(id='datetime', ctx=Load())), arg(arg='as_of', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+      "load_close_gap_observations": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='closing_start', annotation=Name(id='datetime', ctx=Load())), arg(arg='closing_end', annotation=Name(id='datetime', ctx=Load())), arg(arg='next_open', annotation=Name(id='datetime', ctx=Load())), arg(arg='as_of', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "accept_selected_order_management": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='context')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "install_selected_order_management": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='packet')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "load_retained_execution_member_projection": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref')], kwonlyargs=[arg(arg='selection_id'), arg(arg='expected_control_revision'), arg(arg='intent_ids'), arg(arg='_reader')], kw_defaults=[Constant(value=None), Constant(value=None), Constant(value=None), Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "load_selected_management_fences": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='management')], kwonlyargs=[arg(arg='_reader')], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "load_selected_order_identity_context": "{\"arguments\": \"arguments(args=[arg(arg='self')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "load_selected_order_management_policy": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='context')], kwonlyargs=[arg(arg='_reader')], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "prepare_selected_order_management": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='operation_id')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "replace_mock_automation_control": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load())), arg(arg='expected_selection_id', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     }
   },
   "incremental_reviews": [
@@ -7163,6 +7884,905 @@
         "tests/integration/test_mock_automation_account_runner_postgres.py"
       ],
       "execution_scope": "Native member state/stop/trigger and one Runner lifecycle; this static review does not accept public grouped start, actual leader/CLOSE concurrency, source/Shadow/UI/journal or all-member resume."
+    },
+    {
+      "id": "S12-05-selected-plan-current-native-management-20261106",
+      "added": [
+        [
+          "src/kiwoom_monitor/application/mock_automation_admission.py",
+          "prepare_mock_automation_account_replacement",
+          "repository",
+          "load_mock_automation_control",
+          "direct_call",
+          "repository.load_mock_automation_control",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/application/mock_automation_execution.py",
+          "commit_mock_automation_account_replacement",
+          "repository",
+          "load_mock_automation_control",
+          "direct_call",
+          "repository.load_mock_automation_control",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/application/mock_automation_execution.py",
+          "commit_mock_automation_account_replacement",
+          "repository",
+          "mock_automation_read_scope",
+          "direct_call",
+          "repository.mock_automation_read_scope",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/application/mock_automation_execution.py",
+          "resume_mock_automation",
+          "repository",
+          "load_mock_automation_control",
+          "direct_call",
+          "repository.load_mock_automation_control",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/application/mock_automation_execution.py",
+          "resume_mock_automation",
+          "repository",
+          "mock_automation_read_scope",
+          "getattr_reference",
+          "getattr",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/application/mock_automation_execution.py",
+          "resume_mock_automation",
+          "repository",
+          "save_mock_automation_control",
+          "direct_call",
+          "repository.save_mock_automation_control",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/application/mock_automation_recovery.py",
+          "_recovery_inputs",
+          "repository",
+          "load_mock_automation_control",
+          "direct_call",
+          "repository.load_mock_automation_control",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/application/mock_automation_recovery.py",
+          "record_mock_automation_account_recovery_from_cut",
+          "repository",
+          "load_mock_automation_control",
+          "direct_call",
+          "repository.load_mock_automation_control",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/application/mock_automation_recovery.py",
+          "record_mock_automation_account_recovery_from_cut",
+          "repository",
+          "mock_automation_read_scope",
+          "getattr_reference",
+          "getattr",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/application/mock_automation_specification.py",
+          "validate_mock_automation_account_selection",
+          "repository",
+          "load_mock_automation_control",
+          "direct_call",
+          "repository.load_mock_automation_control",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/database_documents.py",
+          "PostgresDocumentStoreMixin.load_selected_management_fences",
+          "self",
+          "mock_automation_read_scope",
+          "direct_call",
+          "self.mock_automation_read_scope",
+          "",
+          "",
+          "store_internal_delegate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/database_documents.py",
+          "PostgresDocumentStoreMixin.load_selected_order_management_policy",
+          "self",
+          "mock_automation_read_scope",
+          "direct_call",
+          "self.mock_automation_read_scope",
+          "",
+          "",
+          "store_internal_delegate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/database_documents.py",
+          "SQLiteDocumentStoreMixin.load_selected_management_fences",
+          "self",
+          "mock_automation_read_scope",
+          "direct_call",
+          "self.mock_automation_read_scope",
+          "",
+          "",
+          "store_internal_delegate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/database_documents.py",
+          "SQLiteDocumentStoreMixin.load_selected_order_management_policy",
+          "self",
+          "mock_automation_read_scope",
+          "direct_call",
+          "self.mock_automation_read_scope",
+          "",
+          "",
+          "store_internal_delegate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/database_documents.py",
+          "_selected_order_identity_context",
+          "store",
+          "load_document",
+          "direct_call",
+          "store.load_document",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/database_documents.py",
+          "_selected_order_identity_context",
+          "store",
+          "load_document",
+          "direct_call",
+          "store.load_document",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/database_documents.py",
+          "_selected_order_identity_context",
+          "store",
+          "load_document",
+          "direct_call",
+          "store.load_document",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/database_documents.py",
+          "_selected_order_identity_context",
+          "store",
+          "load_document",
+          "direct_call",
+          "store.load_document",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/database_documents.py",
+          "_selected_order_identity_context",
+          "store",
+          "load_document",
+          "direct_call",
+          "store.load_document",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/database_documents.py",
+          "_selected_order_identity_context",
+          "store",
+          "load_execution_intent",
+          "direct_call",
+          "store.load_execution_intent",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/database_documents.py",
+          "_selected_order_identity_context",
+          "store",
+          "load_latest_account_binding",
+          "direct_call",
+          "store.load_latest_account_binding",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/database_documents.py",
+          "_selected_order_identity_context",
+          "store",
+          "load_mock_automation_control",
+          "direct_call",
+          "store.load_mock_automation_control",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/database_documents.py",
+          "_selected_order_identity_context",
+          "store",
+          "mock_automation_read_scope",
+          "direct_call",
+          "store.mock_automation_read_scope",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_account_monitor.py",
+          "MockAccountMonitor._risk_member_views",
+          "self._repository",
+          "mock_automation_read_scope",
+          "direct_call",
+          "self._repository.mock_automation_read_scope",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._checkpoint_document",
+          "self._store",
+          "load_document",
+          "direct_call",
+          "self._store.load_document",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._original_policy_document",
+          "self._store",
+          "load_document",
+          "direct_call",
+          "self._store.load_document",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor._load_managed_account_admissions",
+          "self._repository",
+          "load_mock_automation_control",
+          "direct_call",
+          "self._repository.load_mock_automation_control",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor._load_managed_account_admissions",
+          "self._repository",
+          "mock_automation_read_scope",
+          "direct_call",
+          "self._repository.mock_automation_read_scope",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.accept_selected_order_management",
+          "self._store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.accept_selected_order_management",
+          "self._store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.accept_selected_order_management",
+          "self._store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.accept_selected_order_management.accept.commit",
+          "repository",
+          "load_mock_automation_control",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.accept_selected_order_management.accept.commit",
+          "self._store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.replace_selection",
+          "self._repository",
+          "load_mock_automation_control",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.replace_selection",
+          "self._repository",
+          "load_mock_automation_control",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.replace_selection",
+          "self._repository",
+          "load_mock_automation_control",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.stop",
+          "repository",
+          "load_mock_automation_control",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.stop",
+          "repository",
+          "load_mock_automation_control",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_runtime.py",
+          "MockCredentialOwner.install_verified_selected_order",
+          "self.store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_runtime.py",
+          "MockCredentialOwner.install_verified_selected_order",
+          "self.store",
+          "load_latest_account_binding",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_runtime.py",
+          "MockCredentialOwner.prepare_selected_order_management",
+          "self.store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_runtime.py",
+          "MockCredentialOwner.prepare_selected_order_management",
+          "self.store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_runtime.py",
+          "MockCredentialOwner.prepare_selected_order_management",
+          "self.store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_runtime.py",
+          "MockCredentialOwner.prepare_selected_order_management.prepare",
+          "self.store",
+          "load_account_settings",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_runtime.py",
+          "MockCredentialOwner.prepare_selected_order_management.prepare",
+          "self.store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_runtime.py",
+          "MockCredentialOwner.prepare_selected_order_management.prepare",
+          "self.store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+          "accept_selected_order_management",
+          "store",
+          "load_execution_events",
+          "direct_call",
+          "store.load_execution_events",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+          "accept_selected_order_management",
+          "store",
+          "load_execution_intent",
+          "direct_call",
+          "store.load_execution_intent",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+          "accept_selected_order_management",
+          "store",
+          "load_latest_account_binding",
+          "direct_call",
+          "store.load_latest_account_binding",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+          "install_selected_order_management",
+          "store",
+          "load_latest_account_binding",
+          "direct_call",
+          "store.load_latest_account_binding",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+          "install_selected_order_management",
+          "store",
+          "load_latest_account_binding",
+          "direct_call",
+          "store.load_latest_account_binding",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+          "prepare_selected_order_management",
+          "store",
+          "load_latest_account_binding",
+          "direct_call",
+          "store.load_latest_account_binding",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_bootstrap.py",
+          "prepare_selected_order_management",
+          "store",
+          "load_latest_account_binding",
+          "direct_call",
+          "store.load_latest_account_binding",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+          "create_selected_order_recovery_router.evaluate",
+          "store",
+          "load_document",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+          "create_selected_order_recovery_router.management_status.read",
+          "store",
+          "load_document",
+          "direct_call",
+          "store.load_document",
+          "GET",
+          "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+          "create_selected_order_recovery_router.management_status.read",
+          "store",
+          "load_document",
+          "direct_call",
+          "store.load_document",
+          "GET",
+          "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+          "create_selected_order_recovery_router.management_status.read",
+          "store",
+          "load_document",
+          "direct_call",
+          "store.load_document",
+          "GET",
+          "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+          "create_selected_order_recovery_router.management_status.read",
+          "store",
+          "load_document",
+          "direct_call",
+          "store.load_document",
+          "GET",
+          "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+          "create_selected_order_recovery_router.management_status.read",
+          "store",
+          "load_execution_intent",
+          "direct_call",
+          "store.load_execution_intent",
+          "GET",
+          "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+          "create_selected_order_recovery_router.management_status.read",
+          "store",
+          "load_mock_automation_control",
+          "direct_call",
+          "store.load_mock_automation_control",
+          "GET",
+          "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/selected_order_recovery_routes.py",
+          "create_selected_order_recovery_router.management_status.read",
+          "store",
+          "mock_automation_read_scope",
+          "direct_call",
+          "store.mock_automation_read_scope",
+          "GET",
+          "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/infrastructure/persistence/execution_repository.py",
+          "ExecutionRepository.current_automation_control",
+          "self._store",
+          "load_mock_automation_control",
+          "direct_call",
+          "self._store.load_mock_automation_control",
+          "",
+          "",
+          "reviewed_store_binding"
+        ]
+      ],
+      "removed": [
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._read_leader_plan_root",
+          "self._store",
+          "load_document",
+          "direct_call",
+          "self._store.load_document",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_episode.py",
+          "MockAutomationEpisode._read_leader_staged_facts",
+          "self._store",
+          "load_document",
+          "direct_call",
+          "self._store.load_document",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.stop",
+          "self._repository",
+          "load_mock_automation_control",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "unresolved_candidate"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.stop",
+          "self._repository",
+          "load_mock_automation_control",
+          "bound_reference",
+          "",
+          "",
+          "",
+          "unresolved_candidate"
+        ]
+      ],
+      "forwarding_added": [
+        [
+          "src/kiwoom_monitor/central_server/app.py",
+          "create_app",
+          "create_selected_order_recovery_router",
+          "store",
+          "0",
+          "direct_call",
+          "",
+          "",
+          "central-app-store-closure"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor._assemble_runner",
+          "MockAutomationEpisode",
+          "self._store",
+          "0",
+          "direct_call",
+          "",
+          "",
+          "central-mock-supervisor"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.accept_selected_order_management.accept",
+          "ForwardEvaluationRepository",
+          "self._store",
+          "0",
+          "direct_call",
+          "",
+          "",
+          "central-mock-supervisor"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.replace_selection",
+          "MockAutomationEpisode",
+          "self._store",
+          "0",
+          "direct_call",
+          "",
+          "",
+          "central-mock-supervisor"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_automation_supervisor.py",
+          "MockAutomationSupervisor.stop",
+          "ForwardEvaluationRepository",
+          "self._store",
+          "0",
+          "direct_call",
+          "",
+          "",
+          "central-mock-supervisor"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/mock_runtime.py",
+          "MockCredentialOwner.prepare_selected_order_management.prepare",
+          "MockAccountBundle",
+          "self.store",
+          "0",
+          "direct_call",
+          "",
+          "",
+          "central-mock-runtime"
+        ]
+      ],
+      "forwarding_removed": [],
+      "contract_delta": {
+        "PostgresQueryStore": {
+          "accept_selected_order_evidence": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='packet')], kwonlyargs=[arg(arg='expected_sha256'), arg(arg='account_ref'), arg(arg='run_id')], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "accept_selected_order_management": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='context')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "acquire_execution_runtime": {
+            "before": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='_connection', annotation=Name(id='Any', ctx=Load()))], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='_connection', annotation=Name(id='Any', ctx=Load())), arg(arg='selected_management_context'), arg(arg='selected_management_owner')], kw_defaults=[Constant(value=None), Constant(value=None), Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "install_selected_order_management": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='packet')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "load_retained_execution_member_projection": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref')], kwonlyargs=[arg(arg='selection_id'), arg(arg='expected_control_revision'), arg(arg='intent_ids'), arg(arg='_reader')], kw_defaults=[Constant(value=None), Constant(value=None), Constant(value=None), Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "load_selected_management_fences": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='management')], kwonlyargs=[arg(arg='_reader')], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "load_selected_order_identity_context": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "load_selected_order_management_policy": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='context')], kwonlyargs=[arg(arg='_reader')], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "prepare_selected_order_management": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='operation_id')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "release_execution_runtime": {
+            "before": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='selected_management_context'), arg(arg='selected_management_owner')], kw_defaults=[Constant(value=None), Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "replace_mock_automation_control": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load())), arg(arg='expected_selection_id', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          }
+        },
+        "QueryStore": {},
+        "SQLiteQueryStore": {
+          "accept_selected_order_management": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='context')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "acquire_execution_runtime": {
+            "before": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='selected_management_context'), arg(arg='selected_management_owner')], kw_defaults=[Constant(value=None), Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "install_selected_order_management": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='packet')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "load_retained_execution_member_projection": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref')], kwonlyargs=[arg(arg='selection_id'), arg(arg='expected_control_revision'), arg(arg='intent_ids'), arg(arg='_reader')], kw_defaults=[Constant(value=None), Constant(value=None), Constant(value=None), Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "load_selected_management_fences": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='management')], kwonlyargs=[arg(arg='_reader')], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "load_selected_order_identity_context": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "load_selected_order_management_policy": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='context')], kwonlyargs=[arg(arg='_reader')], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "prepare_selected_order_management": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='operation_id')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "release_execution_runtime": {
+            "before": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='selected_management_context'), arg(arg='selected_management_owner')], kw_defaults=[Constant(value=None), Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "replace_mock_automation_control": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load())), arg(arg='expected_selection_id', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          }
+        }
+      },
+      "reason": "Only the exact reviewed S12-05 current owner/recovery/settings/readonly policy and public member consumer changes are applied. Earlier component sites already entered in the active inventory are included in this cumulative HEAD-to-current review. Removed identities are the moved caller occurrences preserved here, not discarded debt. The generic QueryStore method set is unchanged; new backend-specific APIs and forwarding callbacks are independently traced in the proposal. Same-name unresolved receivers remain unresolved candidates.",
+      "evidence": [
+        "tmp/s12-05-group-integration/consumer-delta-review.json",
+        "tmp/s12-05-group-integration/final-static-review-current-settings-proposal.json"
+      ],
+      "execution_scope": "Static source review only. Current executable source, discovered/executed IDs, resource cleanup and final S12 acceptance require the separate final source run."
     }
   ]
 }

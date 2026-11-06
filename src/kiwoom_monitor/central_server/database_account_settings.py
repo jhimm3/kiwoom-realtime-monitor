@@ -199,10 +199,11 @@ def _save_market_profile_settings(cursor: Any, value: dict[str, Any], expected_r
     return document
 
 
-def _load_account_settings(cursor: Any, scope: dict[str, str], p: str) -> dict[str, Any]:
+def _load_account_settings(cursor: Any, scope: dict[str, str], p: str, *, lock: bool = False) -> dict[str, Any]:
     scope = _verified_settings_scope(cursor, scope, p)
     cursor.execute("SELECT document_json FROM central_documents WHERE collection='server_account_settings' "
-                   f"AND owner={p} AND document_key='settings'", (_account_settings_owner(scope),))
+                   f"AND owner={p} AND document_key='settings'" + (' FOR UPDATE' if p == '%s' and lock else ''),
+                   (_account_settings_owner(scope),))
     row = cursor.fetchone()
     if row is None:
         return {"scope": scope, "active_profile_id": None, "monitor_enabled": False,

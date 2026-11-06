@@ -46,7 +46,7 @@ from kiwoom_monitor.application.mock_automation_recovery import (
     record_mock_automation_recovery_from_risk,
 )
 from kiwoom_monitor.application.mock_automation_admission import (
-    MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION, MockAutomationAdmission,
+    MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION, MOCK_AUTOMATION_ADMISSION_VERSION, MockAutomationAdmission,
 )
 from kiwoom_monitor.application.mock_automation_risk import mock_automation_protection_trigger
 from kiwoom_monitor.application.research_families import get_research_family, parse_strategy_config
@@ -94,10 +94,12 @@ class MockAutomationEpisodePosition:
     Borrowed ledger/clock operations are used during a call and never retained.
     """
 
-    def __init__(self, *, account_ref: str, run_id: str, member_spec_id: str | None = None) -> None:
+    def __init__(self, *, account_ref: str, run_id: str, member_spec_id: str | None = None,
+                 member_projection_source=None) -> None:
         self._account_ref = account_ref
         self._run_id = run_id
         self._member_spec_id = member_spec_id
+        self._member_projection_source = member_projection_source
         self._fill_cursor = 0
         self._state = StrategyState()
         self._position_state_lock = Lock()
@@ -110,6 +112,17 @@ class MockAutomationEpisodePosition:
     def set_plan_fill_listener(self, listener):
         """Borrow the existing minute-plan owner; notification performs no I/O."""
         self._plan_fill_listener = listener
+
+    def bind_member_scope(self, spec_id, *, member_projection_source=None):
+        """Change only an explicitly retained read scope while its Runner is drained."""
+        with self._position_state_lock:
+            if self._member_spec_id not in (None, spec_id) or self._position_state_writers:
+                raise RuntimeError('MOCK_AUTOMATION_POSITION_SCOPE_BUSY_OR_CHANGED')
+            if (self._member_spec_id == spec_id and self._member_projection_source == member_projection_source):
+                return
+            self._member_spec_id = spec_id
+            self._member_projection_source = member_projection_source
+            self._position_state_revision += 1
 
     @property
     def state(self) -> StrategyState:
@@ -128,13 +141,17 @@ class MockAutomationEpisodePosition:
 
 
     def apply_new_fills(self, repository, *, leader, config, position_time, _reader=None) -> None:
+        # A missing ownership proof is a read-preparation failure. Do not consume
+        # an unscoped event or advance the cursor while waiting for that proof.
+        projection = self._member_projection_source() if self._member_projection_source is not None else None
         # Fence only publication of copied facts. Never hold this lock across I/O.
         with self._position_state_lock:
             if self._position_state_writers:self._position_state_failed=True
             self._position_state_writers+=1
             before=(self._state,self._fill_cursor)
         try:
-            self._apply_new_fills_core(repository, leader=leader, config=config, _reader=_reader)
+            self._apply_new_fills_core(repository, leader=leader, config=config, _reader=_reader,
+                                       member_projection=projection)
             available=position_time()
             with self._position_state_lock:
                 if before!=(self._state,self._fill_cursor) or self._position_state_available_at is None:
@@ -148,8 +165,10 @@ class MockAutomationEpisodePosition:
                 self._position_state_writers-=1
 
 
-    def _apply_new_fills_core(self, repository, *, leader, config, _reader=None) -> None:
+    def _apply_new_fills_core(self, repository, *, leader, config, _reader=None, member_projection=None) -> None:
         reader_args = {} if _reader is None else {'_reader': _reader}
+        if member_projection is not None:
+            reader_args['member_projection'] = member_projection
         while True:
             page = repository.account_events(
                 "mock", self._account_ref,
@@ -197,7 +216,11 @@ class MockAutomationEpisodePosition:
                             emitted_candidate_keys=self._state.emitted_candidate_keys,
                         )
                     else:
-                        self._state = StrategyState(emitted_candidate_keys=self._state.emitted_candidate_keys) if leader else StrategyState(
+                        from kiwoom_monitor.application.leader_breakout import leader_reentry_enabled
+                        boundary = (max(event.occurred_at, event.received_at).isoformat()
+                                    if leader and leader_reentry_enabled(config) else '')
+                        self._state = StrategyState(cooldown_until=boundary,
+                            emitted_candidate_keys=self._state.emitted_candidate_keys) if leader else StrategyState(
                             status="cooldown",
                             cooldown_until=(event.occurred_at + timedelta(
                                 seconds=int(config.cooldown_seconds),
@@ -436,6 +459,7 @@ class MockAutomationEpisode:
         leader_context_source=None,
         now_provider=None,
         member_admission: MockAutomationAdmission | None = None,
+        proposed_selection=None,
     ) -> None:
         context = bundle.automation_context
         if (
@@ -447,7 +471,7 @@ class MockAutomationEpisode:
             raise ValueError("MOCK_AUTOMATION_RUNNER_CONTEXT_MISMATCH")
         if member_admission is not None and (
                 not isinstance(member_admission, MockAutomationAdmission)
-                or member_admission.version != MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION
+                or member_admission.version not in {MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION, MOCK_AUTOMATION_ADMISSION_VERSION}
                 or (member_admission.account_ref, member_admission.execution_run_id,
                     member_admission.spec_id, member_admission.strategy_ref, member_admission.candidate_package_hash,
                     member_admission.final_result_hash, member_admission.final_batch_id, member_admission.final_run_id)
@@ -458,12 +482,27 @@ class MockAutomationEpisode:
         self._now = (lambda: as_kst(now_provider())) if now_provider else (lambda: datetime.now(KST))
         self._bundle = bundle
         self._spec = spec
+        self._selected_management_context = getattr(bundle, 'selected_management_context', None)
+        if self._selected_management_context is not None:
+            from kiwoom_monitor.application.mock_automation_risk import mock_automation_expected_binding_revision
+            mock_automation_expected_binding_revision(spec, self._selected_management_context)
+            if self._selected_management_context.execution_run_id != bundle.run_id:
+                raise ValueError('MOCK_SELECTED_MANAGEMENT_RUN_CHANGED')
         self._member_admission = member_admission
+        self._account_selection = proposed_selection
         self._admitted_member_spec_ids = ()
         self._admission_id = (member_admission.admission_id if member_admission is not None
                               else getattr(context, 'admission_id', ''))
-        self._checkpoint_key = 'member:' + spec.spec_id if member_admission is not None else 'current'
-        self._repository = ForwardEvaluationRepository(store)
+        if self._selected_management_context is not None:
+            self._admission_id = self._selected_management_context.admission_id
+        self._checkpoint_key = ('member:' + spec.spec_id if member_admission is not None
+                                and member_admission.version == MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION else 'current')
+        if self._selected_management_context is not None:
+            self._checkpoint_key = self._selected_management_context.checkpoint_key
+        self._repository = ForwardEvaluationRepository(store,
+            **({'selected_management_context': self._selected_management_context}
+               if self._selected_management_context is not None else {}))
+        self._selected_management_source_risk_ids = None
         self._position_registered_implementation = ""
         self._position_policy_implementation = None
         self._family = None
@@ -514,7 +553,10 @@ class MockAutomationEpisode:
         self._checkpoint = MockAutomationCheckpoint()
         self._episode_position = MockAutomationEpisodePosition(
             account_ref=bundle.account_ref, run_id=bundle.run_id,
-            member_spec_id=spec.spec_id if member_admission is not None else None,
+            member_spec_id=(self._selected_management_context.member_spec_id
+                if self._selected_management_context is not None else spec.spec_id if member_admission is not None else None),
+            member_projection_source=(self._position_member_projection if member_admission is not None
+                and member_admission.version == MOCK_AUTOMATION_ADMISSION_VERSION else None),
         )
         self._status: dict[str, Any] = {
             "state": "WARMUP", "reason": "not_started", "orders_enabled": False,
@@ -552,25 +594,176 @@ class MockAutomationEpisode:
     def admitted_member_spec_ids(self) -> tuple[str, ...]:
         return self._admitted_member_spec_ids
 
+    @property
+    def admission_ref(self):
+        from kiwoom_monitor.domain.execution_activation import MockAutomationRetainedAdmissionRef
+        admission = self._member_admission
+        if self._selected_management_context is not None:
+            admission = self._repository.load_mock_automation_admission_for_spec(self._bundle.account_ref, self._spec.spec_id)
+            context = self._selected_management_context
+            if (admission is None or (admission.admission_id, admission.spec_id, admission.execution_run_id,
+                    admission.account_ref, admission.version, admission.account_selection_id)
+                    != (context.admission_id, context.spec_id, context.execution_run_id, context.account_ref,
+                        context.source_admission_version, context.source_account_selection_id)):
+                raise ValueError('MOCK_SELECTED_MANAGEMENT_ADMISSION_CHANGED')
+        if admission is None:
+            admission = self._repository.load_mock_automation_admission_for_spec(
+                self._bundle.account_ref, self._spec.spec_id)
+            if (admission is None or admission.version != MOCK_AUTOMATION_ADMISSION_VERSION
+                    or (admission.account_ref, admission.execution_run_id, admission.spec_id,
+                        admission.strategy_ref, admission.candidate_package_hash,
+                        admission.final_result_hash, admission.final_batch_id, admission.final_run_id)
+                    != (self._bundle.account_ref, self._bundle.run_id, self._spec.spec_id,
+                        self._spec.strategy_ref, self._spec.candidate_package_hash,
+                        self._spec.final_result_hash, self._spec.final_batch_id, self._spec.final_run_id)
+                    or self._admission_id and admission.admission_id != self._admission_id):
+                raise ValueError('MOCK_AUTOMATION_MEMBER_ADMISSION_CHANGED')
+            self._admission_id = admission.admission_id
+        return MockAutomationRetainedAdmissionRef(self._spec.spec_id, admission.admission_id,
+            admission.account_selection_id, admission.execution_run_id)
+
+    def apply_account_selection(self, control):
+        """Adopt an acknowledged composition without resetting an original cue or state."""
+        selection = control.account_selection if control is not None else None
+        if (selection is None or control.execution_run_id != self._bundle.run_id
+                or control.active_spec_id != self._bundle.automation_context.spec_id
+                or not self._selection_matches_admission(selection)):
+            raise ValueError('MOCK_AUTOMATION_MEMBER_ADMISSION_CHANGED')
+        admission = self._member_admission
+        if self._member_admission is None:
+            admission = self._repository.load_mock_automation_admission_for_spec(self._bundle.account_ref, self._spec.spec_id)
+            if (admission is None or admission.admission_id != self._admission_id
+                    or not selection.matches_admission(spec_id=self._spec.spec_id, admission_id=admission.admission_id,
+                        original_selection_id=getattr(admission, 'account_selection_id', None),
+                        execution_run_id=admission.execution_run_id)):
+                raise ValueError('MOCK_AUTOMATION_MEMBER_ADMISSION_CHANGED')
+        self._episode_position.bind_member_scope(self._spec.spec_id,
+            member_projection_source=(self._position_member_projection
+                if admission.version == MOCK_AUTOMATION_ADMISSION_VERSION else None))
+        self._account_selection = selection
+        self._admitted_member_spec_ids = selection.member_spec_ids
+        self._member_admission = admission
+
+    def _position_member_projection(self):
+        if self._account_selection is None:
+            raise RuntimeError('MOCK_RETAINED_MEMBER_PROJECTION_UNAVAILABLE')
+        return self._bundle.monitor.member_projection_for_selection(self._account_selection.selection_id)
+
+    def _selection_matches_admission(self, selection):
+        ref = self.admission_ref
+        return selection.matches_admission(spec_id=ref.spec_id, admission_id=ref.admission_id,
+            original_selection_id=ref.original_selection_id, execution_run_id=ref.execution_run_id)
+
+    def _allows_entry(self, control):
+        if self._selected_management_context is not None:
+            return False
+        return control.account_selection is None or control.account_selection.allows_entry(self._spec.spec_id)
+
     def _matches_control(self, control) -> bool:
         if (control is None or getattr(control, 'execution_run_id', self._bundle.run_id) != self._bundle.run_id):
             return False
+        if self._selected_management_context is not None:
+            return (control.active_spec_id == self._selected_management_context.spec_id
+                    and control.execution_run_id == self._selected_management_context.execution_run_id
+                    and control.entry_resume_required)
         if self._member_admission is None:
             return control.active_spec_id == self._spec.spec_id
         selection = control.account_selection
-        return (selection is not None and selection.selection_id == self._member_admission.account_selection_id
+        return (selection is not None and self._selection_matches_admission(selection)
+                and (self._account_selection is None or self._account_selection == selection)
                 and control.active_spec_id == self._bundle.automation_context.spec_id
                 and control.includes_spec(self._spec.spec_id))
 
     def _checkpoint_document(self, collection):
+        if self._selected_management_context is not None:
+            row = self._store.load_document(collection, self._bundle.account_ref, self._checkpoint_key)
+            if row is not None:
+                return row.get('document')
+            policy = self._repository.selected_management_policy
+            document = next((deepcopy(item['document']) for item in policy['documents']
+                if (item['collection'], item['owner'], item['key'])
+                == (collection, self._bundle.account_ref, self._checkpoint_key)), None)
+            if document is not None and 'fill_cursor' in document:
+                cursor = document['fill_cursor']
+                coordinates = policy['installation']['event_coordinates']
+                document['fill_cursor'] = max((item['target_accepted_sequence'] for item in coordinates
+                    if item['source_accepted_sequence'] <= cursor), default=0)
+            return document
         if self._member_admission is None:
             rows = self._store.load_documents(collection, self._bundle.account_ref, 1)
             return rows[0].get('document') if rows else None
         row = self._store.load_document(collection, self._bundle.account_ref, self._checkpoint_key)
         return row.get('document') if row else None
 
+    def _original_policy_document(self, collection, key, *, _reader=None):
+        args = {} if _reader is None else {'_reader': _reader}
+        row = self._store.load_document(collection, self._bundle.account_ref, key, **args)
+        if row is not None or self._selected_management_context is None:
+            return row
+        return next(({'document': deepcopy(item['document'])}
+            for item in self._repository.selected_management_policy['documents']
+            if (item['collection'], item['owner'], item['key'])
+            == (collection, self._bundle.account_ref, key)), None)
+
+    def _protection_policy_context(self, trigger):
+        context = self._selected_management_context
+        if context is not None:
+            if self._selected_management_source_risk_ids is None:
+                self._selected_management_source_risk_ids = frozenset(item['key']
+                    for item in self._repository.selected_management_policy['documents']
+                    if (item['collection'], item['owner']) ==
+                    ('execution_mock_automation_risk_snapshots', context.account_ref))
+            if trigger.get('snapshot_id') in self._selected_management_source_risk_ids:
+                return None  # Archived trigger retains its original binding and hash.
+        return context
+
     def _leader_evidence_key(self, decision_id):
-        return mock_automation_intent_id(self._spec.spec_id, decision_id) if self._member_admission is not None else decision_id
+        if self._selected_management_context is not None:
+            return (mock_automation_intent_id(self._spec.spec_id, decision_id)
+                    if self._selected_management_context.source_admission_version == MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION
+                    else decision_id)
+        return (mock_automation_intent_id(self._spec.spec_id, decision_id)
+                if self._member_admission is not None and self._member_admission.version == MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION
+                else decision_id)
+
+    def _current_leader_context(self):
+        if self._leader_context_source is None:
+            return None
+        return (self._leader_context_source(self._spec.spec_id) if self._member_admission is not None
+                else self._leader_context_source())
+
+    def _own_active_records(self, records):
+        if self._member_admission is None:
+            return records
+        # Keep unattributed and foreign-run records as blockers. Peer ownership
+        # comes from native records and the stored admitted membership.
+        return tuple(record for record in records if not (
+            getattr(record, 'member_spec_id', None) in self._admitted_member_spec_ids
+            and record.member_spec_id != self._spec.spec_id
+            and record.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
+            and not (record.amendment is not None and record.amendment.reconciliation_pending)
+            and record.intent.run_id == self._bundle.run_id
+            and record.intent.account_ref == self._bundle.account_ref))
+
+    def _record_recovery(self, recovery, risk):
+        kwargs = {}
+        if self._member_admission is not None:
+            cut = self._bundle.monitor.latest_automation_execution_cut
+            kwargs['observation'] = (cut['observation'] if cut is not None
+                and cut['risk'] == risk and cut['recovery'] == recovery else None)
+        return record_mock_automation_recovery_from_risk(self._repository, self._bundle.runtime,
+            recovery, risk, account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id, **kwargs)
+
+    async def _refresh_recovery_risk(self):
+        recovery = await self._bundle.monitor.refresh_recovery()
+        if self._member_admission is not None:
+            cut = self._bundle.monitor.latest_automation_execution_cut
+            if cut is None:
+                raise RuntimeError('MOCK_AUTOMATION_ACCOUNT_CUT_UNAVAILABLE')
+            return cut['recovery'], cut['risk']
+        risk = await drain_thread_call(self._repository.load_latest_mock_automation_risk,
+                                       self._bundle.account_ref)
+        return recovery, risk
 
     @property
     def closing(self) -> bool:
@@ -670,9 +863,19 @@ class MockAutomationEpisode:
                 stored = self._repository.load_mock_automation_admission_for_spec(
                     self._bundle.account_ref, spec.spec_id, **args)
                 control = self._repository.load_mock_automation_control(self._bundle.account_ref, **args)
-                if stored != self._member_admission or not self._matches_control(control):
+                proposed = self._account_selection
+                if proposed is not None:
+                    selected = self._repository.load_mock_automation_account_selection(
+                        self._bundle.account_ref, proposed.selection_id, **args)
+                    if (selected != proposed or control is None
+                            or control.execution_run_id != self._bundle.run_id
+                            or control.active_spec_id != proposed.primary_spec_id
+                            or not self._selection_matches_admission(proposed)):
+                        raise ValueError('MOCK_AUTOMATION_PROPOSED_SELECTION_CHANGED')
+                if stored != self._member_admission or proposed is None and not self._matches_control(control):
                     raise ValueError('MOCK_AUTOMATION_MEMBER_ADMISSION_CHANGED')
-                self._admitted_member_spec_ids = control.account_selection.member_spec_ids
+                self._account_selection = proposed or control.account_selection
+                self._admitted_member_spec_ids = self._account_selection.member_spec_ids
         package = self._repository.load_mock_automation_candidate_package(
             spec.strategy_ref, spec.candidate_package_hash,
         )
@@ -791,7 +994,7 @@ class MockAutomationEpisode:
         """Compare admitted members without lending another Runtime or its state."""
         return (isinstance(other, MockAutomationEpisode) and self._member_admission is not None
                 and other._member_admission is not None and self._bundle is other._bundle
-                and self._member_admission.account_selection_id == other._member_admission.account_selection_id)
+                and self._account_selection is not None and self._account_selection == other._account_selection)
 
     def position_shadow_observation(self, base, *, is_current: Callable[[], bool]):
         """Enrich an account-only cut from this runner's existing RAM owners.
@@ -904,6 +1107,7 @@ class MockAutomationEpisode:
     def position_study_state(self, observation):
         """Copy existing state without waiting for fills, locks, DB or protection."""
         from kiwoom_monitor.application.position_target import validate_position_runner_state
+        from kiwoom_monitor.application.mock_automation_risk import mock_automation_expected_binding_revision
         if (self._closing or self._input_progress.bootstrap_pending or self._input_progress.recovering
                 or self._bundle.runtime.observation_in_progress):
             return None
@@ -920,12 +1124,13 @@ class MockAutomationEpisode:
             risk=observation.risk_snapshot
             if notice is not None:self._validate_protection_review(notice)
             if (risk is None or observation.account.account_ref!=self._bundle.account_ref
-                    or risk.execution_run_id!=self._bundle.run_id or risk.binding_revision!=self._spec.binding_revision
+                    or risk.execution_run_id!=self._bundle.run_id or risk.binding_revision!=mock_automation_expected_binding_revision(
+                        self._spec, self._selected_management_context)
                     or risk.data_path!=self._spec.data_path or not observation.reconciliation_complete
                     or not observation.open_orders_complete or observation.reasons):return None
             body={'version':'native-position-runner-state/v1','source_kind':'owner_ram',
                 'account_ref':self._bundle.account_ref,'execution_run_id':self._bundle.run_id,
-                'binding_revision':self._spec.binding_revision,'data_path':self._spec.data_path,
+                'binding_revision':risk.binding_revision,'data_path':self._spec.data_path,
                 'account_input_ref':observation.input_ref,'risk_snapshot_ref':risk.snapshot_id,
                 'account_observed_at':observation.observed_at.isoformat(),'state_available_at':available.isoformat(),
                 'state_revision':revision,'runtime_observation_revision':runtime_revision,'fill_cursor':cursor,
@@ -970,6 +1175,7 @@ class MockAutomationEpisode:
             return self._protection_review is not None and self._protection_review["state"] == "PENDING"
 
     def _validate_protection_review(self, notice) -> None:
+        from kiwoom_monitor.application.mock_automation_risk import mock_automation_expected_binding_revision
         if (not isinstance(notice, Mapping) or notice.get("version") != PROTECTION_REVIEW_VERSION
                 or notice.get("account_ref") != self._bundle.account_ref
                 or notice.get("execution_run_id") != self._bundle.run_id
@@ -992,7 +1198,8 @@ class MockAutomationEpisode:
             if (not isinstance(trigger, Mapping) or trigger.get("version") != "mock-native-risk-protection/v1"
                     or trigger.get("account_ref") != self._bundle.account_ref
                     or trigger.get("execution_run_id") != self._bundle.run_id
-                    or trigger.get("binding_revision") != self._spec.binding_revision
+                    or trigger.get("binding_revision") != mock_automation_expected_binding_revision(
+                        self._spec, self._protection_policy_context(trigger))
                     or trigger.get("disposition") not in {"EXIT_REQUIRED", "RECONCILE_REQUIRED"}
                     or type(trigger.get("reconciliation_revision")) is not int or trigger["reconciliation_revision"] <= 0
                     or any(not isinstance(trigger.get(key), str) or len(trigger[key]) != 64
@@ -1035,8 +1242,7 @@ class MockAutomationEpisode:
         if quote is not None:
             self._observe_leader_stop(quote)
         now = self._bundle.runtime.server_now()
-        trigger = mock_automation_protection_trigger(self._spec, risk,
-            execution_run_id=self._bundle.run_id, now=now, account_positions=account.positions)
+        trigger = self._native_protection_trigger(risk, now=now, account_positions=account.positions)
         self._native_risk_delivery = {"snapshot_id": risk.snapshot_id,
             "reconciliation_revision": risk.reconciliation_revision,
             "delivered_at": now.isoformat(), "triggered": trigger is not None}
@@ -1087,6 +1293,11 @@ class MockAutomationEpisode:
             return
         self.request_protection_review(reason="native_risk:" + ";".join(trigger["reasons"]),
             input_ref="native-risk:" + risk.snapshot_id, requested_at=now, risk_trigger=trigger)
+
+    def _native_protection_trigger(self, risk, *, now, account_positions=None):
+        return mock_automation_protection_trigger(self._spec, risk,
+            execution_run_id=self._bundle.run_id, now=now, account_positions=account_positions,
+            selected_management_context=self._selected_management_context)
 
     def _stop_validation_terms(self):
         if self._panic_plan_mode:
@@ -1149,7 +1360,7 @@ class MockAutomationEpisode:
             "package_hash": self._spec.candidate_package_hash}
         from kiwoom_monitor.application.mock_automation_risk import validate_mock_stop_loss_proof, _sha256
         validate_mock_stop_loss_proof(proof, self._spec, risk, **self._stop_validation_terms())
-        trigger = mock_automation_protection_trigger(self._spec, risk, execution_run_id=self._bundle.run_id,
+        trigger = self._native_protection_trigger(risk,
             now=now, account_positions=positions)
         if trigger is None:
             trigger = {"version": "mock-native-risk-protection/v1", "account_ref": risk.account_ref,
@@ -1180,7 +1391,7 @@ class MockAutomationEpisode:
             consumed += 1
             now = self._now()
             try:
-                current = self._leader_context_source() if self._leader_context_source is not None else None
+                current = self._current_leader_context()
                 config = self._strategy_inputs.resolve_config(self._config, current,
                     position_open=self._episode_position.state.status == "open")
                 context = validate_leader_position_proof(self._leader_position_proof, self._config, self._spec,
@@ -1194,14 +1405,18 @@ class MockAutomationEpisode:
                 if assessment["exit_required"] and raw["status"] in {"HOLD", "HARD_EXIT", "INVALIDATED"}:
                     raw = {**raw, "proposal": "EXIT", "reasons": [*raw["reasons"], *assessment["reasons"]]}
                 if hasattr(config.execution_contract, 'position_steps') and context is not None:
-                    enabled = (control.desired_state.value == 'RUNNING' and not control.entry_resume_required
+                    enabled = (control.desired_state.value == 'RUNNING' and not control.entry_resume_required and self._allows_entry(control)
                         and isinstance(current, Mapping) and leader_current_entry_matches(self._config,
                             self._leader_position_proof, {'shadow_candidate_enabled': current.get('enabled'),
                                 'shadow_candidate_config': current.get('policy')}, now))
                     raw = self._strategy_inputs.evaluate_position_step(config, raw, self._episode_position.state,
                         context, source=source, entry_enabled=enabled)
                 evaluation = leader_evaluation(run_id=self._bundle.run_id, config=config, raw=raw, state=self._episode_position.state, context=context)
+                if evaluation.decision.final_action == 'ENTER' and not self._allows_entry(control):
+                    self._status = {'state': 'MANAGING', 'reason': 'retained_member_entry_disabled', 'orders_enabled': False}
+                    continue
                 active = await drain_thread_call(self._bundle.repository.active_intents, "mock", self._bundle.account_ref, self._bundle.run_id)
+                active = self._own_active_records(active)
                 if active:
                     if evaluation.decision.final_action == "EXIT":
                         self.request_protection_review(reason="registered_strategy_protective_exit", input_ref=raw["input_ref"], requested_at=now)
@@ -1215,12 +1430,10 @@ class MockAutomationEpisode:
                     self._status = {"state": "BLOCKED" if decision.constraints or raw["status"] == "BLOCKED" else "RUNNING",
                         "reason": ";".join(decision.reasons), "last_decision_id": decision.decision_id, "input_mode": "0B", "orders_enabled": False}
                     continue
-                recovery = await self._bundle.monitor.refresh_recovery()
-                risk = await drain_thread_call(self._repository.load_latest_mock_automation_risk, self._bundle.account_ref)
+                recovery, risk = await self._refresh_recovery_risk()
                 if risk is None or not self._episode_position.matches_risk(risk):
                     raise ValueError("strategy_state_risk_mismatch")
-                await drain_thread_call(record_mock_automation_recovery_from_risk, self._repository, self._bundle.runtime,
-                    recovery, risk, account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id)
+                await drain_thread_call(self._record_recovery, recovery, risk)
                 if await self._pause_for_protection_review():
                     break
                 if decision.final_action == "ENTER":
@@ -1290,6 +1503,7 @@ class MockAutomationEpisode:
         now = self._bundle.runtime.server_now()
         trigger = mock_automation_stop_loss_trigger(self._spec, risk, execution_run_id=self._bundle.run_id,
             now=now, price={**price, 'symbol':symbol}, account_positions=positions,
+            selected_management_context=self._selected_management_context,
             **self._stop_validation_terms())
         if trigger is None or previous is not None and previous.get('risk_trigger', {}).get('cause_signature') == trigger['cause_signature']:
             return
@@ -1412,7 +1626,7 @@ class MockAutomationEpisode:
         revision = self._bundle.runtime.observation_revision
         if self._leader_management_records is None or self._leader_management_records[0] != revision:
             active = await drain_thread_call(execution.active_intents, 'mock', self._bundle.account_ref, self._bundle.run_id)
-            self._leader_management_records = (revision, active)
+            self._leader_management_records = (revision, self._own_active_records(active))
         active = self._leader_management_records[1]
         if not active:
             return False
@@ -1437,7 +1651,7 @@ class MockAutomationEpisode:
             return True
         if record.state is OrderState.CANCEL_PENDING:
             self._bundle.monitor.request_automation_execution_recovery()
-        current = self._leader_context_source() if self._leader_context_source is not None else None
+        current = self._current_leader_context()
         quote = self._strategy_inputs.latest_stop_quote
         if quote is not None and not self._strategy_inputs.stop_quote_generation_is_current(quote):
             quote = None
@@ -1460,7 +1674,7 @@ class MockAutomationEpisode:
             from kiwoom_monitor.application.leader_order_management import prepare_leader_order_management_claim
             settings = (self._store.load_document('server_operational_settings', 'global', 'current')
                         if updated.intent.side is OrderSide.BUY else None)
-            enabled = (control.desired_state.value == 'RUNNING' and not control.entry_resume_required
+            enabled = (control.desired_state.value == 'RUNNING' and not control.entry_resume_required and self._allows_entry(control)
                 and updated.intent.side is OrderSide.BUY and leader_current_entry_matches(self._config,
                     self._leader_position_proof, settings['document'] if settings else None, self._now()))
             current_quote = self._strategy_inputs.latest_stop_quote
@@ -1471,6 +1685,10 @@ class MockAutomationEpisode:
             claim = prepare_leader_order_management_claim(self._store, self._bundle.runtime, execution, self._spec,
                 updated, config=self._config, quote=current_quote, recovery=cut['recovery'], risk=cut['risk'],
                 entry_enabled=enabled, protection_notice=protection,
+                verified_peer_orders=cut.get('verified_peer_orders'),
+                selected_management_context=self._selected_management_context,
+                selected_management_policy=(self._repository.selected_management_policy
+                    if self._selected_management_context is not None else None),
                 plan_entry_notional_won=(self._leader_staged_facts['entry_notional']
                     if self._leader_staged_facts is not None else None))
             if claim is not None:
@@ -1552,7 +1770,7 @@ class MockAutomationEpisode:
             return
         observation = cut["observation"]
         if (not observation.reconciliation_complete or not observation.open_orders_complete
-                or observation.unmapped_broker_order_ids or observation.open_orders):
+                or observation.unmapped_broker_order_ids or self._own_active_records(observation.open_orders)):
             return
         risk, recovery = cut["risk"], cut["recovery"]
         head = await drain_thread_call(execution.load_plan_position, self._bundle.account_ref, self._bundle.run_id,
@@ -1564,13 +1782,16 @@ class MockAutomationEpisode:
                 plan_position={"version": "mock_plan_position/v1", "plan_id": head.plan.plan_id,
                                "policy_ref": head.plan.policy_ref, "revision": head.plan.expected_revision,
                                "run_id": self._bundle.run_id, "symbol": head.symbol, "quantity": head.quantity,
-                               "fill_cursor": head.fill_cursor, "unreconciled_sell_quantity": head.unreconciled_sell_quantity},
+                               "fill_cursor": head.fill_cursor, "unreconciled_sell_quantity": head.unreconciled_sell_quantity,
+                               **({'spec_id': self._spec.spec_id} if self._member_admission is not None
+                                  or self._selected_management_context is not None
+                                  and self._selected_management_context.member_spec_id is not None else {})},
                 leader_config=self._config, position_proof=self._leader_position_proof,
                 confirmed_root_state=root.state.value, confirmed_root_at=confirmed_at, now=now,
+                selected_management_context=self._selected_management_context,
             )
             plan, decision = read_planned_leader_protection_checkpoint(workflow, notice, self._spec, self._bundle.run_id)
-            await drain_thread_call(record_mock_automation_recovery_from_risk, self._repository, self._bundle.runtime,
-                                    recovery, risk, account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id)
+            await drain_thread_call(self._record_recovery, recovery, risk)
             with self._protection_lock:
                 if (self._protection_review != notice
                         or not self._strategy_inputs.stop_quote_generation_is_current(quote)):
@@ -1667,7 +1888,7 @@ class MockAutomationEpisode:
                 age=min(self._spec.maximum_data_gap_seconds,self._spec.unfilled_execution_policy.max_snapshot_age_seconds)
                 current=self._bundle.monitor.latest_automation_execution_cut
                 control=self._repository.load_mock_automation_control(self._bundle.account_ref)
-                trigger=mock_automation_protection_trigger(self._spec,risk,execution_run_id=self._bundle.run_id,now=now)
+                trigger=self._native_protection_trigger(risk,now=now)
                 if (self._closing or self._protection_snapshot()!=notice or current is None
                         or current['risk']!=risk or current['observation']!=observation
                         or self._repository.load_latest_mock_automation_risk(self._bundle.account_ref)!=risk
@@ -1695,7 +1916,7 @@ class MockAutomationEpisode:
                 validate_mock_stop_loss_proof(notice['risk_trigger']['stop_loss'], self._spec, risk,
                     **self._stop_validation_terms())
             active,complete=self._bundle.repository.account_active_intents(self._bundle.account_ref)
-            if active or not complete:
+            if self._own_active_records(active) or not complete:
                 raise ValueError('protection_exit_account_order_in_flight_or_coverage_unknown')
             if self._unfilled_preflight is not None:
                 ids=[self._unfilled_preflight['anchor']['root_intent']['intent_id']]
@@ -1708,7 +1929,8 @@ class MockAutomationEpisode:
             if self._protection_exit is None:
                 self._protection_exit=prepare_mock_protection_exit(self._spec,run_id=self._bundle.run_id,
                     control_revision=control.control_revision,notice=notice,risk=risk,state=self._episode_position.state,price=price)
-            decision=validate_mock_protection_exit(self._protection_exit,self._spec,self._bundle.run_id)
+            decision=validate_mock_protection_exit(self._protection_exit,self._spec,self._bundle.run_id,
+                selected_management_context=self._protection_policy_context(self._protection_exit['snapshot']['request_trigger']))
             snapshot=self._protection_exit['snapshot']
             if (snapshot['control_revision']!=control.control_revision or snapshot['request_revision']!=notice['revision']
                     or snapshot['request_input_ref']!=notice['input_ref'] or snapshot['request_trigger']!=notice['risk_trigger']
@@ -1718,8 +1940,7 @@ class MockAutomationEpisode:
             self._status.update(first_protection_exit_state='PREPARED',first_protection_exit_reason='native_loss_protection')
             self._save_checkpoint()  # ACK the fixed decision before native QUEUED.
             verify()
-            record_mock_automation_recovery_from_risk(self._repository,self._bundle.runtime,recovery,risk,
-                account_ref=self._bundle.account_ref,spec_id=self._spec.spec_id)
+            self._record_recovery(recovery, risk)
             gate,record,_=self._dispatch_original_and_register(decision,recovery,risk,
                 protection_exit_id=self._protection_exit['workflow_id'])
             if record is None:
@@ -1731,7 +1952,8 @@ class MockAutomationEpisode:
     def _restore_first_protection_root(self):
         from kiwoom_monitor.application.mock_automation_risk import validate_mock_protection_exit, PROTECTION_EXIT_VERSION
         from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
-        decision=validate_mock_protection_exit(self._protection_exit,self._spec,self._bundle.run_id)
+        decision=validate_mock_protection_exit(self._protection_exit,self._spec,self._bundle.run_id,
+            selected_management_context=self._protection_policy_context(self._protection_exit['snapshot']['request_trigger']))
         identity=mock_automation_intent_id(self._spec.spec_id,decision.decision_id)
         with self._bundle.runtime.automation_decision_guard():
             record=self._bundle.runtime.load_intent(identity)
@@ -1769,7 +1991,8 @@ class MockAutomationEpisode:
                 if self._leader_plan_mode and typed_review and not resolving_before_resume:
                     raise ValueError("planned_protection_resolution_requires_explicit_resume")
                 control_allows_resolution = (
-                    self._leader_plan_mode and typed_review and control == planned_resume_control
+                    (self._leader_plan_mode and typed_review or self._member_admission is not None)
+                    and control == planned_resume_control
                     and (control.desired_state.value == "STOPPED" or control.entry_resume_required)
                     if resolving_before_resume else control is not None and control.desired_state.value == "RUNNING"
                 )
@@ -1777,6 +2000,18 @@ class MockAutomationEpisode:
                 admission = self._repository.load_mock_automation_admission_for_spec(self._bundle.account_ref, self._spec.spec_id)
                 linked = self._repository.load_latest_mock_automation_recovery(self._bundle.account_ref, admission.admission_id) if admission else None
                 active = self._bundle.repository.account_active_intents(self._bundle.account_ref)
+                member_resolution = self._member_admission is not None
+                if member_resolution:
+                    from kiwoom_monitor.application.mock_automation_recovery import MockAutomationAccountRecoveryDecision, MockAutomationRecoveryStatus
+                    if (not isinstance(linked, MockAutomationAccountRecoveryDecision)
+                            or control is None or control.account_selection is None
+                            or linked.account_selection_id != control.account_selection.selection_id
+                            or linked.member_spec_ids != control.account_selection.member_spec_ids
+                            or linked.status is MockAutomationRecoveryStatus.BLOCKED):
+                        raise ValueError('mock_protection_resolution_member_recovery_unverified')
+                peer_orders = set(linked.other_member_open_order_ids) if member_resolution else set()
+                owned = risk.owned_for_member(self._spec.spec_id) if member_resolution else risk.owned_position_quantities
+                pending = risk.pending_sells_for_member(self._spec.spec_id) if member_resolution else risk.pending_sell_quantities
                 now = self._bundle.runtime.server_now()
                 if (current != risk or control is None or not self._matches_control(control)
                         or control.execution_run_id != self._bundle.run_id or not control_allows_resolution
@@ -1784,10 +2019,12 @@ class MockAutomationEpisode:
                         or linked.risk_reconciliation_revision != risk.reconciliation_revision
                         or risk.account_ref != self._bundle.account_ref or risk.execution_run_id != self._bundle.run_id
                         or risk.account_as_of != recovery.account.as_of or not risk.reconciliation_complete
-                        or recovery.account.account_ref != self._bundle.account_ref or recovery.account.positions
-                        or any(order.state not in TERMINAL_ORDER_STATES for order in recovery.orders)
-                        or risk.owned_position_quantities or risk.pending_sell_quantities or risk.submission_unknown_count
-                        or risk.balance_mismatch_count or not active[1] or active[0]
+                        or recovery.account.account_ref != self._bundle.account_ref
+                        or (linked.own_position_quantities if member_resolution else recovery.account.positions)
+                        or any(order.state not in TERMINAL_ORDER_STATES and order.broker_order_id not in peer_orders
+                               for order in recovery.orders)
+                        or owned or pending or risk.submission_unknown_count
+                        or risk.balance_mismatch_count or not active[1] or self._own_active_records(active[0])
                         or self._spec.maximum_data_gap_seconds is None
                         or risk.broker_query_started_at < datetime.fromisoformat(notice["requested_at"])
                         or not 0 <= (now - risk.observed_at).total_seconds() <= self._spec.maximum_data_gap_seconds
@@ -1816,12 +2053,12 @@ class MockAutomationEpisode:
                     resolved = {**notice, "state": "RESOLVED_FLAT", "resolved_risk_snapshot_id": risk.snapshot_id,
                                 "resolved_risk_revision": risk.reconciliation_revision}
                     if resolving_before_resume:
-                        from kiwoom_monitor.application.mock_automation_risk import planned_review_resume_id
-
                         if zero_fill_receipt is not None:
                             resolved["planned_zero_fill_root"] = zero_fill_receipt
                         resolved["resume_from_control_revision"] = control.control_revision
-                        resolved["planned_review_resume_id"] = planned_review_resume_id(resolved)
+                        if self._leader_plan_mode and typed_review:
+                            from kiwoom_monitor.application.mock_automation_risk import planned_review_resume_id
+                            resolved["planned_review_resume_id"] = planned_review_resume_id(resolved)
                 self._save_checkpoint(protection_review=resolved)
                 if (self._repository.load_latest_mock_automation_risk(self._bundle.account_ref) != risk
                         or self._repository.load_mock_automation_control(self._bundle.account_ref) != control
@@ -2241,6 +2478,7 @@ class MockAutomationEpisode:
         if self._unfilled_registration is None and self._unfilled_discovery_pending:
             self._unfilled_discovery_pending = False
             rows = await drain_thread_call(self._bundle.runtime.load_active_intents)
+            rows = self._own_active_records(rows)
             if len(rows) == 1:
                 gate = await drain_thread_call(self._repository.load_mock_automation_approved_gate,
                                               self._bundle.account_ref, rows[0].intent.intent_id)
@@ -2375,9 +2613,7 @@ class MockAutomationEpisode:
                 assessment = replace(assessment,reprice_evidence=evidence)
         # Existing recovery writer links the ACKed cut; no synthetic EV or new
         # collection. The legacy gate still revalidates the current native Risk.
-        await drain_thread_call(record_mock_automation_recovery_from_risk,
-            self._repository, self._bundle.runtime, recovery, risk,
-            account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id)
+        await drain_thread_call(self._record_recovery, recovery, risk)
         if generation != self._unfilled_source_generation:
             self._unfilled_source_pending = True
             self._unfilled_source_status = {'state':'BLOCKED','reason':'native_account_cut_superseded'}
@@ -2854,7 +3090,7 @@ class MockAutomationEpisode:
                     or any(not 0 <= (now - stamp).total_seconds() <= age
                            for stamp in (risk.observed_at, observation.observed_at, observation.account.as_of))):
                 raise ValueError('unfilled_cancel_native_risk_or_owned_state_changed')
-            trigger = mock_automation_protection_trigger(self._spec, risk, execution_run_id=self._bundle.run_id,
+            trigger = self._native_protection_trigger(risk,
                 now=now, account_positions=observation.account.positions)
             if (trigger is not None and trigger['disposition'] == 'RECONCILE_REQUIRED'
                     and inputs['policy'].purpose != 'BUY_OPPORTUNITY'):
@@ -2990,8 +3226,8 @@ class MockAutomationEpisode:
                 from kiwoom_monitor.application.order_lifecycle import anchored_unfilled_policy
 
                 reader_args = {} if _reader is None else {"_reader": _reader}
-                source = self._store.load_document("execution_leader_decisions", self._bundle.account_ref,
-                                                   self._leader_evidence_key(intent.decision_id), **reader_args)["document"]
+                source = self._original_policy_document("execution_leader_decisions",
+                    self._leader_evidence_key(intent.decision_id), **reader_args)["document"]
                 signal_until = datetime.fromisoformat(source["snapshot"]["feature_values"][0]["value"]["valid_until"])
                 policy = anchored_unfilled_policy(intent, self._spec.unfilled_execution_policy, "BUY_OPPORTUNITY")
                 self._leader_plan_deadline = min(signal_until, policy.wait_until)
@@ -3012,7 +3248,7 @@ class MockAutomationEpisode:
 
     def _read_leader_staged_facts(self, execution, root, revision, *, _reader=None):
         """Recover accepted steps and share material fill facts with current management."""
-        from kiwoom_monitor.application.leader_breakout import _id
+        from kiwoom_monitor.application.leader_breakout import _id, leader_position_step_key
         from kiwoom_monitor.application.leader_order_management import leader_position_order_confirmation_time
         from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_legs
         args = {} if _reader is None else {'_reader': _reader}
@@ -3021,12 +3257,13 @@ class MockAutomationEpisode:
         head_key = (head.plan.expected_revision, head.fill_cursor)
         prior = self._leader_staged_facts or {}
         claims = prior.get('claims', ())
-        all_keys = tuple(_id('leader-position-step/v1', [self._config.execution_contract.fingerprint, index, asdict(step)])
+        all_keys = tuple(leader_position_step_key(self._config, index, step,
+                         context=self._leader_position_proof['context'])
             for index, step in enumerate(self._config.execution_contract.position_steps))
         if prior.get('head_key') != head_key:
             claims = []
             for index, key in enumerate(all_keys):
-                row = self._store.load_document('execution_leader_position_actions', account,
+                row = self._original_policy_document('execution_leader_position_actions',
                     _id('leader-plan-step-claim/v1', [head.plan.plan_id, key]), **args)
                 if row is None:
                     break
@@ -3150,7 +3387,7 @@ class MockAutomationEpisode:
                 if self._checkpoint.pending or self._protection_pending() or self._minute_management.checkpoint_pending:
                     await drain_thread_call(self._save_checkpoint)
                 count = await self._minute_management.advance(control, limit=limit,
-                    allow_entry=lambda: not self._closing and not self._protection_pending(),
+                    allow_entry=lambda: not self._closing and not self._protection_pending() and self._allows_entry(control),
                     protection_notice=self._protection_snapshot())
                 self._status = dict(self._minute_management.status)
                 await drain_thread_call(self._save_checkpoint)
@@ -3331,6 +3568,7 @@ class MockAutomationEpisode:
             self._bundle.repository.active_intents,
             "mock", self._bundle.account_ref, self._bundle.run_id,
         )
+        active = self._own_active_records(active)
         assessment = session_clock_assessment(
             self._config, self._episode_position.state, now, active, management_preflight=self._unfilled_attempt_plan or self._unfilled_preflight,
         )
@@ -3374,7 +3612,7 @@ class MockAutomationEpisode:
             await self._cancel_clock_orders(all_orders=False)
             return True
         try:
-            recovery = await self._bundle.monitor.refresh_recovery()
+            recovery, risk = await self._refresh_recovery_risk()
             await drain_thread_call(
                 self._episode_position.apply_new_fills, self._bundle.repository,
                 leader=self._leader, config=self._config, position_time=self._position_state_time,
@@ -3383,9 +3621,7 @@ class MockAutomationEpisode:
                 self._bundle.repository.active_intents,
                 "mock", self._bundle.account_ref, self._bundle.run_id,
             )
-            risk = await drain_thread_call(
-                self._repository.load_latest_mock_automation_risk, self._bundle.account_ref,
-            )
+            active = self._own_active_records(active)
             if risk is None or not risk.reconciliation_complete or not self._episode_position.matches_risk(risk):
                 raise ValueError("clock_broker_reconciliation_unverified")
             if active:
@@ -3418,11 +3654,7 @@ class MockAutomationEpisode:
             else:
                 self._session_clock.update(decision=decision.to_dict(), snapshot=snapshot)
                 await drain_thread_call(self._save_session_clock)
-            await drain_thread_call(
-                record_mock_automation_recovery_from_risk,
-                self._repository, self._bundle.runtime, recovery, risk,
-                account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id,
-            )
+            await drain_thread_call(self._record_recovery, recovery, risk)
             if await self._pause_for_protection_review():
                 return True
             gate, record, _ = await drain_thread_call(self._dispatch_original_and_register, decision, recovery, risk)
@@ -3447,6 +3679,7 @@ class MockAutomationEpisode:
             self._bundle.repository.active_intents,
             "mock", self._bundle.account_ref, self._bundle.run_id,
         )
+        active = self._own_active_records(active)
         if not any(
             record.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
             and (all_orders or record.intent.side is OrderSide.BUY)
@@ -3459,15 +3692,12 @@ class MockAutomationEpisode:
             await drain_thread_call(self._save_session_clock)
             return
         try:
-            recovery = await self._bundle.monitor.refresh_recovery()
+            recovery, risk = await self._refresh_recovery_risk()
             await drain_thread_call(
                 self._episode_position.apply_new_fills, self._bundle.repository,
                 leader=self._leader, config=self._config, position_time=self._position_state_time,
             )
             now = self._bundle.runtime.server_now()
-            risk = await drain_thread_call(
-                self._repository.load_latest_mock_automation_risk, self._bundle.account_ref,
-            )
             if (risk is None
                     or risk.execution_run_id != self._bundle.run_id
                     or risk.account_ref != self._bundle.account_ref
@@ -3482,6 +3712,7 @@ class MockAutomationEpisode:
                 self._bundle.repository.active_intents,
                 "mock", self._bundle.account_ref, self._bundle.run_id,
             )
+            active = self._own_active_records(active)
             confirmed = {order.broker_order_id: order for order in recovery.orders}
             for record in active:
                 order = confirmed.get(record.broker_order_id)
@@ -3563,10 +3794,7 @@ class MockAutomationEpisode:
             }
             return
 
-        recovery = await self._bundle.monitor.refresh_recovery()
-        risk = await asyncio.to_thread(
-            self._repository.load_latest_mock_automation_risk, self._bundle.account_ref,
-        )
+        recovery, risk = await self._refresh_recovery_risk()
         if risk is None:
             raise RuntimeError("MOCK_AUTOMATION_RISK_MISSING")
         if not self._episode_position.matches_risk(risk):
@@ -3576,11 +3804,7 @@ class MockAutomationEpisode:
                 "updated_at": decision.decided_at,
             }
             return
-        await asyncio.to_thread(
-            record_mock_automation_recovery_from_risk,
-            self._repository, self._bundle.runtime, recovery, risk,
-            account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id,
-        )
+        await asyncio.to_thread(self._record_recovery, recovery, risk)
         if decision.final_action == "ENTER" and self._config.session_exit_policy:
             reason = session_entry_time_rejection(self._config, self._bundle.runtime.server_now())
             if reason:
@@ -3621,7 +3845,8 @@ class MockAutomationEpisode:
             protection_exit=document.get('protection_exit')
             if protection_exit is not None:
                 from kiwoom_monitor.application.mock_automation_risk import validate_mock_protection_exit
-                validate_mock_protection_exit(protection_exit,self._spec,self._bundle.run_id)
+                validate_mock_protection_exit(protection_exit,self._spec,self._bundle.run_id,
+                    selected_management_context=self._protection_policy_context(protection_exit['snapshot']['request_trigger']))
                 self._protection_exit=deepcopy(protection_exit)
             if registration is not None:
                 self._validate_unfilled_registration(registration)
@@ -3741,10 +3966,24 @@ class MockAutomationEpisode:
         from kiwoom_monitor.application.mock_automation_risk import planned_review_resume_id
 
         control = self._repository.load_mock_automation_control(self._bundle.account_ref)
+        selection = control.account_selection if control is not None else None
+        retained_reader = getattr(selection, 'retained_admission_ref', None)
+        retained = retained_reader(self._spec.spec_id) if callable(retained_reader) else None
+        receipt = (getattr(control, 'planned_review_resume_ids', {}).get(self._spec.spec_id)
+                   if control is not None and self._member_admission is not None
+                   else control.planned_review_resume_id if control is not None else None)
+        if (receipt is None and control is not None and retained is not None
+                and retained.original_selection_id is None
+                and self._selection_matches_admission(selection)):
+            receipt = control.planned_review_resume_id
+        revision_matches = (control is not None and (
+            control.control_revision == notice['resume_from_control_revision'] + 1
+            or retained is not None and self._selection_matches_admission(selection)
+            and control.control_revision > notice['resume_from_control_revision'] + 1))
         linked = (control is not None and control.desired_state.value == "RUNNING" and not control.entry_resume_required
                 and self._matches_control(control)
-                and control.control_revision == notice["resume_from_control_revision"] + 1
-                and control.planned_review_resume_id == notice["planned_review_resume_id"] == planned_review_resume_id(notice))
+                and revision_matches
+                and receipt == notice["planned_review_resume_id"] == planned_review_resume_id(notice))
         if not linked:
             return False
         if self._planned_protection_restore is None:

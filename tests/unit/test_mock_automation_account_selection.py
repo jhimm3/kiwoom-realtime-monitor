@@ -178,6 +178,18 @@ class MockAccountSelectionTests(unittest.TestCase):
         reordered=replace(value,member_spec_ids=tuple(reversed(value.member_spec_ids)))
         self.assertNotEqual(value.selection_id,reordered.selection_id)
         self.assertEqual(value.member_spec_ids[1],reordered.primary_spec_id)
+        self.assertNotIn('execution_order_spec_ids', value.to_dict())
+        scheduled = replace(value, execution_order_spec_ids=tuple(reversed(value.member_spec_ids)))
+        self.assertEqual(value.primary_spec_id, scheduled.primary_spec_id)
+        self.assertNotEqual(value.selection_id, scheduled.selection_id)
+        self.assertEqual(scheduled, mock_automation_account_selection_from_dict(scheduled.to_dict()))
+        for order in ((), value.member_spec_ids[:1], (value.member_spec_ids[0],) * 2,
+                      list(value.member_spec_ids)):
+            with self.subTest(execution_order=order), self.assertRaises(ValueError):
+                replace(value, execution_order_spec_ids=order)
+        raw = value.to_dict(); raw['execution_order_spec_ids'] = None
+        with self.assertRaises(ValueError):
+            mock_automation_account_selection_from_dict(raw)
         for change in (dict(member_spec_ids=()),dict(member_spec_ids=(value.member_spec_ids[0],)*2),
                        dict(binding_revision=True),dict(limits=None)):
             with self.subTest(change=change),self.assertRaises((ValueError,TypeError)):

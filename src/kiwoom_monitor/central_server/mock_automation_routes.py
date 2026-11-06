@@ -20,6 +20,7 @@ class MockAutomationStartRequest(BaseModel):
     spec_id: str = Field(min_length=1, max_length=128)
     expected_settings_revision: int = Field(strict=True, ge=1)
     credential_revision: int = Field(strict=True, ge=1)
+    account_selection_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class MockAutomationControlRequest(BaseModel):
@@ -34,6 +35,10 @@ class MockAutomationControlRequest(BaseModel):
 class MockAutomationResumeRequest(MockAutomationControlRequest):
     expected_settings_revision: int = Field(strict=True, ge=1)
     credential_revision: int = Field(strict=True, ge=1)
+
+
+class MockAutomationReplaceRequest(MockAutomationResumeRequest):
+    account_selection_id: str = Field(min_length=1, max_length=128)
 
 
 def create_mock_automation_router(
@@ -94,6 +99,7 @@ def create_mock_automation_router(
             spec_id=request.spec_id,
             expected_settings_revision=request.expected_settings_revision,
             credential_revision=request.credential_revision,
+            **({"account_selection_id": request.account_selection_id} if request.account_selection_id is not None else {}),
         ))
 
     @router.post("/api/v1/mock-automation/stop", dependencies=[Depends(authorize)])
@@ -123,6 +129,11 @@ def create_mock_automation_router(
             credential_revision=request.credential_revision,
             reason=request.reason,
         ))
+
+    @router.post('/api/v1/mock-automation/replace-selection', dependencies=[Depends(authorize)])
+    async def replace_mock_automation_selection(request: MockAutomationReplaceRequest):
+        supervisor = require_mock_automation_supervisor()
+        return await run_mock_automation_operation(supervisor.replace_selection(**request.model_dump()))
 
     @router.post('/api/v1/mock-automation/unfilled-population',dependencies=[Depends(authorize)])
     async def publish_native_unfilled_population(request: Request):

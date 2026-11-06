@@ -18,6 +18,18 @@ class MockAccountExecutionPostgresTests(unittest.TestCase):
         from tests.unit.test_mock_automation_account_execution import verify_group_native_reservation
         verify_group_native_reservation(self,self.store)
 
+    def test_actual_unknown_peer_blocks_new_claim_at_stricter_account_limit(self):
+        from tests.unit.test_mock_automation_account_execution import verify_group_native_unknown_boundary
+        verify_group_native_unknown_boundary(self, self.store)
+
+    def test_actual_unknown_peer_blocks_already_queued_native_submission(self):
+        from tests.unit.test_mock_automation_account_execution import verify_group_native_unknown_boundary
+        verify_group_native_unknown_boundary(self, self.store, already_queued=True)
+
+    def test_verified_physical_peer_reservation_is_counted_once(self):
+        from tests.unit.test_mock_automation_account_execution import verify_group_native_peer_reservation
+        verify_group_native_peer_reservation(self, self.store)
+
     def test_common_capital_failure_rolls_back_the_second_plan_and_intent(self):
         from tests.unit.test_mock_automation_account_execution import verify_group_native_reservation
         verify_group_native_reservation(self,self.store,capital=100_000)

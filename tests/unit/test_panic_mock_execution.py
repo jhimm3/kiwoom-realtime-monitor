@@ -287,6 +287,7 @@ def prepare_panic_native(case, variant='P0', native_factory=None, *, stopped='co
 
 
 def refresh_panic_cut(ctx, positions):
+    from tests.unit.test_mock_automation_account_execution import native_account_observation
     from kiwoom_monitor.application.mock_automation_risk import build_mock_automation_risk_snapshot
     from kiwoom_monitor.application.mock_automation_recovery import record_mock_automation_recovery_from_risk
     from kiwoom_monitor.application.trade_cost_service import DailyTradeCost
@@ -311,7 +312,8 @@ def refresh_panic_cut(ctx, positions):
         broker_query_completed_at=ctx.clock[0])
     ctx.repository.save_mock_automation_risk_snapshot(ctx.risk)
     record_mock_automation_recovery_from_risk(ctx.repository, ctx.runtime, ctx.recovery, ctx.risk,
-        account_ref=ctx.runtime.account_ref, spec_id=ctx.spec.spec_id)
+        account_ref=ctx.runtime.account_ref, spec_id=ctx.spec.spec_id,
+        observation=native_account_observation(ctx, ctx.recovery, ctx.risk))
 
 
 def panic_entry(ctx):
@@ -642,7 +644,7 @@ async def verify_panic_current_buy(case, native_factory=None, *, variant='P0', l
     case.assertEqual(2, head.quantity)
     case.assertTrue(cut['risk'].reconciliation_complete)
     record_mock_automation_recovery_from_risk(ctx.repository, ctx.runtime, cut['recovery'], cut['risk'],
-        account_ref=ctx.runtime.account_ref, spec_id=ctx.spec.spec_id)
+        account_ref=ctx.runtime.account_ref, spec_id=ctx.spec.spec_id, observation=cut['observation'])
     ctx.recovery, ctx.risk = cut['recovery'], cut['risk']
     gate, sell, _ = panic_exit(ctx, head.plan, ctx.event['panic_entry_setup']['failure_price'])
     case.assertIsNotNone(sell, gate); case.assertEqual(2, sell.intent.quantity)
@@ -682,7 +684,7 @@ async def verify_panic_current_sell(case, native_factory=None):
     await ctx.bundle.monitor.refresh_recovery()
     cut = ctx.bundle.monitor.latest_automation_execution_cut
     record_mock_automation_recovery_from_risk(ctx.repository, ctx.runtime, cut['recovery'], cut['risk'],
-        account_ref=ctx.runtime.account_ref, spec_id=ctx.spec.spec_id)
+        account_ref=ctx.runtime.account_ref, spec_id=ctx.spec.spec_id, observation=cut['observation'])
     ctx.recovery, ctx.risk = cut['recovery'], cut['risk']
     head = ctx.execution.load_plan_position(ctx.runtime.account_ref, ctx.runtime.run_id, ctx.buy.intent.symbol, ctx.buy.intent.plan)
     failure = ctx.event['panic_entry_setup']['failure_price']
@@ -776,7 +778,8 @@ async def assemble_panic_runner(case, ctx):
     return supervisor, runner
 
 
-async def verify_panic_runner(case, native_factory=None, *, variant='P0', kind='failure', zero_fill=False):
+async def verify_panic_runner(case, native_factory=None, *, variant='P0', kind='failure', zero_fill=False,
+                              after_partial_fill=None):
     import asyncio
     from unittest.mock import patch
     from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
@@ -818,6 +821,8 @@ async def verify_panic_runner(case, native_factory=None, *, variant='P0', kind='
     if not zero_fill: ctx.book.fill(buy.broker_order_id, 2, 'panic-runner-partial')
     await ctx.bundle.monitor.refresh_recovery()
     await runner.episode.advance_once()
+    if after_partial_fill is not None:
+        await after_partial_fill(ctx, runner)
     setup = ctx.event['panic_entry_setup']
     first = setup['failure_price'] if kind == 'failure' else setup['target_price']
     ctx.clock[0] += timedelta(seconds=1)

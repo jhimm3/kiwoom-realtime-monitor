@@ -90,6 +90,52 @@ def _contract_headers(response):
             raise AssertionError("Generated HTTP correlation is not an opaque UUID")
     return headers
 
+
+def _s12_contract_additions():
+    """Independently reviewed additions; never capture the running app as an oracle."""
+    return json.loads((REALTIME_BASELINE.parent / "s12_additive_20261106.json").read_text(encoding="utf-8"))
+
+
+def _s12_diagnostic_storage_hash(original_hash, database_path, **kwargs):
+    """Assert migration25 and project only its index/receipt in a memory copy."""
+    migration = _s12_contract_additions()["diagnostic_migration"]
+    connect = sqlite3.connect
+    with closing(connect(Path(database_path).resolve().as_uri() + "?mode=ro", uri=True)) as source, \
+            closing(connect(":memory:")) as projected:
+        source.backup(projected)
+        rows = projected.execute(
+            "SELECT version,name,applied_at FROM central_schema_migrations WHERE version>=25"
+        ).fetchall()
+        if rows != [tuple(migration["row"])]:
+            raise AssertionError(("expected exact observation-window migration and injected KST clock", rows))
+        index = projected.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                                  (migration["index_name"],)).fetchall()
+        if index != [(migration["index_ddl"],)]:
+            raise AssertionError(("expected exact observation-window index", index))
+        # Diagnostic reads must not create observations, orders or selected
+        # recovery state. The old full hash still covers every other row/value.
+        for table in ("central_observation_revisions", "central_execution_intents",
+                      "central_execution_events", "central_execution_runtime_leases"):
+            if projected.execute(f"SELECT COUNT(*) FROM {table}").fetchone() != (0,):
+                raise AssertionError(("diagnostic fixture acquired unexpected data", table))
+        documents = projected.execute("SELECT collection,owner,document_key FROM central_documents").fetchall()
+        if documents not in ([], [("server_operational_settings", "global", "current")]):
+            raise AssertionError(("diagnostic fixture acquired unexpected documents", documents))
+        projected.execute("DROP INDEX idx_central_observation_window")
+        projected.execute("DELETE FROM central_schema_migrations WHERE version=25")
+        projected.commit()
+        # Reuse every shared clock/BODY assertion unchanged, supplying this
+        # memory source for just its initial backup. No native write is allowed.
+        def projected_connect(path, *args, **options):
+            if path == database_path:
+                return projected
+            if path != ":memory:":
+                raise AssertionError(("unexpected contract-hash connection", path))
+            return connect(path, *args, **options)
+
+        with patch.object(sqlite3, "connect", side_effect=projected_connect):
+            return original_hash(database_path, **kwargs)
+
 async def capture_server_lifespan_contract(app_factory, database_path, mode, failure="", *, probe_vault=False,
                                          original_behavior=False, also_fail=""):
     """Actual app lifespan/SQLite/vault; control network owners' start/close methods."""
@@ -2607,6 +2653,29 @@ class CentralServerAppTests(unittest.TestCase):
             # Reported article members carry nested JSON source evidence, while
             # native article/BODY/job authority stays with the existing owner.
             ai_properties["articles"]["items"]["additionalProperties"] = True
+            # S12 adds nine operations and explicit optional fields. Merge at
+            # method/property granularity so every released contract survives.
+            s12 = _s12_contract_additions()
+            for path, operations in s12["reviewed_additive_paths"].items():
+                target = case["schema"]["paths"].setdefault(path, {})
+                self.assertTrue(target.keys().isdisjoint(operations))
+                target.update(operations)
+            schemas = case["schema"]["components"]["schemas"]
+            self.assertTrue(schemas.keys().isdisjoint(s12["reviewed_additive_schemas"]))
+            schemas.update(s12["reviewed_additive_schemas"])
+            for name, properties in s12["optional_schema_properties"].items():
+                self.assertTrue(schemas[name]["properties"].keys().isdisjoint(properties))
+                self.assertTrue(set(schemas[name].get("required", ())).isdisjoint(properties))
+                schemas[name]["properties"].update(properties)
+            parameter = s12["optional_parameter"]
+            parameters = case["schema"]["paths"][parameter["path"]][parameter["method"]]["parameters"]
+            self.assertNotIn(parameter["parameter"]["name"], [row["name"] for row in parameters])
+            position = next(index for index, row in enumerate(parameters) if row["name"] == parameter["before"])
+            parameters.insert(position, parameter["parameter"])
+            for insertion in s12["route_insertions"]:
+                self.assertTrue(set(case["route_order"]).isdisjoint(insertion["paths"]))
+                position = case["route_order"].index(insertion["before"])
+                case["route_order"][position:position] = insertion["paths"]
         actual = []
         for configured in (False, True):
             with tempfile.TemporaryDirectory() as directory:
@@ -2701,13 +2770,15 @@ class CentralServerAppTests(unittest.TestCase):
     def test_diagnostic_read_responses_match_pre_extraction_baseline(self):
         expected = json.loads(DIAGNOSTIC_READ_BASELINE.read_text(encoding="utf-8"))["results"]
         additions = json.loads(ADDITIVE_CONTRACT.read_text(encoding="utf-8"))
+        migration = _s12_contract_additions()["diagnostic_migration"]
         for cases in expected:
             for case in cases:
                 body = case["body"]
                 if case["name"] == "resources":
                     other = next(row for row in body["storage_categories"] if row["category"] == "other")
                     self.assertEqual({"category": "other", "label": "설정·기타", "estimated_bytes": 0,
-                                      "rows": 24, "tables": 5}, other)
+                                      "rows": migration["resource_other_rows"]["before"], "tables": 5}, other)
+                    other["rows"] = migration["resource_other_rows"]["after"]
                 if isinstance(body, dict) and "workloads" in body:
                     morning = json.loads(NEWS_MORNING_CONTRACT.read_text(encoding="utf-8"))["morning_workload"]
                     morning["diagnostic_switch_available"] = case["name"] != "workloads-disabled"
@@ -2745,11 +2816,14 @@ class CentralServerAppTests(unittest.TestCase):
                 case["headers"]["content-length"] = str(len(json.dumps(
                     body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")))
         actual = []
+        original_hash = contract_storage_hash
         for configured in (False, True):
             with tempfile.TemporaryDirectory() as directory:
                 with diagnostic_read_contract_app(create_app, Path(directory) / "diagnostic.sqlite3", configured) as fixture:
                     with TestClient(fixture[0]) as client:
-                        actual.append(capture_diagnostic_read_http_contract(client, *fixture))
+                        with patch.dict(globals(), {"contract_storage_hash": lambda path, **options:
+                                _s12_diagnostic_storage_hash(original_hash, path, **options)}):
+                            actual.append(capture_diagnostic_read_http_contract(client, *fixture))
         self.assertEqual(expected, actual)
 
     def test_mock_order_native_ledger_and_gateway_selection_match_pre_extraction_baseline(self) -> None:
@@ -4074,6 +4148,11 @@ class CentralServerAppTests(unittest.TestCase):
             ("GET", "/api/v1/themes/snapshot"),
             ("WEBSOCKET", "/api/v1/realtime"),
         }
+        s12 = _s12_contract_additions()["reviewed_additive_paths"]
+        additions = {(method.upper(), path) for path, operations in s12.items() for method in operations}
+        self.assertEqual(9, len(additions))
+        self.assertTrue(expected.isdisjoint(additions))
+        expected.update(additions)
         self.assertEqual(expected, actual)
 
     def test_research_observation_export_is_authenticated_and_page_stable(self) -> None:
@@ -4420,6 +4499,49 @@ class CentralServerAppTests(unittest.TestCase):
                 json.loads(json.dumps(document_leader_breakout_policy().to_dict())),
                 loaded["shadow_candidate_config"],
             )
+
+    def test_operational_spec_shadow_map_persists_exact_members_and_empty_map_without_singleton_fallback(self):
+        from tests.unit.test_candidate_monitor import _config
+        from tests.unit.test_leader_breakout import policy
+        from kiwoom_monitor.central_server.candidate_monitor import CandidateMonitorGroup
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "spec-shadow.sqlite3"
+            settings = CentralServerSettings(f"sqlite:///{path}", "private-token",
+                autonomous_top20_enabled=False, market_event_collection_enabled=False, credential_directory="")
+            headers = {"Authorization": "Bearer private-token"}
+            policies = json.loads(json.dumps({"leader": policy().to_dict(), "legacy-minute": _config().to_dict()}))
+            app = create_app(settings)
+            with TestClient(app) as client:
+                original = client.get("/api/v1/settings/operations", headers=headers).json()
+                self.assertNotIn("shadow_candidate_configs", original)
+                denied = client.put("/api/v1/settings/operations", json={"shadow_candidate_configs": policies})
+                self.assertEqual(401, denied.status_code)
+                saved = client.put("/api/v1/settings/operations", headers=headers, json={
+                    "expected_revision": original["revision"], "shadow_candidate_enabled": True,
+                    "shadow_candidate_configs": policies})
+                self.assertEqual(200, saved.status_code, saved.text)
+                self.assertEqual(policies, saved.json()["shadow_candidate_configs"])
+                self.assertEqual(original["shadow_candidate_config"], saved.json()["shadow_candidate_config"])
+                self.assertIsInstance(app.state.candidate_monitor, CandidateMonitorGroup)
+                self.assertTrue(all(item._task is None for item in app.state.candidate_monitor._monitors))
+                invalid = client.put("/api/v1/settings/operations", headers=headers, json={
+                    "expected_revision": saved.json()["revision"], "shadow_candidate_configs": {"bad": {}}})
+                self.assertEqual(422, invalid.status_code)
+                self.assertEqual(saved.json(), client.get("/api/v1/settings/operations", headers=headers).json())
+            restored_app = create_app(settings)
+            with TestClient(restored_app) as client:
+                restored = client.get("/api/v1/settings/operations", headers=headers).json()
+                self.assertEqual(saved.json(), restored)
+                self.assertEqual(set(policies), set(restored_app.state.candidate_monitor._members))
+                empty = client.put("/api/v1/settings/operations", headers=headers,
+                    json={"expected_revision": restored["revision"], "shadow_candidate_configs": {}})
+                self.assertEqual(200, empty.status_code, empty.text)
+                self.assertEqual({}, empty.json()["shadow_candidate_configs"])
+                self.assertEqual({}, restored_app.state.candidate_monitor._members)
+                self.assertIsNone(restored_app.state.candidate_monitor._task)
+                self.assertTrue(empty.json()["shadow_candidate_enabled"])
+            with TestClient(create_app(settings)) as client:
+                self.assertEqual(empty.json(), client.get("/api/v1/settings/operations", headers=headers).json())
 
     def test_operational_settings_conflict_and_failed_write_preserve_latest_state(self):
         from unittest.mock import patch

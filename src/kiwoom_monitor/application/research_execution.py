@@ -338,8 +338,9 @@ class PaperExecutionEngine:
             raise ValueError(f"unsupported research session profile: {session_profile}")
         self.execution = execution
         self.strategy = strategy
-        from .leader_breakout import LeaderBreakoutConfig
+        from .leader_breakout import LeaderBreakoutConfig, leader_reentry_enabled
         self._leader = isinstance(strategy, LeaderBreakoutConfig)
+        self._leader_reentry = self._leader and leader_reentry_enabled(strategy)
         from kiwoom_monitor.domain.strategy_contract import LeaderBreakoutStagedExecutionContract
         self._staged_leader = self._leader and isinstance(strategy.execution_contract, LeaderBreakoutStagedExecutionContract)
         self._leader_entry_notional = 0
@@ -485,10 +486,14 @@ class PaperExecutionEngine:
             return (self._notice(decision, side, "ORDER_REJECTED", "position_already_open"),)
         if side == "SELL" and self.portfolio.position is None:
             return (self._notice(decision, side, "ORDER_REJECTED", "position_missing"),)
+        if self._leader_reentry and action == 'ENTER' and position is None:
+            self._leader_entry_notional = 0  # A new plan; the old FIFO/P&L and history remain.
         if side == "BUY":
             reason = session_entry_time_rejection(self.strategy, _aware_datetime(decision.decided_at))
             if reason:
-                self.strategy_state = StrategyState(emitted_candidate_keys=resulting_state.emitted_candidate_keys)
+                self.strategy_state = StrategyState(
+                    cooldown_until=resulting_state.cooldown_until if self._leader_reentry else '',
+                    emitted_candidate_keys=resulting_state.emitted_candidate_keys)
                 return (self._notice(decision, side, "ORDER_REJECTED", reason),)
         quantity = (
             decision.quantity if side == "BUY" or self._completed_close or self._staged_leader else position.quantity
@@ -987,6 +992,7 @@ class PaperExecutionEngine:
         )
         if pending.side == "BUY" and self.portfolio.position is None:
             self.strategy_state = StrategyState(
+                cooldown_until=self.strategy_state.cooldown_until if self._leader_reentry else '',
                 emitted_candidate_keys=self.strategy_state.emitted_candidate_keys,
             )
         return self._event(
@@ -1014,6 +1020,7 @@ class PaperExecutionEngine:
             )
             if pending.side == "BUY" and self.portfolio.position is None:
                 self.strategy_state = StrategyState(
+                    cooldown_until=self.strategy_state.cooldown_until if self._leader_reentry else '',
                     emitted_candidate_keys=self.strategy_state.emitted_candidate_keys,
                 )
             events.append(self._event(
@@ -1069,6 +1076,7 @@ class PaperExecutionEngine:
                 )
                 if self.portfolio.position is None:
                     self.strategy_state = StrategyState(
+                        cooldown_until=self.strategy_state.cooldown_until if self._leader_reentry else '',
                         emitted_candidate_keys=self.strategy_state.emitted_candidate_keys,
                     )
                 return self._event(
@@ -1191,7 +1199,10 @@ class PaperExecutionEngine:
         if remaining == 0:
             fill_time = bar.bar_end if event_type == "RISK_FILL" else bar.bar_start
             ended = _aware_datetime(fill_time).astimezone(timezone.utc)
-            self.strategy_state = StrategyState(emitted_candidate_keys=self.strategy_state.emitted_candidate_keys) if self._leader else StrategyState(
+            boundary = (max(_aware_datetime(fill_time), _aware_datetime(bar.available_at)).isoformat()
+                        if self._leader_reentry else '')
+            self.strategy_state = StrategyState(cooldown_until=boundary,
+                emitted_candidate_keys=self.strategy_state.emitted_candidate_keys) if self._leader else StrategyState(
                 status="cooldown", cooldown_until=(
                     ended + timedelta(seconds=self.strategy.cooldown_seconds)
                 ).isoformat(),

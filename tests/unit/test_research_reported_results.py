@@ -292,8 +292,19 @@ evidence = {**legacy, 'result_id': 'run-evidence-fixture', 'payload': {
     'logical_result_hash': 'c'*64, 'result': {'version': 'account-risk-result/v1'}, 'order_authorized': False,
 }}
 headers = {'Authorization':'Bearer result', 'X-Kiwoom-Expected-Result-Owner':encode_reported_result_owner('producer')}
+frozen = []
+for mode, family in (('daily_decline_experiment', 'daily_decline/v1'), ('micro_experiment', 'micro_execution/v1')):
+    run_id = 'run-frozen-' + mode
+    spec = {**evidence['payload']['spec'], 'mode': mode, 'family': family, 'source_kind': 'frozen_research_evidence'}
+    if mode == 'daily_decline_experiment':
+        spec.update(frozen_manifest_sha256='d'*64, frozen_dataset_id='native-daily-frozen', revision_ids_hash='e'*64)
+    frozen.append({**evidence, 'result_id': run_id, 'payload': {
+        **evidence['payload'], 'run_id': run_id, 'spec': spec,
+        'result': {'source_kind': 'frozen_research_evidence', 'order_authorized': False,
+                   'input_assessment': {'native_confirmation': False, 'missing_inputs': ['fill_cost_source:detail-1']},
+                   'evidence_provenance': {'source_kind': 'historical_reconstruction', 'source_version': 'frozen/v2'}}}})
 with TestClient(create_app(settings)) as client:
-    for document in (legacy, evidence):
+    for document in (legacy, evidence, *frozen):
         accepted = client.post('/api/v1/research/reported-results', json=document, headers=headers)
         assert accepted.status_code == 200, accepted.text
         assert accepted.json()['receipt']['scientific_verified'] is False

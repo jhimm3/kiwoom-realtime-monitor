@@ -558,6 +558,68 @@ class OrderLifecycleTests(unittest.TestCase):
         self.assertEqual(OrderState.FILLED, filled.state)
         self.assertEqual(3, filled.filled_quantity)
 
+    def test_fresh_partial_observations_preserve_unknown_cancel_through_restart_and_late_details(self):
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_remaining_quantity
+        transport = _Transport(cancel_error=SubmissionUnknown("cancel response lost"))
+        lifecycle = OrderLifecycle(self.repository, transport, now_provider=lambda: NOW)
+        lifecycle.queue(_intent())
+        lifecycle.submit("intent-1", _account())
+        first = BrokerFill("first", 1, 70_000, NOW + timedelta(seconds=1))
+        lifecycle.reconcile("intent-1", BrokerOrderSnapshot("broker-1", "account-1", "005930",
+            OrderState.PARTIALLY_FILLED, 1, 2, NOW + timedelta(seconds=2), (first,)))
+        self.assertEqual(OrderState.CANCEL_PENDING, lifecycle.cancel("intent-1").state)
+        replacement = _Transport()
+        repository = ExecutionRepository(SQLiteQueryStore(Path(self.directory.name) / "central.sqlite3"))
+        restarted = OrderLifecycle(repository, replacement, now_provider=lambda: NOW)
+        for second, reported, details in ((3, 1, (first,)), (4, 2, (first,)),
+                (5, 2, (first, BrokerFill("late", 1, 70_100, NOW + timedelta(seconds=4))))):
+            current = restarted.reconcile("intent-1", BrokerOrderSnapshot("broker-1", "account-1", "005930",
+                OrderState.PARTIALLY_FILLED, reported, 3 - reported, NOW + timedelta(seconds=second), details))
+            self.assertEqual(OrderState.CANCEL_PENDING, current.state, repository.events("intent-1"))
+            self.assertEqual(3 - reported, execution_remaining_quantity(current))
+            with self.assertRaisesRegex(ValueError, "reconciled and accepted"):
+                restarted.cancel("intent-1")
+            self.assertEqual(current, restarted.submit("intent-1", _account()))
+        self.assertEqual((2, 2), (current.filled_quantity, current.detailed_filled_quantity))
+        self.assertTrue(all(row["state"] == "CANCEL_PENDING" for row in repository.events("intent-1")
+            if row["event_type"] in {"FILL", "BROKER_FILL_AGGREGATE"} and row["broker_as_of"] >
+                (NOW + timedelta(seconds=2)).isoformat()))
+        terminal = restarted.reconcile("intent-1", BrokerOrderSnapshot("broker-1", "account-1", "005930",
+            OrderState.CANCELLED, 2, 0, NOW + timedelta(seconds=6), details))
+        self.assertEqual((OrderState.CANCELLED, 2, 0), (terminal.state, terminal.detailed_filled_quantity,
+            execution_remaining_quantity(terminal)))
+        self.assertEqual(2, len([row for row in repository.events("intent-1") if row["event_type"] == "FILL"]))
+        self.assertEqual((1, 1, 0, 0), (transport.submit_calls, transport.cancel_calls,
+            replacement.submit_calls, replacement.cancel_calls))
+
+    def test_physical_leg_fresh_partial_does_not_erase_its_uncertain_cancel(self):
+        from tests.unit.test_order_amendment import amendment_fixture, broker_snapshot
+        _, store, repository, transport, clock, lifecycle, intent = amendment_fixture(self)
+        parent_fill = BrokerFill("parent-first", 2, 70_000, NOW + timedelta(seconds=1))
+        lifecycle.reconcile(intent.intent_id, broker_snapshot(intent, "broker-1", 2, 4, 1, (parent_fill,)))
+        clock[0] += timedelta(seconds=2)
+        lifecycle.amend(intent.intent_id, 4, 70_100)
+        transport.cancel_error = SubmissionUnknown("child cancel response lost")
+        pending = lifecycle.cancel(intent.intent_id, broker_order_id="broker-2")
+        self.assertEqual(OrderState.CANCEL_PENDING, pending.state)
+        parent = pending.broker_legs[0]
+        restarted = OrderLifecycle(ExecutionRepository(store), transport, now_provider=lambda: clock[0])
+        for quantity in (1, 2):
+            details = tuple(BrokerFill(f"child-{n}", 1, 70_100, NOW + timedelta(seconds=3 + n))
+                            for n in range(1, quantity + 1))
+            current = restarted.reconcile(intent.intent_id, broker_snapshot(intent, "broker-2", quantity,
+                3 - quantity, 4 + quantity, details))
+            self.assertEqual(OrderState.CANCEL_PENDING, current.state)
+            self.assertEqual((parent, OrderState.CANCEL_PENDING), (current.broker_legs[0], current.broker_legs[1].state))
+            with self.assertRaisesRegex(ValueError, "explicit reconciled broker order"):
+                restarted.cancel(intent.intent_id, broker_order_id="broker-2")
+        terminal = restarted.reconcile(intent.intent_id, broker_snapshot(intent, "broker-2", 2, 0, 7,
+            details, state=OrderState.CANCELLED))
+        self.assertEqual((OrderState.PARTIALLY_FILLED, 4, OrderState.CANCELLED),
+            (terminal.state, terminal.detailed_filled_quantity, terminal.broker_legs[1].state))
+        self.assertEqual(parent, terminal.broker_legs[0])
+        self.assertEqual((1, 1, 1), (transport.submit_calls, transport.cancel_calls, len(transport.amend_calls)))
+
     def test_rejected_partial_cancel_preserves_fill_and_retry_reconciliation_deduplicates_it(self) -> None:
         transport = _Transport(cancel_error=SubmissionRejected("broker rejected partial cancel"))
         lifecycle = OrderLifecycle(self.repository, transport, now_provider=lambda: NOW)

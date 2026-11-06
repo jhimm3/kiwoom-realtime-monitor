@@ -222,6 +222,109 @@ class CandidateAlertTests(unittest.TestCase):
                 dialog.deleteLater()
 
 
+class CandidateShadowSpecSettingsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import json
+        from tests.unit.test_leader_breakout import policy
+        from kiwoom_monitor.application.section12_minute_research import MINUTE_SHADOW_VERSION
+        # Match the API's JSON array representation of frozen contexts.
+        self.leader = json.loads(json.dumps(policy().to_dict()))
+        self.minute = {"version": MINUTE_SHADOW_VERSION, "signal_valid_seconds": 31, "strategy": {
+            "capital_won": 101000, "policy": {"variant": "B0", "quantity": 2, "exit_at_kst": "15:18",
+                "theme_id": None, "theme_role": None, "exit_on_dependency_loss": False}}}
+        self.identities = ("mock_automation_spec_" + "a" * 64, "mock_automation_spec_" + "b" * 64)
+        self.saved = {"revision": 14, "applied_revision": 13, "apply_status": "RECOVERY_REQUIRED",
+            "shadow_candidate_enabled": True, "shadow_candidate_config": deepcopy(self.minute),
+            "shadow_candidate_configs": {self.identities[0]: deepcopy(self.leader), self.identities[1]: deepcopy(self.minute)}}
+        with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()):
+            self.dialog = CandidateMonitorDialog(FakeClient())
+        self.dialog._apply_operational_settings(self.saved)
+
+    def tearDown(self):
+        from PySide6.QtCore import QCoreApplication, QEvent
+        self.dialog.stop(); self.dialog.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.app.processEvents()
+
+    def test_spec_selector_loads_exact_policies_and_keeps_global_choice_and_apply_revision(self):
+        import json
+        original = deepcopy(self.saved)
+        self.dialog._shadow_target.setCurrentIndex(1)
+        self.assertEqual(self.leader, json.loads(self.dialog._leader_policy_editor.toPlainText()))
+        self.assertTrue(self.dialog._candidate_enabled.isChecked())
+        self.assertIn("명세별 후보 관찰 전체", self.dialog._candidate_enabled.text())
+        self.assertIn("서버 저장 #14", self.dialog._server_policy_status.text())
+        self.assertIn("서버 적용 #13 · 적용 복구 필요", self.dialog._server_policy_status.text())
+        self.dialog._candidate_enabled.setChecked(False)
+        self.dialog._shadow_target.setCurrentIndex(2)
+        self.assertEqual(self.minute, json.loads(self.dialog._leader_policy_editor.toPlainText()))
+        self.assertFalse(self.dialog._candidate_enabled.isChecked())
+        self.dialog._strategy_selector.setCurrentIndex(0)
+        self.assertFalse(self.dialog._candidate_enabled.isChecked())
+        self.dialog._shadow_target.setCurrentIndex(0)
+        self.assertIn("현재 명세별 운용에 사용 안 함", self.dialog._server_policy_status.text())
+        self.assertFalse(self.dialog._candidate_enabled.isChecked())
+        self.assertEqual(original, self.saved)
+
+    def test_selected_spec_edit_submits_whole_map_with_cas_and_preserves_other_policy_and_singleton(self):
+        import json
+        self.dialog._shadow_target.setCurrentIndex(1)
+        changed = {**deepcopy(self.leader), "signal_valid_seconds": 17}
+        self.dialog._leader_policy_editor.setPlainText(json.dumps(changed))
+        with patch.object(self.dialog, "_start_settings_request") as save:
+            self.dialog._save_operational_settings()
+        save.assert_called_once()
+        self.assertEqual({"expected_revision": 14, "shadow_candidate_enabled": True,
+            "shadow_candidate_configs": {self.identities[0]: changed, self.identities[1]: self.minute}},
+            json.loads(json.dumps(save.call_args.args[0])))
+        self.assertEqual(self.leader, self.saved["shadow_candidate_configs"][self.identities[0]])
+        self.assertEqual(self.minute, self.saved["shadow_candidate_config"])
+        self.assertNotIn("shadow_candidate_config", save.call_args.args[0])
+
+    def test_new_spec_link_requires_explicit_identity_and_valid_policy_without_enabling_global_observation(self):
+        import json
+        self.dialog._shadow_target.setCurrentIndex(1)
+        self.dialog._candidate_enabled.setChecked(False)
+        with patch.object(self.dialog, "_start_settings_request") as save:
+            self.dialog._connect_shadow_spec()
+            save.assert_not_called()
+            self.assertIn("식별자를 입력", self.dialog._settings_status.text())
+            identity = "mock_automation_spec_" + "c" * 64
+            self.dialog._shadow_spec_id.setText(identity)
+            self.dialog._leader_policy_editor.setPlainText("invalid JSON")
+            self.dialog._connect_shadow_spec()
+            save.assert_not_called()
+            self.assertIn("정책 확인 필요", self.dialog._settings_status.text())
+            self.dialog._leader_policy_editor.setPlainText(json.dumps(self.leader))
+            self.dialog._connect_shadow_spec()
+            save.assert_called_once()
+            self.assertEqual({"expected_revision": 14, "shadow_candidate_enabled": False,
+                "shadow_candidate_configs": {**self.saved["shadow_candidate_configs"], identity: self.leader}},
+                json.loads(json.dumps(save.call_args.args[0])))
+        self.assertNotIn(identity, self.saved["shadow_candidate_configs"])
+
+    def test_remove_last_spec_saves_empty_map_and_keeps_singleton_inactive_after_readback(self):
+        single = {**self.saved, "shadow_candidate_configs": {self.identities[0]: self.leader}}
+        self.dialog._apply_operational_settings(single)
+        self.dialog._shadow_target.setCurrentIndex(1)
+        with patch.object(self.dialog, "_start_settings_request") as save:
+            self.dialog._remove_shadow_spec()
+        save.assert_called_once_with({"expected_revision": 14, "shadow_candidate_enabled": True,
+                                      "shadow_candidate_configs": {}})
+        self.dialog._apply_operational_settings({**single, "revision": 15, "applied_revision": 15,
+            "apply_status": "APPLIED", "shadow_candidate_configs": {}})
+        self.assertEqual(1, self.dialog._shadow_target.count())
+        self.assertIn("명세별 정책 0개", self.dialog._server_policy_status.text())
+        self.assertIn("연결 없는 명세의 신규 후보는 꺼집니다", self.dialog._server_policy_status.text())
+        self.assertIn("명세별 운용에 사용 안 함", self.dialog._shadow_target.currentText())
+        self.assertFalse(self.dialog._shadow_remove.isEnabled())
+        self.assertEqual(self.minute, self.dialog._operational_values["shadow_candidate_config"])
+
+
 class RamShadowDialogTests(unittest.TestCase):
     def test_minute_primary_and_five_minute_confirmation_are_visible_without_seconds(self):
         from test_market_research_features import MinuteMarketCandidateTests

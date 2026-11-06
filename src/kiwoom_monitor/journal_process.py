@@ -274,6 +274,7 @@ class JournalWindow(QMainWindow):
             self._selected_history_range: tuple[date, date] | None = None
             self._visible_fills: tuple[TradeFill, ...] = ()
             self._visible_execution_plans = {}
+            self._visible_execution_members = {}
             self._visible_costs: tuple[DailyTradeCost, ...] = ()
             self._episodes: tuple[TradeEpisode, ...] = ()
             self._all_episodes: tuple[TradeEpisode, ...] = ()
@@ -1053,6 +1054,7 @@ class JournalWindow(QMainWindow):
         self._visible_fills = result.fills
         self._visible_costs = result.costs
         self._visible_execution_plans = result.execution_plans
+        self._visible_execution_members = getattr(result, "execution_members", {})
         self._all_episodes = result.episodes
         self._apply_history_filters()
         if not self._episodes:
@@ -1381,11 +1383,17 @@ class JournalWindow(QMainWindow):
                       f"{fill.quantity:,}", f"{fill.price:,}", f"{amount:,}", fill.order_type, fill.market, fill.order_no)
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value)); item.setData(Qt.ItemDataRole.UserRole, fill)
-                if column == 8 and (plan := self._visible_execution_plans.get(fill)) is not None:
-                    item.setToolTip(
-                        f"<qt>모의 실행 계획 {html.escape(plan.plan_id)}<br>"
-                        f"정책 {html.escape(plan.policy_ref)} · 승인 판본 {plan.expected_revision}</qt>"
-                    )
+                if column == 8:
+                    attribution = []
+                    if (plan := self._visible_execution_plans.get(fill)) is not None:
+                        attribution.extend((
+                            f"모의 실행 계획 {html.escape(plan.plan_id)}",
+                            f"정책 {html.escape(plan.policy_ref)} · 승인 판본 {plan.expected_revision}",
+                        ))
+                    if (member := getattr(self, "_visible_execution_members", {}).get(fill)) is not None:
+                        attribution.append(f"실행 멤버 {html.escape(member)}")
+                    if attribution:
+                        item.setToolTip("<qt>" + "<br>".join(attribution) + "</qt>")
                 self._fills_table.setItem(row, column, item)
         self._fills_table.blockSignals(False)
         self._fills_table.resizeColumnsToContents()

@@ -34,6 +34,17 @@ STRATEGY_FACTOR_VERSIONS = frozenset({
     (RANK_PERSISTENCE_ID, FACTOR_VERSION),
 })
 
+
+def shadow_candidate_config_for_spec(settings, spec_id=None):
+    """Select the explicit member policy, preserving singleton documents verbatim."""
+    if not isinstance(settings, Mapping):
+        return None
+    if "shadow_candidate_configs" in settings:
+        configs = settings["shadow_candidate_configs"]
+        return configs.get(spec_id) if isinstance(configs, Mapping) else None
+    return settings.get("shadow_candidate_config")
+
+
 def _require_factor_version(factor_id: str, version: str) -> None:
     key = (str(factor_id), str(version))
     if key not in STRATEGY_FACTOR_VERSIONS:
@@ -359,7 +370,9 @@ class LeaderBreakoutExecutionContract:
     def __post_init__(self):
         if self.version != "leader_breakout_execution/v1" and not (
                 self.version == "leader_breakout_execution/v2"
-                and isinstance(self, LeaderBreakoutStagedExecutionContract)):
+                and isinstance(self, LeaderBreakoutStagedExecutionContract)) and not (
+                self.version == 'leader_breakout_execution/v3'
+                and isinstance(self, LeaderBreakoutReentryExecutionContract)):
             raise ValueError("unsupported leader execution contract")
         for name, allowed in (("sizing_mode", "fixed_quantity"), ("order_type", "LIMIT"),
                 ("exit_quantity_rule", "all_owned"), ("research_exit_observation", "completed_minute_close")):
@@ -442,15 +455,32 @@ class LeaderBreakoutStagedExecutionContract(LeaderBreakoutExecutionContract):
             raise ValueError('explicit unique ordered leader position steps required')
 
 
+LEADER_REENTRY_RULE = 'new_independent_setup_after_confirmed_flat/v1'
+
+
+@dataclass(frozen=True)
+class LeaderBreakoutReentryExecutionContract(LeaderBreakoutStagedExecutionContract):
+    """Opt in to a fresh independently evidenced setup after actual full exit."""
+    version: str = 'leader_breakout_execution/v3'
+    reentry_rule: str | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.reentry_rule != LEADER_REENTRY_RULE:
+            raise ValueError('v3 requires the explicit independent-setup reentry rule')
+
+
 def leader_execution_contract_from_dict(document):
     raw = dict(document)
-    if raw.get('version') == 'leader_breakout_execution/v2':
+    if raw.get('version') in {'leader_breakout_execution/v2', 'leader_breakout_execution/v3'}:
         steps = raw.get('position_steps')
         if steps is not None:
             if not isinstance(steps, (tuple, list)) or any(not isinstance(step, Mapping) for step in steps):
                 raise ValueError('leader position steps must be explicit objects')
             raw['position_steps'] = tuple(LeaderPositionStep(**step) for step in steps)
-        return LeaderBreakoutStagedExecutionContract(**raw)
+        cls = (LeaderBreakoutReentryExecutionContract if raw['version'] == 'leader_breakout_execution/v3'
+               else LeaderBreakoutStagedExecutionContract)
+        return cls(**raw)
     return LeaderBreakoutExecutionContract(**raw)
 
 

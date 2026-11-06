@@ -963,6 +963,23 @@ class ResearchProcessTests(unittest.TestCase):
             self.assertFalse(manifest["order_authorized"])
             parsed = load_research_process_request(request_path)
             self.assertEqual(result["run_id"], execute_process_request(parsed)["run_id"])
+            from tests.unit.test_micro_execution_evidence import _frozen_scenario
+            frozen = _frozen_scenario(scenario["events"])
+            frozen_encoded = json.dumps(frozen).encode()
+            evidence.write_bytes(frozen_encoded)
+            request_document = json.loads(request_path.read_text(encoding="utf-8"))
+            request_document["dataset_sha256"] = hashlib.sha256(frozen_encoded).hexdigest()
+            request_path.write_text(json.dumps(request_document), encoding="utf-8")
+            frozen_request = load_research_process_request(request_path)
+            frozen_result = execute_process_request(frozen_request)
+            frozen_manifest = json.loads(Path(frozen_result["manifest"]).read_text(encoding="utf-8"))
+            from kiwoom_monitor.domain.research_contract import is_section12_evidence_manifest
+            self.assertTrue(is_section12_evidence_manifest(frozen_manifest))
+            self.assertEqual("frozen_micro_execution_research", frozen_result["section12"]["execution_scope"])
+            self.assertEqual([], frozen_result["result"]["input_assessment"]["missing_inputs"])
+            self.assertEqual(frozen["events"], frozen_result["result"]["evidence"])
+            self.assertEqual(frozen_result["run_id"], execute_process_request(frozen_request)["run_id"])
+            self.assertFalse(frozen_manifest["order_authorized"])
             evidence.write_bytes(encoded + b" ")
             with self.assertRaisesRegex(ValueError, "hash does not match"):
                 execute_process_request(parsed)
@@ -1091,6 +1108,68 @@ class ResearchProcessTests(unittest.TestCase):
             with patch("sys.stderr"), self.assertRaises(SystemExit):
                 research_process._run_research_process([*cli_args, "--cancel", str(frozen_manifest)])
             self.assertEqual(manifest_sha, hashlib.sha256(frozen_manifest.read_bytes()).hexdigest())
+
+            from tests.unit.test_daily_decline import quote, quote_receipt
+            entry, exit_quote = quote(1000, cost=1010), quote(740, session=2)
+            rows = []
+            quote_source = {"source_ref": "raw-observation-17", "source_version": "raw-reconstruction/v2"}
+            cost_source = {"source_ref": "fill-cost-17", "source_version": "per-fill-cost/v3"}
+            for raw, label, price, session, fee in ((entry, "entry", 1000, 1, 7), (exit_quote, "exit", 740, 2, 5)):
+                rows.extend((quote_receipt(raw) | {"provenance": quote_source},
+                    {"kind": "ACCEPT", "available_at": raw.available_at, "quote_ref": raw.evidence_id, "order_ref": label},
+                    {"kind": "FILL", "available_at": raw.available_at, "order_ref": label, "fill_id": label + "-1",
+                     "quantity": 2, "price_won": price, "fee_won": fee, "session_index": session,
+                     "cost_provenance": cost_source},
+                    {"kind": "TERMINAL", "available_at": raw.available_at, "order_ref": label}))
+            normalized = synthetic_scenario(*rows)
+            execution = {"version": "dd-execution-evidence/v1", "protection": normalized["protection"],
+                "protection_provenance": {"source_ref": "absolute-raw-protection-17", "source_version": "raw-price/v1"},
+                "provenance": {"source_kind": "historical_reconstruction", "source_ref": "execution-17",
+                               "source_version": "frozen-execution/v2"}, "events": normalized["events"]}
+            executed_request = request({"execution_evidence": execution})
+            executed = execute_process_request(executed_request)
+            trace = executed["result"]
+            self.assertEqual("frozen_daily_execution_research", executed["section12"]["execution_scope"])
+            self.assertEqual(("QUALIFIED", 0, 2007, -532), (trace["setup"]["status"], trace["summary"]["owned_quantity"],
+                trace["summary"]["spent_won"], trace["summary"]["realized_pnl_won"]))
+            self.assertEqual([7, 5], [row["fee_won"] for row in trace["state"]["fills"]])
+            self.assertEqual((1000, quote_source), (trace["events"][0]["raw_price_won"], trace["events"][0]["provenance"]))
+            self.assertEqual({"entry-1": cost_source, "exit-1": cost_source}, trace["evidence_provenance"]["fill_costs"])
+            self.assertEqual(normalized["protection"], trace["evidence_provenance"]["raw_protection"])
+            self.assertEqual(execution, trace["execution_evidence"])
+            self.assertEqual([], trace["input_assessment"]["missing_inputs"])
+            self.assertFalse(trace["input_assessment"]["native_confirmation"])
+            self.assertEqual(executed, execute_process_request(executed_request))
+            from kiwoom_monitor.domain.research_contract import ReportedResearchResult
+            document = {"version": 1, "kind": "research-run-report", "result_id": executed["run_id"],
+                "produced_at": exit_quote.available_at.isoformat(),
+                "payload": json.loads(Path(executed["manifest"]).read_text(encoding="utf-8"))}
+            ReportedResearchResult.from_document(document)
+            receipt_store = SQLiteQueryStore(root / "received.sqlite3", now_provider=lambda: now)
+            receipt_store.initialize()
+            receipt = receipt_store.accept_research_result("researcher", document)
+            receipt_store.close()
+            receipt_store = SQLiteQueryStore(root / "received.sqlite3", now_provider=lambda: now)
+            receipt_store.initialize()
+            try:
+                restored = receipt_store.accept_research_result("researcher", document)
+                self.assertEqual(receipt, restored)
+                self.assertEqual(trace["state"], restored["result"]["payload"]["result"]["state"])
+                self.assertFalse(restored["receipt"]["scientific_verified"])
+                self.assertFalse(restored["receipt"]["order_authorized"])
+            finally:
+                receipt_store.close()
+            partial_execution = {**execution, "events": normalized["events"][:4]}
+            partial_execution["events"][2] = {key: value for key, value in partial_execution["events"][2].items()
+                                               if key != "cost_provenance"}
+            partial = execute_process_request(request({"execution_evidence": partial_execution}))["result"]
+            self.assertEqual(2, partial["state"]["owned_quantity"])
+            self.assertEqual(["fill_cost_source:entry-1"], partial["input_assessment"]["missing_inputs"])
+            no_protection = execute_process_request(request({"execution_evidence": {
+                **execution, "protection": None, "events": normalized["events"][:1]}}))["result"]
+            self.assertEqual("NONE", no_protection["events"][0]["action"]["kind"])
+            self.assertEqual(0, no_protection["state"]["owned_quantity"])
+            self.assertIn("raw_price_protection", no_protection["input_assessment"]["missing_inputs"])
 
             later = execute_process_request(request({"cut": now.isoformat()}))
             self.assertEqual("daily_window_unavailable", later["result"]["setup"]["reason"])

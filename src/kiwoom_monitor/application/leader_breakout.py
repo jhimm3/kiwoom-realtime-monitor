@@ -8,6 +8,7 @@ from __future__ import annotations
 from kiwoom_monitor.domain.strategy_contract import (
     POLICY_ID, _time, _id, LeaderBreakoutContext, LeaderBreakoutPolicy,
     document_leader_breakout_policy, LeaderBreakoutExecutionContract, LeaderBreakoutConfig,
+    LeaderBreakoutReentryExecutionContract,
 )
 
 from collections import deque
@@ -404,6 +405,31 @@ def validate_leader_position_proof(proof, config, spec, run_id):
     return context
 
 
+def leader_reentry_enabled(config):
+    return isinstance(getattr(config, 'execution_contract', None), LeaderBreakoutReentryExecutionContract)
+
+
+def leader_setup_key(context):
+    """Identity of declared source evidence, independent of clocks and feeds.
+
+    Updating a quote, source generation, validity time or price on the same
+    evidence does not make a second independent setup.
+    """
+    value = asdict(context) if isinstance(context, LeaderBreakoutContext) else context
+    return _id('leader-independent-setup/v1', {name: value[name] for name in
+        ('symbol', 'evidence_ref', 'leader_rule_ref', 'structure_rule_ref')})
+
+
+def leader_position_step_key(config, index, step, *, setup_key=None, context=None):
+    payload = [config.execution_contract.fingerprint, index, asdict(step)]
+    if leader_reentry_enabled(config):
+        key = leader_setup_key(context) if context is not None else setup_key
+        if not isinstance(key, str) or not key.startswith('leader-independent-setup/v1:'):
+            raise ValueError('v3 position step requires its actual setup identity')
+        payload.append(key)
+    return _id('leader-position-step/v1', payload)
+
+
 def leader_evaluation(*, run_id, config, raw, state, context=None):
     """Translate a pure proposal to the existing sized execution DTO only when ready."""
     from .breakout_strategy import FeatureSnapshot, StrategyDecision, StrategyEvaluation, CandidateEvent
@@ -415,7 +441,15 @@ def leader_evaluation(*, run_id, config, raw, state, context=None):
         if state.status == "open":
             missing.append("position_already_open")
         elif state.emitted_candidate_keys:
-            missing.append("reentry_policy_unconfigured")
+            if not leader_reentry_enabled(config):
+                missing.append("reentry_policy_unconfigured")
+            elif (state.status != 'flat' or state.position_quantity not in (None, 0)
+                    or not state.cooldown_until):
+                missing.append('reentry_confirmed_flat_unavailable')
+            elif context is None or leader_setup_key(context) in state.emitted_candidate_keys:
+                missing.append('reentry_setup_already_used')
+            elif _time(context.available_at) <= _time(state.cooldown_until):
+                missing.append('reentry_setup_not_after_confirmed_flat')
         reason = leader_session_entry_rejection(config, _time(raw["decided_at"])) if not missing else ""
         if reason:
             missing.append(reason)
@@ -450,8 +484,11 @@ def leader_evaluation(*, run_id, config, raw, state, context=None):
         reasons.append("explicit_capital_limit")
     after = state
     if final == "ENTER":
+        keys = (*state.emitted_candidate_keys, raw['episode_id'])
+        if leader_reentry_enabled(config):
+            keys = (*keys, leader_setup_key(context))
         after = replace(state, status="candidate", symbol=raw["symbol"], candidate_key=raw["episode_id"],
-            candidate_expires_at=raw["valid_until"], emitted_candidate_keys=(*state.emitted_candidate_keys, raw["episode_id"]))
+            candidate_expires_at=raw["valid_until"], emitted_candidate_keys=keys)
     elif final in {'ADD', 'REDUCE'}:
         after = replace(state, emitted_candidate_keys=(*state.emitted_candidate_keys, raw['position_step']['step_key']))
     feature = {"factor_id": "leader_structure/v1", "version": "v1", "value": raw,
@@ -480,8 +517,10 @@ def leader_next_position_step(config, state):
     terms = config.execution_contract
     if not isinstance(terms, LeaderBreakoutStagedExecutionContract) or not terms.position_steps:
         return None
+    setup = (next((key for key in reversed(state.emitted_candidate_keys)
+                   if key.startswith('leader-independent-setup/v1:')), None) if leader_reentry_enabled(config) else None)
     for index, step in enumerate(terms.position_steps):
-        key = _id('leader-position-step/v1', [terms.fingerprint, index, asdict(step)])
+        key = leader_position_step_key(config, index, step, setup_key=setup)
         if key not in state.emitted_candidate_keys:
             return index, step, key
     return None
@@ -494,7 +533,7 @@ def leader_position_action_ref(config, position_proof, raw):
         return None
     terms = config.execution_contract
     step = terms.position_steps[metadata['index']]
-    key = _id('leader-position-step/v1', [terms.fingerprint, metadata['index'], asdict(step)])
+    key = leader_position_step_key(config, metadata['index'], step, context=position_proof['context'])
     if (metadata['step_id'], metadata['step_key'], metadata['reason_ref'], raw['proposal']) != (
             step.step_id, key, step.reason_ref, step.action):
         raise ValueError('leader position action differs from its frozen declaration')
@@ -509,8 +548,10 @@ def evaluate_leader_position_step(config, raw, state, context, *, source, step_s
     REDUCE uses its declared absolute comparison and only actual owned shares.
     The state returned here is observation continuity, never an order receipt.
     """
+    if state.status != 'open' or context is None or raw['proposal'] == 'EXIT':
+        return raw, None
     selected = leader_next_position_step(config, state)
-    if state.status != 'open' or context is None or selected is None or raw['proposal'] == 'EXIT':
+    if selected is None:
         return raw, None
     index, step, key = selected
     if raw['status'] != 'HOLD':
@@ -544,11 +585,17 @@ def evaluate_leader_position_step(config, raw, state, context, *, source, step_s
         'reasons': [*raw['reasons'], 'explicit_position_step:' + step.reason_ref]}, after
 
 
-def leader_current_entry_matches(config, proof, settings, now):
+def leader_current_entry_matches(config, proof, settings, now, *, spec_id=None):
     """A former entry approval cannot stand in for the currently applied thesis."""
     if not settings or settings.get('shadow_candidate_enabled') is not True:
         return False
-    policy = LeaderBreakoutPolicy.from_dict(settings['shadow_candidate_config'])
+    if not isinstance(proof, Mapping):
+        return False
+    from kiwoom_monitor.domain.strategy_contract import shadow_candidate_config_for_spec
+    selected = shadow_candidate_config_for_spec(settings, spec_id or proof.get('spec_id'))
+    if not isinstance(selected, Mapping) or selected.get('policy_id') != POLICY_ID:
+        return False
+    policy = LeaderBreakoutPolicy.from_dict(selected)
     context = LeaderBreakoutContext(**proof['context'])
     return (LeaderBreakoutConfig.from_dict(policy.to_dict()).rules_hash == config.rules_hash
             and context in policy.contexts and context.leader_eligible is True
@@ -824,7 +871,8 @@ class LeaderTradeInputs:
         return raw, position_context
 
     def evaluate_position_step(self, config, raw, state, context, *, source, entry_enabled):
-        selected = leader_next_position_step(config, state)
+        selected = (leader_next_position_step(config, state)
+                    if state.status == 'open' and context is not None else None)
         key = selected[2] if selected else None
         prior = self._position_step_observation
         before = prior[1] if prior is not None and prior[0] == key else None

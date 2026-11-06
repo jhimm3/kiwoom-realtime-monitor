@@ -258,7 +258,213 @@ def _scoped_document_row(cursor, collection, owner, key, placeholder):
     return rows[0] if rows else None
 
 
+def _accept_selected_order_evidence(cursor, p, packet, *, expected_sha256, account_ref, run_id, now_provider):
+    """Preserve immutable offline data under either existing native transaction."""
+    encoded, digest = encode_selected_order_evidence(packet)
+    packet = json.loads(encoded)
+    if digest != expected_sha256:
+        raise ValueError('selected-order evidence digest changed')
+    if (packet['account_ref'], packet['run_id']) != (account_ref, run_id):
+        raise ValueError('selected-order evidence crossed the expected account and run')
+    operation_id = packet['operation_id']
+    row = _scoped_document_row(cursor, OFFLINE_ORDER_EVIDENCE_COLLECTION, OFFLINE_ORDER_EVIDENCE_OWNER, operation_id, p)
+    if row is not None:
+        previous = document_result_rows((row,))[0]['document']
+        receipt = previous['receipt']
+        if previous['packet'] != packet or receipt['sha256'] != digest:
+            raise ValueError('immutable selected-order evidence conflict')
+        return {'receipt': receipt, 'replayed': True}
+    cursor.execute('SELECT 1 FROM central_execution_intents UNION ALL SELECT 1 FROM central_execution_events '
+        'UNION ALL SELECT 1 FROM central_execution_runtime_leases UNION ALL SELECT 1 FROM central_documents '
+        "WHERE collection IN ('execution_mock_automation_control','execution_mock_plan_positions') LIMIT 1")
+    if cursor.fetchone() is not None:
+        raise ValueError('selected-order evidence requires a target with empty execution state')
+    accepted_at = as_kst(now_provider())
+    receipt = dict(operation_id=operation_id, sha256=digest, accepted_at=accepted_at.isoformat(),
+        status=RECOVERY_REQUIRED, order_authority=False)
+    row = document_value_rows(OFFLINE_ORDER_EVIDENCE_COLLECTION, [dict(owner=OFFLINE_ORDER_EVIDENCE_OWNER,
+        key=operation_id, document=dict(receipt=receipt, packet=packet))], accepted_at.timestamp())[0]
+    cursor.execute('INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) '
+        f'VALUES({",".join([p] * 5)})', row)
+    return {'receipt': receipt, 'replayed': False}
+
+
+def _selected_order_identity_context(store, placeholder, *, account_ref, credential_profile_id,
+                                     binding_revision=None, source_packet=None):
+    """Read native identity facts; aliases and requester identity flags are absent."""
+    def original_bytes(value):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+    with store.mock_automation_read_scope() as reader:
+        reader.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY' if placeholder == '%s' else 'BEGIN')
+        binding = store.load_latest_account_binding(credential_profile_id, 'kiwoom', 'mock', _reader=reader)
+        if (binding is None or binding['account_ref'] != account_ref
+                or binding_revision is not None and binding['binding_revision'] != binding_revision):
+            raise ValueError('selected recovery requires the current native verified binding')
+        reader.execute('SELECT identity_fingerprint FROM central_account_registry '
+            f"WHERE account_ref={placeholder} AND broker='kiwoom' AND environment='mock' AND status='active'", (account_ref,))
+        row = reader.fetchone()
+        if row is None:
+            raise ValueError('selected recovery native account identity is missing')
+        if source_packet is not None:
+            from kiwoom_monitor.domain.selected_order_evidence import PLAN_MANAGEMENT_VERSION, selected_plan_orders
+            plan_ledger = source_packet.get('version') == PLAN_MANAGEMENT_VERSION
+            control = store.load_mock_automation_control(account_ref, _reader=reader)
+            if (control is None or (control['desired_state'], control['execution_run_id'], control['changed_at'])
+                    != ('STOPPED', source_packet['run_id'], source_packet['stopped_at'])):
+                raise ValueError('source identity proof requires its exact stopped native control')
+            reader.execute(f'SELECT 1 FROM central_execution_runtime_leases WHERE owner_key={placeholder}', (f'mock:{account_ref}',))
+            if reader.fetchone() is not None:
+                raise ValueError('source identity proof requires the drained native owner')
+            native = store.load_execution_intent(source_packet['order']['intent_id'], _reader=reader)
+            if native is None or any(native.get(key) != value for key, value in source_packet['order'].items()):
+                raise ValueError('source identity proof packet changed native order facts')
+            if native.get('mock_account_member_spec_id') != source_packet.get('member_spec_id'):
+                raise ValueError('source identity proof cannot discard native member attribution')
+            if source_packet['source_spec_id'] != (native.get('mock_account_member_spec_id') or control['active_spec_id']):
+                raise ValueError('source identity proof packet changed native spec attribution')
+            position = store.load_document('execution_mock_plan_positions', account_ref,
+                source_packet['order']['plan']['plan_id'], _reader=reader)
+            if position is None or any(position['document'].get(key) != value for key, value in source_packet['plan_position'].items()):
+                raise ValueError('source identity proof packet changed native plan facts')
+            plan_id = "document_json->'plan'->>'plan_id'" if placeholder == '%s' else "json_extract(document_json,'$.plan.plan_id')"
+            if plan_ledger:
+                reader.execute('SELECT document_json FROM central_execution_intents '
+                    f'WHERE environment=\'mock\' AND account_ref={placeholder} AND {plan_id}={placeholder}',
+                    (account_ref, native['plan']['plan_id']))
+                originals = [item[0] if isinstance(item[0], dict) else json.loads(item[0]) for item in reader.fetchall()]
+                wanted = selected_plan_orders(source_packet)
+                if original_bytes({item['intent_id']: item for item in originals}) != original_bytes({item['intent_id']: item for item in wanted}):
+                    raise ValueError('source management closure does not cover the exact complete plan ledger')
+                joined_plan_id = "i.document_json->'plan'->>'plan_id'" if placeholder == '%s' else "json_extract(i.document_json,'$.plan.plan_id')"
+                reader.execute('SELECT e.accepted_sequence,e.document_json FROM central_execution_events e '
+                    f'JOIN central_execution_intents i ON i.intent_id=e.intent_id WHERE i.account_ref={placeholder} '
+                    f'AND i.environment=\'mock\' AND {joined_plan_id}={placeholder} ORDER BY e.accepted_sequence',
+                    (account_ref, native['plan']['plan_id']))
+            else:
+                reader.execute('SELECT e.accepted_sequence,e.document_json FROM central_execution_events e '
+                    f'WHERE e.intent_id={placeholder} ORDER BY e.accepted_sequence', (native['intent_id'],))
+            events = [(int(item[0]), item[1] if isinstance(item[1], dict) else json.loads(item[1])) for item in reader.fetchall()]
+            if len(events) != len(source_packet['events']) or any(
+                    sequence != event['accepted_sequence']
+                    or (original_bytes(raw) != original_bytes({key: value for key, value in event.items() if key != 'accepted_sequence'}) if plan_ledger
+                        else any(raw.get(key) != value for key, value in event.items() if key != 'accepted_sequence'))
+                    for (sequence, raw), event in zip(events, source_packet['events'], strict=True)):
+                raise ValueError('source identity proof packet changed native event facts')
+            reader.execute('SELECT COALESCE(MAX(e.accepted_sequence),0) FROM central_execution_events e '
+                f'JOIN central_execution_intents i ON i.intent_id=e.intent_id WHERE i.environment=\'mock\' AND i.account_ref={placeholder}', (account_ref,))
+            if int(reader.fetchone()[0]) != source_packet['source_cursor']:
+                raise ValueError('source identity proof packet changed native source cut')
+            if source_packet.get('member_spec_id') is not None:
+                admission = store.load_document('execution_mock_automation_admission_by_spec', account_ref,
+                    source_packet['member_spec_id'], _reader=reader)
+                if (native.get('mock_account_member_spec_id') != source_packet['member_spec_id'] or admission is None
+                        or admission['document']['admission_id'] != source_packet['member_admission_id']
+                        or admission['document']['account_selection_id'] != source_packet['account_selection_id']
+                        or control['active_spec_id'] != source_packet['anchor_spec_id']):
+                    raise ValueError('source identity proof packet changed native member attribution')
+            if 'management_closure' in source_packet:
+                from kiwoom_monitor.application.selected_order_recovery import (
+                    validate_management_closure, management_checkpoint_matches, management_checkpoint_references, management_plan_references,
+                )
+                validate_management_closure(source_packet, allow_missing_checkpoint_dependencies=True)
+                closure = source_packet['management_closure']
+                plan_id = "document_json->'plan'->>'plan_id'" if placeholder == '%s' else "json_extract(document_json,'$.plan.plan_id')"
+                if not plan_ledger:
+                    reader.execute('SELECT 1 FROM central_execution_intents '
+                        f'WHERE environment=\'mock\' AND account_ref={placeholder} AND intent_id<>{placeholder} AND {plan_id}={placeholder} LIMIT 1',
+                        (account_ref, native['intent_id'], native['plan']['plan_id']))
+                    if reader.fetchone() is not None:
+                        raise ValueError('source management closure does not cover the complete plan ledger')
+                if ((original_bytes(closure['source_plan_position']) != original_bytes(position['document']) if plan_ledger
+                        else closure['source_plan_position'] != position['document'])
+                        or closure['origin_approval_id'] != native['mock_plan_approval']):
+                    raise ValueError('source management closure changed the native position or approval reference')
+                checkpoint_key = 'member:' + source_packet['member_spec_id'] if 'member_spec_id' in source_packet else 'current'
+                checkpoint_collections = {'execution_mock_automation_runner_current', 'execution_mock_automation_clock_current'}
+                evidence_collections = {'execution_mock_automation_risk_snapshots', 'execution_mock_automation_stop_revisions',
+                    'execution_close_exit_evidence', 'execution_panic_exit_evidence'}
+                checkpoint_values, expected = {}, set()
+                for collection in sorted(checkpoint_collections):
+                    original = store.load_document(collection, account_ref, checkpoint_key, _reader=reader)
+                    if original is not None and management_checkpoint_matches(source_packet, original['document']):
+                        identity = collection, account_ref, checkpoint_key
+                        checkpoint_values[identity] = original['document']
+                        expected.add(identity)
+                inspected = set()
+                while True:
+                    values = {(item['collection'], item['owner'], item['key']): item['document']
+                        for item in closure['documents']}
+                    references = (management_checkpoint_references(source_packet, checkpoint_values)
+                        | management_plan_references(source_packet, values)) - inspected
+                    if not references: break
+                    for collection, owner, key in sorted(references):
+                        identity = collection, owner, key
+                        inspected.add(identity)
+                        original = store.load_document(collection, owner, key, _reader=reader)
+                        if original is not None:
+                            expected.add(identity)
+                            checkpoint_values[identity] = original['document']
+                provided = {(item['collection'], item['owner'], item['key']) for item in closure['documents']
+                    if item['collection'] in checkpoint_collections | evidence_collections
+                    or (item['collection'], item['owner'], item['key']) in management_plan_references(source_packet, values)}
+                if provided != expected:
+                    raise ValueError('source management closure omitted or invented native checkpoint evidence')
+                for item in closure['documents']:
+                    original = store.load_document(item['collection'], item['owner'], item['key'], _reader=reader)
+                    if original is None or (original_bytes(original['document']) != original_bytes(item['document'])
+                            if plan_ledger else original['document'] != item['document']):
+                        raise ValueError('source management closure changed native policy facts')
+                if closure['shadow_candidate'] is not None:
+                    reader.execute(f'SELECT document_json,expires_at FROM central_shadow_candidate_events WHERE event_id={placeholder}',
+                        (closure['shadow_candidate']['event_id'],))
+                    shadow = reader.fetchone()
+                    original = ({**(shadow[0] if isinstance(shadow[0], dict) else json.loads(shadow[0])),
+                        'expires_at': shadow[1].isoformat() if isinstance(shadow[1], datetime) else shadow[1]} if shadow else None)
+                    if (original_bytes(original) != original_bytes(closure['shadow_candidate']) if plan_ledger
+                            else original != closure['shadow_candidate']):
+                        raise ValueError('source management closure changed the native Shadow candidate')
+        return {'binding': binding, 'identity_fingerprint': str(row[0])}
+
+
 class SQLiteDocumentStoreMixin:
+    def load_selected_order_management_policy(self, context, *, _reader=None):
+        from .selected_order_bootstrap import load_selected_order_management_policy
+        if _reader is not None:
+            return load_selected_order_management_policy(_reader, '?', context)
+        with self.mock_automation_read_scope() as reader:
+            return load_selected_order_management_policy(reader, '?', context)
+
+    def prepare_selected_order_management(self, operation_id, **kwargs):
+        from .selected_order_bootstrap import prepare_selected_order_management
+        with self._lock, self._connection() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            result = prepare_selected_order_management(connection.cursor(), '?', self, operation_id, **kwargs)
+        return result
+
+    def load_selected_management_fences(self, management, *, _reader=None):
+        from .selected_order_bootstrap import load_selected_management_fences
+        if _reader is not None:
+            return load_selected_management_fences(_reader, '?', self, management)
+        with self.mock_automation_read_scope() as reader:
+            return load_selected_management_fences(reader, '?', self, management)
+
+    def accept_selected_order_management(self, context, **kwargs):
+        from .selected_order_bootstrap import accept_selected_order_management
+        with self._lock, self._connection() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            result = accept_selected_order_management(connection.cursor(), '?', self, context, **kwargs)
+        return result
+
+    def load_selected_order_identity_context(self, **kwargs):
+        return _selected_order_identity_context(self, '?', **kwargs)
+
+    def install_selected_order_management(self, packet, **kwargs):
+        from .selected_order_bootstrap import install_selected_order_management
+        with self._lock, self._connection() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            result = install_selected_order_management(connection.cursor(), '?', self, packet, **kwargs)
+        return result  # Its original receipt is durable before the ACK.
+
     @contextmanager
     def mock_automation_read_scope(self):
         with self._connection() as connection:
@@ -277,46 +483,13 @@ class SQLiteDocumentStoreMixin:
     def accept_selected_order_evidence(
         self, packet: dict[str, Any], *, expected_sha256: str, account_ref: str, run_id: str,
     ) -> dict[str, Any]:
-        encoded, digest = encode_selected_order_evidence(packet)
-        packet = json.loads(encoded)
-        if digest != expected_sha256:
-            raise ValueError("selected-order evidence digest changed")
-        if (packet["account_ref"], packet["run_id"]) != (account_ref, run_id):
-            raise ValueError("selected-order evidence crossed the expected account and run")
         if self._memory_uri or not self._path.is_file():
             raise ValueError("initialize a durable offline SQLite target before accepting order evidence")
-        operation_id = packet["operation_id"]
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.cursor()
-            row = _scoped_document_row(cursor, OFFLINE_ORDER_EVIDENCE_COLLECTION,
-                                       OFFLINE_ORDER_EVIDENCE_OWNER, operation_id, "?")
-            if row is not None:
-                previous = document_result_rows((row,))[0]["document"]
-                receipt = previous["receipt"]
-                if previous["packet"] != packet or receipt["sha256"] != digest:
-                    raise ValueError("immutable selected-order evidence conflict")
-                return {"receipt": receipt, "replayed": True}
-            if cursor.execute(
-                "SELECT 1 FROM central_execution_intents UNION ALL "
-                "SELECT 1 FROM central_execution_events UNION ALL "
-                "SELECT 1 FROM central_execution_runtime_leases UNION ALL "
-                "SELECT 1 FROM central_documents WHERE collection IN "
-                "('execution_mock_automation_control', 'execution_mock_plan_positions') LIMIT 1",
-            ).fetchone() is not None:
-                raise ValueError("selected-order evidence requires a target with empty execution state")
-            accepted_at = as_kst(self._now_provider())
-            receipt = {"operation_id": operation_id, "sha256": digest, "accepted_at": accepted_at.isoformat(),
-                       "status": RECOVERY_REQUIRED, "order_authority": False}
-            row = document_value_rows(OFFLINE_ORDER_EVIDENCE_COLLECTION, [{
-                "owner": OFFLINE_ORDER_EVIDENCE_OWNER, "key": operation_id,
-                "document": {"receipt": receipt, "packet": packet},
-            }], accepted_at.timestamp())[0]
-            cursor.execute(
-                "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
-                "VALUES(?,?,?,?,?)", row,
-            )
-        return {"receipt": receipt, "replayed": False}
+            result = _accept_selected_order_evidence(connection.cursor(), '?', packet, expected_sha256=expected_sha256,
+                account_ref=account_ref, run_id=run_id, now_provider=self._now_provider)
+        return result
 
     def load_current_theme_snapshot(self) -> dict[str, Any]:
         with self._lock, self._connection() as connection:
@@ -528,6 +701,64 @@ class SQLiteDocumentStoreMixin:
 
 
 class PostgresDocumentStoreMixin:
+    def load_selected_order_management_policy(self, context, *, _reader=None):
+        from .selected_order_bootstrap import load_selected_order_management_policy
+        if _reader is not None:
+            return load_selected_order_management_policy(_reader, '%s', context)
+        with self.mock_automation_read_scope() as reader:
+            return load_selected_order_management_policy(reader, '%s', context)
+
+    def prepare_selected_order_management(self, operation_id, **kwargs):
+        from .selected_order_bootstrap import prepare_selected_order_management
+        from .postgres_access import DBWriterContext, owned_connection_scope
+        writer = DBWriterContext(writer_family='execution.runtime_lease', writer_kind='selected_management_prepare',
+            operation='prepare_selected_order_management', rows_attempted=3)
+        with owned_connection_scope(self._connect, writer) as connection, connection.cursor() as cursor:
+            result = prepare_selected_order_management(cursor, '%s', self, operation_id, **kwargs)
+        return result
+
+    def load_selected_management_fences(self, management, *, _reader=None):
+        from .selected_order_bootstrap import load_selected_management_fences
+        if _reader is not None:
+            return load_selected_management_fences(_reader, '%s', self, management)
+        with self.mock_automation_read_scope() as reader:
+            return load_selected_management_fences(reader, '%s', self, management)
+
+    def accept_selected_order_management(self, context, **kwargs):
+        from .selected_order_bootstrap import accept_selected_order_management
+        from .postgres_access import DBWriterContext, owned_connection_scope
+        writer = DBWriterContext(writer_family='execution.runtime_lease', writer_kind='selected_management_accept',
+            operation='accept_selected_order_management', rows_attempted=3)
+        with owned_connection_scope(self._connect, writer) as connection, connection.cursor() as cursor:
+            result = accept_selected_order_management(cursor, '%s', self, context, **kwargs)
+        return result
+
+    def load_selected_order_identity_context(self, **kwargs):
+        return _selected_order_identity_context(self, '%s', **kwargs)
+
+    def install_selected_order_management(self, packet, **kwargs):
+        from .selected_order_bootstrap import install_selected_order_management
+        from .postgres_access import DBWriterContext, owned_connection_scope
+        writer = DBWriterContext(writer_family='document.immutable',
+            writer_kind='document:execution_selected_order_management_installations',
+            operation='install_selected_order_management', rows_attempted=len(packet['events']) + 5)
+        with owned_connection_scope(self._connect, writer) as connection, connection.cursor() as cursor:
+            cursor.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+            cursor.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', ('selected-order-offline',))
+            result = install_selected_order_management(cursor, '%s', self, packet, **kwargs)
+        return result
+
+    def accept_selected_order_evidence(self, packet, *, expected_sha256, account_ref, run_id):
+        from .postgres_access import DBWriterContext, owned_connection_scope
+        writer = DBWriterContext(writer_family='document.immutable',
+            writer_kind='document:offline_selected_order_evidence', operation='accept_selected_order_evidence', rows_attempted=1)
+        with owned_connection_scope(self._connect, writer) as connection, connection.cursor() as cursor:
+            cursor.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+            cursor.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', ('selected-order-offline',))
+            result = _accept_selected_order_evidence(cursor, '%s', packet, expected_sha256=expected_sha256,
+                account_ref=account_ref, run_id=run_id, now_provider=self._now_provider)
+        return result
+
     @contextmanager
     def mock_automation_read_scope(self, *, _connection: Any = None):
         from .postgres_access import DBWriterContext, observe_existing_transaction, owned_connection_scope

@@ -23,6 +23,21 @@ class _Response:
 
 
 class OperationalSettingsClientTests(unittest.TestCase):
+    def test_spec_shadow_map_roundtrips_without_policy_or_identity_rewriting(self):
+        client = CentralOperationalSettingsClient(DataSourceSettings(
+            "personal_server", "https://nas.example.test", "token"))
+        policies = {"spec-leader": {"policy_id": "leader_breakout/v1", "contexts": []},
+                    "spec-close": {"version": "section12-minute-shadow/v1", "family": "close_betting/v1"}}
+        calls = []
+        def open_request(request, **_kwargs):
+            calls.append(request)
+            return _Response({"revision": len(calls), "shadow_candidate_configs": policies})
+        with patch("kiwoom_monitor.infrastructure.central_operational_settings.urlopen", open_request):
+            self.assertEqual(policies, client.load()["shadow_candidate_configs"])
+            self.assertEqual(policies, client.save({"shadow_candidate_configs": policies})["shadow_candidate_configs"])
+        self.assertEqual({"shadow_candidate_configs": policies, "expected_revision": 1},
+                         json.loads(calls[1].data))
+
     def test_ram_selection_uses_separate_revision_and_requires_loaded_selection(self):
         client = CentralOperationalSettingsClient(DataSourceSettings("personal_server", "https://nas.test", "token"))
         calls = []

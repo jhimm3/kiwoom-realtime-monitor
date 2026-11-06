@@ -171,9 +171,212 @@ class MockCredentialOwner:
     def active_revision(self, profile_id: str):
         return self._revisions.get(profile_id)
 
+    def issue_selected_order_identity_proof(self, packet, digest, *, credential_profile_id, broker_evidence=None):
+        """Sign only this owner's stopped native source facts; never expose its key."""
+        from kiwoom_monitor.application.selected_order_recovery import issue_source_identity_proof
+        from kiwoom_monitor.domain.selected_order_evidence import encode_selected_order_evidence
+        if encode_selected_order_evidence(packet)[1] != digest:
+            raise ValueError('selected source packet digest changed')
+        facts = self.store.load_selected_order_identity_context(account_ref=packet['account_ref'],
+            credential_profile_id=credential_profile_id, source_packet=packet)
+        return issue_source_identity_proof(packet, digest, binding=facts['binding'],
+            identity_fingerprint=facts['identity_fingerprint'], identity_key=self.hmac_key, broker_evidence=broker_evidence)
+
+    async def verify_selected_order_identity(self, packet, digest, source_proof, *, credential_profile_id,
+                                             credential_revision, account_ref, binding_revision, broker_evidence_provider=None,
+                                             on_verified=None):
+        """Use the current credential owner and existing broker for one explicit identity read."""
+        from kiwoom_monitor.application.selected_order_recovery import verify_source_identity_proof, broker_evidence_from_dict
+        from kiwoom_monitor.infrastructure.kiwoom_rest.account_identity import KiwoomAccountIdentityReader
+        from kiwoom_monitor.domain.order_contract import AccountEnvironment
+        lock = self._account_locks.setdefault(account_ref, asyncio.Lock())
+        async with lock:
+            bundle = self.bundle(credential_profile_id)
+            def current():
+                return (not self._closing and credential_profile_id not in self._pending_profiles
+                    and self.bundle(credential_profile_id) is bundle and bundle is not None
+                    and getattr(bundle, 'canonical_account_ref', bundle.account_ref) == account_ref
+                    and self.active_revision(credential_profile_id) == credential_revision)
+            if not current():
+                raise RuntimeError('SELECTED_RECOVERY_TARGET_CREDENTIAL_CHANGED')
+            facts = await drain_thread_call(self.store.load_selected_order_identity_context, account_ref=account_ref,
+                credential_profile_id=credential_profile_id, binding_revision=binding_revision)
+            identity = await KiwoomAccountIdentityReader(bundle.broker, environment=AccountEnvironment.MOCK,
+                hmac_key=self.hmac_key, now_provider=bundle.runtime.server_now).verify()
+            if not current() or identity.identity_fingerprint != facts['identity_fingerprint']:
+                raise RuntimeError('SELECTED_RECOVERY_TARGET_IDENTITY_CHANGED')
+            matched = verify_source_identity_proof(packet, digest, source_proof, identity_key=self.hmac_key,
+                target_identity=identity, target_binding=facts['binding'], credential_revision=credential_revision)
+            evidence = (await broker_evidence_provider(bundle=bundle, identity=matched, packet=packet,
+                source_evidence=broker_evidence_from_dict(source_proof.get('broker_evidence')))
+                if broker_evidence_provider is not None and matched.status == 'MATCH' else None)
+            latest = await drain_thread_call(self.store.load_selected_order_identity_context, account_ref=account_ref,
+                credential_profile_id=credential_profile_id, binding_revision=binding_revision)
+            if not current() or latest != facts:
+                raise RuntimeError('SELECTED_RECOVERY_TARGET_BINDING_CHANGED')
+            if on_verified is not None:
+                return await on_verified(matched, evidence, current)
+            return matched, evidence
+
+    async def install_verified_selected_order(self, packet, *, identity, source_proof, broker_evidence, current_owner):
+        """Drain the existing target owner before installing historical management data.
+
+        The caller already owns verify_selected_order_identity's account lock.
+        Its current runtime token proves only the live target lease, never an
+        imported source permission. Successful installation keeps entries off.
+        """
+        profile = identity.credential_profile_id
+        bundle = self.bundle(profile)
+        if bundle is None or not current_owner() or bundle.account_ref != identity.target_account_ref:
+            raise RuntimeError('SELECTED_BOOTSTRAP_TARGET_EPOCH_CHANGED')
+        runtime, gateway = bundle.runtime, getattr(bundle, 'gateway', None)
+        native_runtime = isinstance(runtime, ExecutionRuntime) and runtime._active
+        previous_enabled = runtime._new_orders_enabled if native_runtime else None
+        current_target_runtime = None
+        drained = False
+        if native_runtime:
+            if gateway is not None:
+                await gateway.begin_credential_change()
+                drained = True
+            runtime.set_new_orders_enabled(False)
+            current_target_runtime = dict(account_ref=runtime.account_ref, run_id=runtime.run_id,
+                                          owner_token=runtime.owner_token)
+        try:
+            if not current_owner():
+                raise RuntimeError('SELECTED_BOOTSTRAP_TARGET_EPOCH_CHANGED')
+            return await drain_thread_call(self.store.install_selected_order_management, packet,
+                identity=identity, source_proof=source_proof, broker_evidence=broker_evidence,
+                current_owner=current_owner,
+                **({'current_target_runtime': current_target_runtime} if current_target_runtime is not None else {}))
+        except BaseException:
+            # A lost COMMIT response must not reopen the manual gateway beside
+            # an installed original order. Its immutable receipt is the oracle.
+            from .selected_order_bootstrap import INSTALLATIONS
+            row = await drain_thread_call(self.store.load_document, INSTALLATIONS,
+                packet['account_ref'], packet['order']['intent_id'])
+            receipt = row['document'] if row is not None else None
+            if (receipt is not None and (receipt.get('operation_id'), receipt.get('packet_sha256'),
+                    receipt.get('target_account_ref'), receipt.get('credential_profile_id'),
+                    receipt.get('credential_revision'), receipt.get('binding_revision'))
+                    == (packet['operation_id'], identity.packet_sha256, identity.target_account_ref,
+                        profile, identity.credential_revision, identity.binding_revision)):
+                return {'receipt': receipt, 'replayed': True}
+            if receipt is None and native_runtime and current_owner():
+                latest = await drain_thread_call(self.store.load_latest_account_binding, profile, 'kiwoom', 'mock')
+                if (latest is not None and (latest['account_ref'], latest['binding_revision'], latest['verification_method'])
+                        == (identity.target_account_ref, identity.binding_revision, 'ka00001') and current_owner()):
+                    runtime.set_new_orders_enabled(previous_enabled)
+                    if drained:
+                        gateway.end_credential_change()
+            raise
+
+    async def prepare_selected_order_management(self, operation_id, *, credential_profile_id,
+            credential_revision, account_ref, binding_revision, packet_sha256, expected_settings_revision,
+            broker_evidence_provider=None):
+        """Prepare one original reconciliation owner from the installed closure only."""
+        from kiwoom_monitor.domain.selected_order_evidence import COLLECTION, OWNER, selected_order_management_context_from_dict
+        from .selected_order_bootstrap import INSTALLATIONS, ASSESSMENTS, CURRENT_MANAGEMENT
+        preserved = await drain_thread_call(self.store.load_document, COLLECTION, OWNER, operation_id)
+        if preserved is None or preserved['document']['receipt']['sha256'] != packet_sha256:
+            raise RuntimeError('SELECTED_MANAGEMENT_INSTALLED_PACKET_CHANGED')
+        packet = preserved['document']['packet']
+        installed = await drain_thread_call(self.store.load_document, INSTALLATIONS,
+            packet['account_ref'], packet['order']['intent_id'])
+        if installed is None:
+            raise RuntimeError('SELECTED_MANAGEMENT_INSTALLATION_REQUIRED')
+        assessment = await drain_thread_call(self.store.load_document, ASSESSMENTS, OWNER,
+            installed['document']['assessment_id'])
+        if assessment is None:
+            raise RuntimeError('SELECTED_MANAGEMENT_SOURCE_PROOF_MISSING')
+        source_proof = assessment['document']['source_identity_proof']
+
+        async def prepare(identity, evidence, current_owner):
+            old = self.bundle(credential_profile_id)
+            settings = await drain_thread_call(self.store.load_account_settings,
+                dict(broker='kiwoom', environment='mock', account_ref=account_ref))
+            if (settings['revision'] != expected_settings_revision
+                    or self._settings_revisions.get(credential_profile_id) != expected_settings_revision
+                    or settings['active_profile_id'] != credential_profile_id or not settings['monitor_enabled']):
+                raise RuntimeError('ACCOUNT_SETTINGS_REVISION_CONFLICT')
+            verified_current = current_owner
+            def current_owner():
+                return (verified_current()
+                    and self._settings_revisions.get(credential_profile_id) == expected_settings_revision)
+            previous_context = getattr(old, 'selected_management_context', None)
+            if previous_context is not None and previous_context.operation_id == operation_id:
+                await drain_thread_call(old.runtime.heartbeat)
+                row = await drain_thread_call(self.store.load_document, CURRENT_MANAGEMENT, account_ref, account_ref)
+                if row is None or row['document']['context'] != previous_context.to_dict() or not current_owner():
+                    raise RuntimeError('SELECTED_MANAGEMENT_PREPARATION_CHANGED')
+                return {'receipt': row['document'], 'replayed': True}
+            if (not isinstance(old, MockAccountBundle) or not old.runtime._active or old.binding is None
+                    or not current_owner()):
+                raise RuntimeError('SELECTED_MANAGEMENT_CURRENT_TARGET_RUNTIME_REQUIRED')
+            if old.gateway is not None:
+                await old.gateway.begin_credential_change()
+            old.runtime.set_new_orders_enabled(False)
+            token = uuid.uuid4().hex
+            try:
+                result = await drain_thread_call(self.store.prepare_selected_order_management, operation_id,
+                    identity=identity, source_proof=source_proof, broker_evidence=evidence,
+                    current_target_runtime=dict(account_ref=old.canonical_account_ref,
+                        run_id=old.runtime.run_id, owner_token=old.runtime.owner_token),
+                    new_owner_token=token, current_owner=current_owner,
+                    expected_settings_revision=expected_settings_revision)
+            except BaseException:
+                import hashlib
+                row = await drain_thread_call(self.store.load_document, CURRENT_MANAGEMENT, account_ref, account_ref)
+                if (row is None or row['document']['context']['operation_id'] != operation_id
+                        or row['document']['lease_owner_sha256']
+                        != hashlib.sha256((packet['run_id'] + ':' + token).encode()).hexdigest()):
+                    raise
+                result = {'receipt': row['document'], 'replayed': True}
+            context = selected_order_management_context_from_dict(result['receipt']['context'])
+            candidate = None
+            def manager_current():
+                return (candidate is not None
+                    and (candidate.runtime._active or (not self._closing and not candidate._closing
+                         and credential_profile_id not in self._pending_profiles
+                         and self._settings_revisions.get(credential_profile_id) == expected_settings_revision))
+                    and self.active_revision(credential_profile_id) == context.credential_revision
+                    and (self._bundles.get(credential_profile_id) is candidate
+                         or self._contexts.get(credential_profile_id) is candidate))
+            # The native token has changed. Retire and join every old task before
+            # publishing or starting the new original-scope bundle.
+            self._bundles.pop(credential_profile_id, None)
+            await self._publish_change(credential_profile_id, None)
+            await old.close(close_broker=False)
+            automation = MockAutomationRuntimeContext(MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION,
+                context.account_ref, context.execution_run_id, context.spec_id, context.admission_id,
+                result['receipt']['initial_control_revision'], context.credential_revision)
+            candidate = MockAccountBundle(self.store, settings=old.client._settings,
+                account_ref=context.account_ref, run_id=context.execution_run_id,
+                credential_profile_id=credential_profile_id, identity_hmac_key=self.hmac_key,
+                client=old.client, broker=old.broker, identity=old._identity, binding=old.binding,
+                order_transport_enabled=settings['mock_order_enabled'], require_initial_read=True,
+                read_limiter=getattr(self, '_slots', None), runtime_mode=MockAccountRuntimeMode.AUTOMATIC,
+                automation_context=automation, now_provider=getattr(self, '_now_provider', None),
+                capture_scope=getattr(self, '_capture_scope', None), selected_management_context=context,
+                selected_management_owner=manager_current, runtime_owner_token=token)
+            self._contexts[credential_profile_id] = candidate
+            try:
+                await candidate.start()
+            finally:
+                # A partial broker read grants no management; keep its actual
+                # reconciliation owner reachable for retry and owned shutdown.
+                self._bundles[credential_profile_id] = candidate
+                await self._publish_change(credential_profile_id, candidate)
+            return result
+
+        return await self.verify_selected_order_identity(packet, packet_sha256, source_proof,
+            credential_profile_id=credential_profile_id, credential_revision=credential_revision,
+            account_ref=account_ref, binding_revision=binding_revision,
+            broker_evidence_provider=broker_evidence_provider, on_verified=prepare)
+
     def applied_settings_revision(self, scope: dict[str, str]):
         if scope["environment"] != "mock": return None
-        bundle = next((b for b in self._bundles.values() if b.account_ref == scope["account_ref"]), None)
+        bundle = next((b for b in self._bundles.values()
+            if getattr(b, 'canonical_account_ref', b.account_ref) == scope["account_ref"]), None)
         profile = bundle.credential_profile_id if bundle else next(
             (p for p, s in self._disabled_scopes.items() if s == scope), None)
         return self._settings_revisions.get(profile)
@@ -623,7 +826,7 @@ class MockCredentialOwner:
                 or old.client._settings.secret_key != credentials.get("secret_key")
                 or self.active_revision(profile_id) not in {None, record.revision}):
             raise CredentialOperationError("PROFILE_RUNTIME_NOT_READY", 503)
-        lock = self._account_locks.setdefault(old.account_ref, asyncio.Lock())
+        lock = self._account_locks.setdefault(getattr(old, 'canonical_account_ref', old.account_ref), asyncio.Lock())
         if self._closing or lock.locked() or profile_id in self._pending_profiles or profile_id in self._booting:
             raise CredentialOperationError("PROFILE_BUSY")
         await lock.acquire()
@@ -639,22 +842,30 @@ class MockCredentialOwner:
             if ({**value, "scope": current["scope"], "revision": expected_revision} == current
                     and self._settings_revisions.get(profile_id) == expected_revision):
                 return {"settings": current, "applied_revision": self._settings_revisions.get(profile_id)}
+            selected_management = getattr(old, 'selected_management_context', None) is not None
             self._bundles.pop(profile_id, None)
-            self._revisions.pop(profile_id, None)
-            self._settings_revisions.pop(profile_id, None)
+            if not selected_management:
+                self._revisions.pop(profile_id, None)
+                self._settings_revisions.pop(profile_id, None)
             await self._publish_change(profile_id, None)
             await old.close(close_broker=False)
+            if selected_management:
+                self._revisions.pop(profile_id, None)
+                self._settings_revisions.pop(profile_id, None)
             await old.broker.begin_credential_change()
             saved = await asyncio.to_thread(self.store.save_account_settings,
                 {**value, "scope": scope}, expected_revision=expected_revision)
             if self._closing: raise RuntimeError("MOCK_OWNER_CLOSED")
             await old.broker.end_credential_change()
-            new = MockAccountBundle(self.store, settings=old.client._settings, account_ref=old.account_ref,
-                run_id=old.run_id, credential_profile_id=profile_id, identity_hmac_key=self.hmac_key,
+            new = MockAccountBundle(self.store, settings=old.client._settings,
+                account_ref=getattr(old, 'canonical_account_ref', old.account_ref),
+                run_id=uuid.uuid4().hex if selected_management else old.run_id,
+                credential_profile_id=profile_id, identity_hmac_key=self.hmac_key,
                 order_transport_enabled=saved["mock_order_enabled"], client=old.client, broker=old.broker,
                 identity=old._identity, binding=old.binding, require_initial_read=True, read_limiter=self._slots,
                 now_provider=self._now_provider, capture_scope=self._capture_scope,
-                runtime_mode=old.runtime_mode, automation_context=old.automation_context)
+                runtime_mode=MockAccountRuntimeMode.MANUAL if selected_management else old.runtime_mode,
+                automation_context=None if selected_management else old.automation_context)
             self._contexts[profile_id] = new
             new.set_position_order_observation_account(self._position_order_observation_account)
             if saved["monitor_enabled"]: await new.start()
@@ -692,7 +903,7 @@ class MockCredentialOwner:
         bundle = self._bundles.get(profile_id)
         if bundle is None or bundle.binding is None or self._closing:
             raise CredentialOperationError("PROFILE_RUNTIME_NOT_READY", 503)
-        settings = await drain_thread_call(self.store.load_account_settings, self._scope(bundle.account_ref))
+        settings = await drain_thread_call(self.store.load_account_settings, bundle.binding.scope.to_dict())
         if (settings["revision"] != expected_settings_revision
                 or self._settings_revisions.get(profile_id) != expected_settings_revision
                 or self._revisions.get(profile_id) != credential_revision):
@@ -808,6 +1019,9 @@ class MockAccountBundle:
         automation_context: MockAutomationRuntimeContext | None = None,
         now_provider: Callable[[], datetime] | None = None,
         capture_scope=None,
+        selected_management_context=None,
+        selected_management_owner=None,
+        runtime_owner_token: str | None = None,
     ) -> None:
         from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
 
@@ -818,6 +1032,19 @@ class MockAccountBundle:
         self._account_ref = account_ref
         self._run_id = run_id
         self._credential_profile_id = credential_profile_id
+        from kiwoom_monitor.domain.selected_order_evidence import (
+            SelectedOrderManagementContext, selected_order_management_context_from_dict)
+        management = (selected_management_context if isinstance(selected_management_context, SelectedOrderManagementContext)
+            else selected_order_management_context_from_dict(selected_management_context)
+            if selected_management_context is not None else None)
+        if management is not None and (
+                (management.account_ref, management.execution_run_id, management.credential_profile_id)
+                != (account_ref, run_id, credential_profile_id)
+                or identity is None or binding is None or not callable(selected_management_owner)
+                or not runtime_owner_token or runtime_mode is not MockAccountRuntimeMode.AUTOMATIC):
+            raise ValueError('SELECTED_MANAGEMENT_BUNDLE_CONTEXT_INVALID')
+        self._selected_management_context = management
+        self._selected_management_owner = selected_management_owner
         if (runtime_mode is MockAccountRuntimeMode.AUTOMATIC) != (automation_context is not None):
             raise ValueError("MOCK_RUNTIME_MODE_CONTEXT_INVALID")
         if automation_context is not None and (
@@ -831,7 +1058,7 @@ class MockAccountBundle:
         self._hmac_key = identity_hmac_key
         if (client is None) != (broker is None) or (identity is None) != (binding is None):
             raise ValueError("MOCK_BUNDLE_CONTEXT_INVALID")
-        if binding is not None and (binding.scope.account_ref != account_ref
+        if binding is not None and (binding.scope.account_ref != (management.canonical_account_ref if management else account_ref)
                 or binding.credential_profile_id != credential_profile_id
                 or binding.scope.environment != AccountEnvironment.MOCK
                 or identity.environment != AccountEnvironment.MOCK):
@@ -851,12 +1078,14 @@ class MockAccountBundle:
         self.account_queries = AccountQuerySessionManager(self.broker,
             lambda: self._binding if not self._closing else None, read_limiter=read_limiter)
         self.repository = ExecutionRepository(store)
+        if management is not None:
+            self.repository.bind_selected_management_context(management, current_owner=selected_management_owner)
         now = ((lambda: as_kst(now_provider())) if now_provider is not None
                else (lambda: as_kst(self.client.server_now())))
         transport = make_mock_transport(self.client, now_provider=now) if order_transport_enabled else None
         self.runtime = ExecutionRuntime(
             OrderLifecycle(self.repository, transport, now_provider=now), self.repository,
-            account_ref=account_ref, run_id=run_id, owner_token=uuid.uuid4().hex,
+            account_ref=account_ref, run_id=run_id, owner_token=runtime_owner_token or uuid.uuid4().hex,
             now_provider=now if now_provider is not None else (lambda: datetime.now(KST)),
         )
         if runtime_mode is MockAccountRuntimeMode.AUTOMATIC:
@@ -866,11 +1095,12 @@ class MockAccountBundle:
                 self.broker, environment="mock", account_ref=account_ref, now_provider=now,
             ), self.runtime, self.repository, now_provider=now, read_limiter=read_limiter,
             automation_risk_repository=(
-                ForwardEvaluationRepository(store)
+                ForwardEvaluationRepository(store, selected_management_context=management)
                 if runtime_mode is MockAccountRuntimeMode.AUTOMATIC else None
             ),
             automation_binding_revision=(binding.binding_revision if binding is not None else 0),
-            automation_account_scope=(binding.scope if binding is not None else None),
+            automation_account_scope=(AccountScope('kiwoom', AccountEnvironment.MOCK, account_ref) if management is not None
+                                      else binding.scope if binding is not None else None),
             new_orders_enabled_on_start=(runtime_mode is MockAccountRuntimeMode.MANUAL),
             capture_scope=capture_scope,
         )
@@ -892,6 +1122,14 @@ class MockAccountBundle:
     @property
     def account_ref(self) -> str:
         return self._account_ref
+
+    @property
+    def canonical_account_ref(self) -> str:
+        return self._selected_management_context.canonical_account_ref if self._selected_management_context is not None else self._account_ref
+
+    @property
+    def selected_management_context(self):
+        return self._selected_management_context
 
     def set_position_order_observation_account(self, account_ref):
         self._position_order_observation_account = account_ref
@@ -929,7 +1167,8 @@ class MockAccountBundle:
         return self._binding
 
     def _resolve_scope(self, raw_account_number: str):
-        if self._closing or self._identity is None or self._binding is None:
+        if (self._closing or self._identity is None or self._binding is None
+                or self._selected_management_context is not None and not self._selected_management_owner()):
             return None
         try:
             fingerprint = account_identity_fingerprint(
@@ -937,7 +1176,8 @@ class MockAccountBundle:
             )
         except ValueError:
             return None
-        return self._binding.scope if hmac.compare_digest(
+        return (AccountScope('kiwoom', AccountEnvironment.MOCK, self.account_ref)
+                if self._selected_management_context is not None else self._binding.scope) if hmac.compare_digest(
             fingerprint, self._identity.identity_fingerprint,
         ) else None
 

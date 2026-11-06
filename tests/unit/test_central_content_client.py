@@ -24,6 +24,25 @@ class Response(io.BytesIO):
 
 
 class CentralContentClientTests(unittest.TestCase):
+    def test_selected_management_preparation_acceptance_and_readback_preserve_current_target_scope(self):
+        calls = []
+        def opener(request, **kwargs):
+            calls.append(request)
+            return Response(b'{}')
+        client = CentralContentClient('https://nas.test', 'fixture', opener=opener)
+        values = dict(operation_id='source/order', credential_profile_id='current-key', credential_revision=7,
+            account_ref='current-target', binding_revision=3, packet_sha256='a' * 64, expected_settings_revision=11)
+        client.prepare_selected_order_management(**values)
+        client.accept_selected_order_management(**values, expected_control_revision=9)
+        client.load_selected_order_management(operation_id=values['operation_id'])
+        self.assertEqual(['POST', 'POST', 'GET'], [row.method for row in calls])
+        self.assertTrue(calls[0].full_url.endswith('/source%2Forder/prepare-management'))
+        self.assertTrue(calls[1].full_url.endswith('/source%2Forder/accept-management'))
+        self.assertTrue(calls[2].full_url.endswith('/source%2Forder/management'))
+        payload = json.loads(calls[1].data)
+        self.assertEqual(('current-target', 7, 3, 9), (payload['account_ref'], payload['credential_revision'],
+            payload['binding_revision'], payload['expected_control_revision']))
+        self.assertNotIn('source_identity_proof', payload)
     def test_clock_uses_existing_response_and_preserves_timezone_instant(self):
         calls = []
         def opener(request, **kwargs):
@@ -325,6 +344,30 @@ class CentralContentClientTests(unittest.TestCase):
         )
         self.assertEqual(6, json.loads(requests[3].data.decode())["expected_control_revision"])
         self.assertEqual(9, json.loads(requests[4].data.decode())["credential_revision"])
+        self.assertNotIn("account_selection_id", json.loads(requests[2].data.decode()))
+
+    def test_mock_account_selection_save_read_and_group_start_use_existing_authenticated_transport(self):
+        requests = []
+        def opener(request, **_kwargs):
+            requests.append(request)
+            return Response(json.dumps({"ok": True}).encode())
+        client = CentralContentClient("https://nas.test", "token", opener=opener)
+        document = {"selection_id": "saved-selection", "member_spec_ids": ["anchor", "first"],
+                    "execution_order_spec_ids": ["first", "anchor"], "limits": {"maximum_capital_won": 123456}}
+        client.publish_mock_automation_account_selection(account_ref="account/ref", credential_profile_id="mock profile",
+            expected_binding_revision=2, selection=document)
+        client.load_mock_automation_account_selections("account/ref", credential_profile_id="mock profile")
+        client.start_mock_automation(account_ref="account/ref", credential_profile_id="mock profile", spec_id="anchor",
+            expected_settings_revision=3, credential_revision=4, account_selection_id="saved-selection")
+        self.assertEqual("https://nas.test/api/v1/research/mock-automation-account-selections", requests[0].full_url)
+        self.assertEqual({"account_ref": "account/ref", "credential_profile_id": "mock profile",
+                          "expected_binding_revision": 2, "selection": document}, json.loads(requests[0].data))
+        self.assertEqual("https://nas.test/api/v1/research/mock-automation-account-selections/account%2Fref?"
+                         "credential_profile_id=mock+profile", requests[1].full_url)
+        self.assertEqual({"account_ref": "account/ref", "credential_profile_id": "mock profile", "spec_id": "anchor",
+                          "expected_settings_revision": 3, "credential_revision": 4,
+                          "account_selection_id": "saved-selection"}, json.loads(requests[2].data))
+        self.assertTrue(all(request.get_header("Authorization") == "Bearer token" for request in requests))
 
 
 class NativeUnfilledPublicationClientTests(unittest.TestCase):

@@ -119,7 +119,7 @@ def _require_staged_leader_order_policy(package, mode, policy):
     parameters = package.candidate_spec.get('parameters') or {}
     contract = parameters.get('execution_contract') or {}
     if (package.candidate_spec.get('family') == 'leader_breakout/v1'
-            and contract.get('version') == 'leader_breakout_execution/v2'
+            and contract.get('version') in {'leader_breakout_execution/v2', 'leader_breakout_execution/v3'}
             and (mode != LEADER_NATIVE_PLAN_MODE or policy is None or policy.accepted_order_management is None)):
         raise ValueError('분할 돌파는 명시 계획과 현재 조건 재판단·정정 정책 v2가 필요합니다')
 
@@ -264,7 +264,9 @@ def validate_mock_automation_account_selection(repository, selection, *, current
     This is publication, not admission. Activation must obtain fresh account,
     binding, Risk/control and lease evidence through the existing order owner.
     """
-    from kiwoom_monitor.domain.execution_activation import mock_automation_account_selection_from_dict
+    from kiwoom_monitor.domain.execution_activation import (
+        MockAutomationAccountSelectionV2, mock_automation_account_selection_from_dict,
+    )
     value = mock_automation_account_selection_from_dict(selection.to_dict())
     binding = current_binding or {}
     if (binding.get('credential_profile_id') != value.credential_profile_id
@@ -275,6 +277,26 @@ def validate_mock_automation_account_selection(repository, selection, *, current
             or binding.get('verification_method') != 'ka00001'
             or not same_aware_instant(str(binding.get('verified_at', '')), value.binding_verified_at)):
         raise ValueError('account selection requires the current verified mock binding')
+    retained = {}
+    if isinstance(value, MockAutomationAccountSelectionV2):
+        control = repository.load_mock_automation_control(value.account_scope.account_ref)
+        if (control is None or control.active_spec_id != value.primary_spec_id
+                or control.execution_run_id != value.retained_admission_refs[0].execution_run_id):
+            raise ValueError('replacement requires its original account control and run')
+        current_ids = (control.account_selection.member_spec_ids if control.account_selection is not None
+                       else (control.active_spec_id,))
+        retained = {reference.spec_id: reference for reference in value.retained_admission_refs}
+        if control.account_selection != value and (
+                not set(current_ids) <= set(retained)
+                or not set(retained) <= set(current_ids) | set(value.entry_spec_ids)):
+            raise ValueError('replacement must retain every current member admission')
+        for identity, reference in retained.items():
+            admission = repository.load_mock_automation_admission_for_spec(value.account_scope.account_ref, identity)
+            if (admission is None or admission.account_ref != value.account_scope.account_ref
+                    or not value.matches_admission(spec_id=identity, admission_id=admission.admission_id,
+                        original_selection_id=admission.account_selection_id, execution_run_id=admission.execution_run_id)
+                    or reference.execution_run_id != control.execution_run_id):
+                raise ValueError('replacement retained admission reference conflict')
     implementations, members = {}, []
     for spec_id in value.member_spec_ids:
         member = repository.load_mock_automation_spec(value.account_scope.account_ref, spec_id,
@@ -288,6 +310,11 @@ def validate_mock_automation_account_selection(repository, selection, *, current
                 or not same_aware_instant(member.binding_verified_at.isoformat(), value.binding_verified_at)
                 or member.frozen_at > value.frozen_at):
             raise ValueError('account selection member scope or freeze conflict')
+        if spec_id in retained and not value.allows_entry(spec_id):
+            # Original plans remain manageable when their old producer or
+            # artifact is no longer selected. This grants no new entry.
+            members.append(member)
+            continue
         profile = repository.load_profile(member.strategy_ref, member.forward_profile_id)
         if profile is None:
             raise ValueError('account selection member forward profile is missing')

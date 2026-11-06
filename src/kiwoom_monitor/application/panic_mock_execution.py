@@ -58,7 +58,7 @@ def validate_panic_trigger(spec, *, run_id, event, trigger, now):
 
 def assess_panic_order_management(spec, *, run_id, parameters, event, entry_evidence, record, head,
         order_events, recovery, risk, quote, decided_at, now, entry_enabled, exit_evidence=None, root=None,
-        panic_trigger=None):
+        panic_trigger=None, verified_peer_orders=None):
     terms = spec.panic_execution_policy
     if terms is None or terms.accepted_order_management != 'reassess_then_amend_price/v1':
         raise ValueError('PANIC current-order policy is not selected')
@@ -112,14 +112,15 @@ def assess_panic_order_management(spec, *, run_id, parameters, event, entry_evid
         signal_reference_price=event['signal_reference_price'], entry_deadline=datetime.fromisoformat(event['expires_at']),
         capital_limit=capital, invalid_entry_price=invalid_price,
         protection_reason=panic_trigger['reason'] if panic_trigger is not None else None,
-        exit_anchor=exit_evidence['snapshot']['trigger_quote']['price_won'] if exit_evidence is not None else None)
+        exit_anchor=exit_evidence['snapshot']['trigger_quote']['price_won'] if exit_evidence is not None else None,
+        verified_peer_orders=verified_peer_orders)
     if assessment is not None and panic_trigger is not None:
         assessment['panic_trigger'] = panic_trigger
     return assessment
 
 
 def prepare_panic_order_management_claim(repository, runtime, execution, spec, record, *, parameters, event,
-        quote, recovery, risk, entry_enabled, panic_trigger=None):
+        quote, recovery, risk, entry_enabled, panic_trigger=None, verified_peer_orders=None):
     entry = repository.load_panic_entry_evidence(runtime.account_ref, record.intent.plan.plan_id)
     if entry is None: raise ValueError('PANIC original entry evidence is missing')
     root = execution.load(mock_automation_intent_id(spec.spec_id, entry['decision']['decision_id']))
@@ -133,7 +134,7 @@ def prepare_panic_order_management_claim(repository, runtime, execution, spec, r
         head=execution.load_plan_position(runtime.account_ref, runtime.run_id, record.intent.symbol, record.intent.plan),
         order_events=execution.events(record.intent.intent_id), recovery=recovery, risk=risk, quote=quote,
         decided_at=now, now=now, entry_enabled=entry_enabled, root=root,
-        exit_evidence=exit_proof, panic_trigger=panic_trigger)
+        exit_evidence=exit_proof, panic_trigger=panic_trigger, verified_peer_orders=verified_peer_orders)
     return MinuteOrderManagementClaim(assessment, recovery) if assessment is not None else None
 
 

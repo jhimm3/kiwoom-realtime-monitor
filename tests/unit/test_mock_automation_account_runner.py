@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 class _Monitor:
@@ -83,6 +83,99 @@ def initialize_store(case):
     case.store = SQLiteQueryStore(Path(temporary) / 'members.sqlite3')
     case.store.initialize()
     case.addCleanup(case.store.close)
+
+
+def public_group_inputs(case):
+    """Native READY/admission/lease/Risk; the broker recovery cut is explicit."""
+    from tests.unit.test_mock_automation_account_execution import grouped_inputs, group_runtime
+    from kiwoom_monitor.application.mock_automation_risk import build_mock_automation_risk_snapshot
+    from kiwoom_monitor.application.position_target import reconcile_position_account_observation
+    from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
+    from kiwoom_monitor.central_server.mock_runtime import MockAccountRuntimeMode
+    from kiwoom_monitor.domain.order_contract import AccountBinding, AccountSnapshot
+    from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
+    from datetime import timedelta
+    data = grouped_inputs(case, case.store)
+    data.selection = replace(data.selection, execution_order_spec_ids=tuple(reversed(data.selection.member_spec_ids)))
+    data.repository.publish_mock_automation_account_selection(data.selection,
+        expected_implementation_hash=lambda _: data.implementation_hash)
+    native = group_runtime(case, case.store, data)
+
+    class Monitor(_Monitor):
+        def __init__(self):
+            super().__init__()
+            self.enabled = False
+            self.refreshes = 0
+            self.latest_automation_execution_cut = None
+            self.recovery_override = None
+
+        def set_automation_execution_inputs_enabled(self, enabled, *, request_recovery=True):
+            self.enabled = enabled
+            self.input_changes.append((enabled, request_recovery))
+
+        @property
+        def automation_execution_inputs_enabled(self):
+            return self.enabled
+
+        async def refresh_recovery(self):
+            self.refreshes += 1
+            native.clock[0] += timedelta(seconds=1)
+            account = AccountSnapshot(native.runtime.account_ref, 250_000, 0, {}, native.clock[0])
+            recovery = MockAccountRecovery(account, ()) if self.recovery_override is None else replace(
+                self.recovery_override, account=replace(self.recovery_override.account, as_of=native.clock[0]))
+            account = recovery.account
+            records, complete = native.execution.account_active_intents(account.account_ref)
+            events = native.execution.account_events('mock', account.account_ref).events
+            risk = build_mock_automation_risk_snapshot(recovery, events, (), records,
+                execution_run_id=native.run_id, binding_revision=data.selection.binding_revision,
+                reconciliation_revision=self.refreshes, observed_at=native.clock[0],
+                broker_query_started_at=native.clock[0], broker_query_completed_at=native.clock[0])
+            data.repository.save_mock_automation_risk_snapshot(risk)
+            observation = reconcile_position_account_observation(recovery, records, records,
+                input_ref='mock-account-ram:public-group:' + str(self.refreshes), observed_at=native.clock[0],
+                ledger_complete=complete, runtime_stable=True, ledger_read_failed=False, reconciled_records=records)
+            observation = replace(observation, risk_snapshot=risk)
+            self.latest_automation_execution_cut = dict(risk=risk, observation=observation, recovery=recovery)
+            return recovery
+
+    monitor = Monitor()
+    bundle = SimpleNamespace(account_ref=native.runtime.account_ref, run_id=native.run_id,
+        credential_profile_id=data.selection.credential_profile_id, runtime=native.runtime,
+        repository=native.execution, monitor=monitor, runtime_mode=MockAccountRuntimeMode.MANUAL,
+        automation_context=None)
+    bundle.refresh_automation_control = lambda control: setattr(bundle, 'automation_context',
+        replace(bundle.automation_context, control_revision=control.control_revision))
+
+    class Owner:
+        def __init__(self):
+            self.current = bundle
+            self.switches = []
+            self.require_execution_settings = AsyncMock()
+
+        def bundle(self, profile):
+            return self.current if profile == data.selection.credential_profile_id else None
+
+        async def switch_execution_mode(self, profile, mode, **kwargs):
+            self.switches.append((profile, mode, kwargs))
+            bundle.runtime_mode = mode
+            bundle.automation_context = kwargs['automation_context']
+            return bundle
+
+        def account_bindings(self):
+            return (AccountBinding(data.selection.credential_profile_id, data.selection.account_scope,
+                data.selection.binding_revision, data.selection.binding_verified_at),)
+
+        def active_revision(self, profile):
+            return 1
+
+    owner = Owner()
+    supervisor = MockAutomationSupervisor(case.store, owner, poll_seconds=60,
+        now_provider=lambda: native.clock[0], expected_implementation_hash=lambda _: data.implementation_hash)
+    case.addAsyncCleanup(supervisor.close)
+    arguments = dict(credential_profile_id=data.selection.credential_profile_id,
+        account_ref=bundle.account_ref, spec_id=data.selection.primary_spec_id,
+        expected_settings_revision=1, credential_revision=1, account_selection_id=data.selection.selection_id)
+    return data, native, owner, bundle, supervisor, arguments
 
 
 def verify_native_panic_member_checkpoint(case, native_factory=None):
@@ -311,3 +404,275 @@ class NativeAccountRunnerTests(unittest.IsolatedAsyncioTestCase):
         other = MockAutomationEpisode(self.store, other_bundle, data.specs[1], member_admission=episodes[1]._member_admission)
         with self.assertRaisesRegex(ValueError, 'RUNNER_MEMBERS_MISMATCH'):
             MockAutomationRunner(episodes[0], member_episodes=(other,))
+
+    async def test_listener_detach_failure_still_joins_the_one_task_and_every_member(self):
+        from kiwoom_monitor.central_server.mock_automation_runner import MockAutomationRunner
+        data, owner, bundle, episodes, recovery, risk = member_episode_inputs(self, self.store)
+        runner = MockAutomationRunner(episodes[0], member_episodes=episodes[1:], monitor=bundle.monitor,
+            execution_order=tuple(episode.spec_id for episode in episodes))
+        runner.attach_inputs()
+        await runner.start()
+        task = runner._task
+        cleared = bundle.monitor.clear_automation_risk_listener
+        def fail_after_clear(listener):
+            cleared(listener)
+            raise RuntimeError('listener close acknowledgement lost')
+        with patch.object(bundle.monitor, 'clear_automation_risk_listener', side_effect=fail_after_clear):
+            with self.assertRaisesRegex(RuntimeError, 'close acknowledgement lost'):
+                await runner.close()
+        self.assertTrue(task.done())
+        self.assertIsNone(runner._task)
+        self.assertIsNone(bundle.monitor.listener)
+        self.assertTrue(all(episode.closing for episode in episodes))
+        self.assertTrue(all(not episode._checkpoint.pending for episode in episodes))
+        self.assertEqual(2, len(owner.transport.calls))
+
+
+class PublicAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        initialize_store(self)
+
+    async def test_authenticated_group_start_stop_resume_and_restore_keep_every_native_member(self):
+        import httpx
+        from fastapi import FastAPI, Header, HTTPException
+        from kiwoom_monitor.central_server.mock_automation_routes import create_mock_automation_router
+        from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
+        data, native, owner, bundle, supervisor, arguments = public_group_inputs(self)
+        def authorize(authorization: str | None = Header(default=None)):
+            if authorization != 'Bearer group-test':
+                raise HTTPException(401)
+        app = FastAPI()
+        app.include_router(create_mock_automation_router(supervisor, authorize))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://group.test') as client:
+            self.assertEqual(401, (await client.post('/api/v1/mock-automation/start', json=arguments)).status_code)
+            response = await client.post('/api/v1/mock-automation/start', json=arguments,
+                headers={'Authorization': 'Bearer group-test'})
+            self.assertEqual(200, response.status_code, response.text)
+            status = response.json()
+        self.assertEqual('mock_automation_account_runner_status/v1', status['runner']['version'])
+        self.assertEqual(data.selection.selection_id, status['control']['account_selection']['selection_id'])
+        self.assertEqual(list(data.selection.execution_order_spec_ids), status['runner']['execution_order_spec_ids'])
+        self.assertEqual(list(data.selection.member_spec_ids), [value['spec_id'] for value in status['runner']['members']])
+        runner = supervisor._runners[bundle.account_ref]
+        self.assertEqual(2, len(runner.episodes))
+        self.assertTrue(all(episode.prepared for episode in runner.episodes))
+        self.assertEqual((1, 1, 1), (len(owner.switches), bundle.monitor.refreshes, bundle.monitor.listener_sets))
+        self.assertFalse(native.runtime._new_orders_enabled)
+        self.assertEqual([], native.transport.calls)
+        again = await supervisor.activate(**arguments)
+        self.assertEqual(status['runner']['account_selection_id'], again['runner']['account_selection_id'])
+        self.assertEqual(1, bundle.monitor.refreshes)
+        with self.assertRaisesRegex(RuntimeError, 'ALREADY_ACTIVE'):
+            await supervisor.activate(**{key: value for key, value in arguments.items() if key != 'account_selection_id'})
+        stopped = await supervisor.stop(credential_profile_id=arguments['credential_profile_id'],
+            account_ref=bundle.account_ref, spec_id=arguments['spec_id'], expected_control_revision=1, reason='whole account stop')
+        self.assertEqual('STOPPED', stopped['control']['desired_state'])
+        self.assertEqual(data.selection.selection_id, stopped['control']['account_selection']['selection_id'])
+        resumed = await supervisor.resume(credential_profile_id=arguments['credential_profile_id'],
+            account_ref=bundle.account_ref, spec_id=arguments['spec_id'], expected_control_revision=2,
+            expected_settings_revision=1, credential_revision=1, reason='explicit whole account resume')
+        self.assertTrue(runner._task is None and all(episode.closing for episode in runner.episodes))
+        self.assertEqual('RUNNING', resumed['control']['desired_state'])
+        self.assertEqual(2, len(resumed['runner']['members']))
+        self.assertEqual(2, bundle.monitor.refreshes, 'one new recovery for the whole resume')
+        await supervisor.close()
+        restored = MockAutomationSupervisor(self.store, owner, poll_seconds=60, now_provider=lambda: native.clock[0],
+            expected_implementation_hash=lambda _: data.implementation_hash)
+        self.addAsyncCleanup(restored.close)
+        await restored._restore_once()
+        self.assertIn(bundle.account_ref, restored._runners, restored._restore_errors)
+        final = restored.status(bundle.account_ref, credential_profile_id=arguments['credential_profile_id'])
+        self.assertEqual(data.selection.selection_id, final['runner']['account_selection_id'])
+        self.assertEqual(2, len(final['runner']['members']))
+        self.assertEqual(3, bundle.monitor.refreshes)
+        self.assertIsNone(self.store.load_document('execution_mock_automation_runner_current', bundle.account_ref, 'current'))
+        self.assertEqual([], native.transport.calls)
+
+    async def test_missing_explicit_order_rejects_before_switch_or_native_admission(self):
+        data, native, owner, bundle, supervisor, arguments = public_group_inputs(self)
+        selection = replace(data.selection, execution_order_spec_ids=None)
+        data.repository.publish_mock_automation_account_selection(selection,
+            expected_implementation_hash=lambda _: data.implementation_hash)
+        with self.assertRaisesRegex(RuntimeError, 'EXPLICIT_MEMBER_EXECUTION_ORDER_REQUIRED'):
+            await supervisor.activate(**{**arguments, 'account_selection_id': selection.selection_id})
+        self.assertEqual([], owner.switches)
+        self.assertEqual(0, bundle.monitor.refreshes)
+        self.assertIsNone(data.repository.load_mock_automation_control(bundle.account_ref))
+        self.assertEqual([], native.transport.calls)
+
+    async def test_unselected_or_mismatched_research_artifact_never_issues_group_admission(self):
+        data, native, owner, bundle, supervisor, arguments = public_group_inputs(self)
+        for implementation in (None, '0' * 64):
+            with self.subTest(implementation=implementation):
+                supervisor._expected_implementation_hash = lambda _: implementation
+                with self.assertRaisesRegex(ValueError, 'selected implementation changed'):
+                    await supervisor.activate(**arguments)
+                self.assertIsNone(data.repository.load_mock_automation_control(bundle.account_ref))
+                self.assertTrue(all(data.repository.load_mock_automation_admission_for_spec(bundle.account_ref, spec.spec_id) is None
+                    for spec in data.specs))
+                self.assertFalse(native.runtime._new_orders_enabled)
+        self.assertEqual([], native.transport.calls)
+
+    async def test_group_activation_uses_the_accepted_monitor_cut_instead_of_raw_broker_account(self):
+        data, native, owner, bundle, supervisor, arguments = public_group_inputs(self)
+        refresh = bundle.monitor.refresh_recovery
+        async def return_raw_account():
+            recovery = await refresh()
+            return replace(recovery, account=replace(recovery.account, available_cash_won=250_001))
+        bundle.monitor.refresh_recovery = return_raw_account
+
+        status = await supervisor.activate(**arguments)
+
+        cut = bundle.monitor.latest_automation_execution_cut
+        self.assertEqual(2, len(status['runner']['members']))
+        for spec in data.specs:
+            admission = data.repository.load_mock_automation_admission_for_spec(bundle.account_ref, spec.spec_id)
+            recovered = data.repository.load_latest_mock_automation_recovery(bundle.account_ref, admission.admission_id)
+            self.assertEqual((cut['risk'].snapshot_id, 250_000), (recovered.risk_snapshot_id, recovered.orderable_cash_won))
+        self.assertEqual(1, bundle.monitor.refreshes)
+        self.assertEqual([], native.transport.calls)
+
+    async def test_stopped_group_restore_keeps_all_original_admissions_and_never_resumes_entries(self):
+        from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
+        data, native, owner, bundle, supervisor, arguments = public_group_inputs(self)
+        await supervisor.activate(**arguments)
+        admissions = tuple(data.repository.load_mock_automation_admission_for_spec(bundle.account_ref, spec.spec_id) for spec in data.specs)
+        stopped = await supervisor.stop(credential_profile_id=arguments['credential_profile_id'], account_ref=bundle.account_ref,
+            spec_id=arguments['spec_id'], expected_control_revision=1, reason='preserve stopped member management')
+        await supervisor.close()
+        restored = MockAutomationSupervisor(self.store, owner, poll_seconds=60, now_provider=lambda: native.clock[0],
+            expected_implementation_hash=lambda _: data.implementation_hash)
+        self.addAsyncCleanup(restored.close)
+        await restored._restore_once()
+        self.assertIn(bundle.account_ref, restored._runners, restored._restore_errors)
+        status = restored.status(bundle.account_ref, credential_profile_id=arguments['credential_profile_id'])
+        self.assertEqual(stopped['control'], status['control'])
+        self.assertEqual(2, len(status['runner']['members']))
+        self.assertEqual(admissions, tuple(data.repository.load_mock_automation_admission_for_spec(bundle.account_ref, spec.spec_id)
+            for spec in data.specs))
+        async def stopped_members():
+            while not all(episode.status['state'] == 'STOPPED' for episode in restored._runners[bundle.account_ref].episodes):
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(stopped_members(), 10)
+        self.assertFalse(native.runtime._new_orders_enabled)
+        self.assertEqual([], native.transport.calls)
+
+    async def test_explicit_group_resume_resolves_each_flat_generic_protection_review(self):
+        data, native, owner, bundle, supervisor, arguments = public_group_inputs(self)
+        await supervisor.activate(**arguments)
+        for episode in supervisor._runners[bundle.account_ref].episodes:
+            episode.request_protection_review(reason='explicit OFF review', input_ref='public-group-review',
+                requested_at=native.clock[0])
+        await supervisor.stop(credential_profile_id=arguments['credential_profile_id'], account_ref=bundle.account_ref,
+            spec_id=arguments['spec_id'], expected_control_revision=1, reason='whole group review')
+
+        status = await supervisor.resume(credential_profile_id=arguments['credential_profile_id'], account_ref=bundle.account_ref,
+            spec_id=arguments['spec_id'], expected_control_revision=2, expected_settings_revision=1,
+            credential_revision=1, reason='explicit resume after native flat verification')
+
+        self.assertEqual('RUNNING', status['control']['desired_state'])
+        self.assertTrue(all(member['protection_review']['state'] == 'RESOLVED_FLAT' for member in status['runner']['members']))
+        self.assertFalse(native.runtime._new_orders_enabled)
+        self.assertEqual(2, bundle.monitor.refreshes)
+        self.assertEqual([], native.transport.calls)
+
+    async def test_original_stopped_plan_and_late_fill_survive_a_changed_selected_artifact(self):
+        from datetime import timedelta
+        from tests.unit import test_mock_automation_specification as support
+        from kiwoom_monitor.application.mock_automation_execution import dispatch_mock_automation_decision_from_risk
+        from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
+        from kiwoom_monitor.domain.order_contract import AccountSnapshot, BrokerFill, BrokerOrderSnapshot, OrderPlanRef, OrderState
+        from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
+        data, native, owner, bundle, supervisor, arguments = public_group_inputs(self)
+        await supervisor.activate(**arguments)
+        cut = bundle.monitor.latest_automation_execution_cut
+        original = data.specs[0]
+        decision = support._automation_decision(native.run_id, 'ENTER', native.clock[0])
+        gate, buy, receipt = dispatch_mock_automation_decision_from_risk(data.repository, native.runtime,
+            decision, cut['recovery'], cut['risk'], account_ref=bundle.account_ref, spec_id=original.spec_id,
+            strategy_ref=original.strategy_ref, plan=OrderPlanRef('preserved-off-plan', 'explicit-synthetic-plan/v1', 0))
+        self.assertIsNotNone(buy, gate.reasons)
+        admission = data.repository.load_mock_automation_admission_for_spec(bundle.account_ref, original.spec_id)
+        await supervisor.stop(credential_profile_id=arguments['credential_profile_id'], account_ref=bundle.account_ref,
+            spec_id=arguments['spec_id'], expected_control_revision=1, reason='OFF preserves original account management')
+        await supervisor.close()
+        native.clock[0] += timedelta(seconds=1)
+        actual = BrokerOrderSnapshot(buy.broker_order_id, bundle.account_ref, buy.intent.symbol, OrderState.FILLED,
+            1, 0, native.clock[0], (BrokerFill('late-after-off', 1, buy.intent.limit_price, native.clock[0]),))
+        native.runtime.reconcile(buy.intent.intent_id, actual)
+        native.runtime.reconcile(buy.intent.intent_id, actual)
+        bundle.monitor.recovery_override = MockAccountRecovery(AccountSnapshot(bundle.account_ref,
+            250_000 - buy.intent.limit_price, 0, {buy.intent.symbol: 1}, native.clock[0]), ())
+        restored = MockAutomationSupervisor(self.store, owner, poll_seconds=60, now_provider=lambda: native.clock[0],
+            leader_context_source=lambda *_: {'enabled': False},
+            expected_implementation_hash=lambda _: None)
+        self.addAsyncCleanup(restored.close)
+        await restored._restore_once()
+
+        self.assertIn(bundle.account_ref, restored._runners, restored._restore_errors)
+        episode = restored._runners[bundle.account_ref].episode_for_spec(original.spec_id)
+        async def late_fill_projected():
+            while episode._episode_position.state.position_quantity != 1:
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(late_fill_projected(), 10)
+        self.assertEqual(1, episode._episode_position.state.position_quantity)
+        self.assertEqual(admission, data.repository.load_mock_automation_admission_for_spec(bundle.account_ref, original.spec_id))
+        control = data.repository.load_mock_automation_control(bundle.account_ref)
+        self.assertEqual('STOPPED', control.desired_state.value)
+        head = self.store.load_document('execution_mock_plan_positions', bundle.account_ref, buy.intent.plan.plan_id)['document']
+        self.assertEqual((original.spec_id, 1), (head['spec_id'], head['quantity']))
+        fills = [event for event in native.execution.account_events('mock', bundle.account_ref).events if event.event_type == 'FILL']
+        self.assertEqual([('late-after-off', original.spec_id)], [(event.broker_execution_id, event.member_spec_id) for event in fills])
+        self.assertFalse(native.runtime._new_orders_enabled)
+        self.assertEqual(1, len(native.transport.calls))
+
+    async def test_failed_member_preparation_closes_all_prepared_members_and_can_retry_the_same_admission(self):
+        from kiwoom_monitor.central_server.mock_automation_episode import MockAutomationEpisode
+        data, native, owner, bundle, supervisor, arguments = public_group_inputs(self)
+        prepare = MockAutomationEpisode.prepare_restore
+        finish = MockAutomationEpisode.finish_close
+        finished = []
+        def fail_member(episode):
+            if episode.spec_id == data.specs[1].spec_id:
+                raise RuntimeError('second member native prepare failed')
+            return prepare(episode)
+        async def close_member(episode, **kwargs):
+            finished.append(episode.spec_id)
+            return await finish(episode, **kwargs)
+        with patch.object(MockAutomationEpisode, 'prepare_restore', fail_member), \
+                patch.object(MockAutomationEpisode, 'finish_close', close_member):
+            with self.assertRaisesRegex(RuntimeError, 'second member native prepare failed'):
+                await supervisor.activate(**arguments)
+        self.assertEqual(set(data.selection.member_spec_ids), set(finished))
+        self.assertFalse(supervisor._preparing_runners)
+        self.assertNotIn(bundle.account_ref, supervisor._runners)
+        self.assertFalse(bundle.monitor.enabled)
+        self.assertFalse(native.runtime._new_orders_enabled)
+        status = await supervisor.activate(**arguments)
+        self.assertEqual(2, len(status['runner']['members']))
+        self.assertEqual(1, len(owner.switches))
+        self.assertEqual([], native.transport.calls)
+
+    async def test_group_attachment_failure_withdraws_the_listener_and_drains_every_prepared_member(self):
+        from kiwoom_monitor.central_server.mock_automation_episode import MockAutomationEpisode
+        data, native, owner, bundle, supervisor, arguments = public_group_inputs(self)
+        original = bundle.monitor.set_automation_risk_listener
+        def fail_after_attach(listener):
+            original(listener)
+            raise RuntimeError('group listener acknowledgement lost')
+        finished = []
+        finish = MockAutomationEpisode.finish_close
+        async def close_member(episode, **kwargs):
+            finished.append(episode.spec_id)
+            return await finish(episode, **kwargs)
+        with patch.object(bundle.monitor, 'set_automation_risk_listener', side_effect=fail_after_attach), \
+                patch.object(MockAutomationEpisode, 'finish_close', close_member):
+            with self.assertRaisesRegex(RuntimeError, 'group listener acknowledgement lost'):
+                await supervisor.activate(**arguments)
+        self.assertEqual(set(data.selection.member_spec_ids), set(finished))
+        self.assertIsNone(bundle.monitor.listener)
+        self.assertFalse(bundle.monitor.enabled)
+        self.assertFalse(supervisor._preparing_runners)
+        self.assertNotIn(bundle.account_ref, supervisor._runners)
+        self.assertFalse(native.runtime._new_orders_enabled)
+        self.assertEqual([], native.transport.calls)

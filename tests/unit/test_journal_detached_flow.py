@@ -668,6 +668,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
                 load=lambda *_args, **kwargs: calls.append(("query", kwargs["account_scope"])) or result,
             ),
             _episodes=(),
+            _visible_execution_members={object(): "previous-account-member"},
             _apply_history_filters=lambda: calls.append("render"),
             _render_fills=lambda fills: calls.append(("fills", fills)),
             _history_followup_timer=SimpleNamespace(start=lambda delay: calls.append(("followup", delay))),
@@ -680,6 +681,7 @@ class JournalDetachedFlowTests(unittest.TestCase):
         self.assertEqual(
             [("query", scope), "render", ("fills", ()), ("followup", 0)], calls,
         )
+        self.assertEqual({}, owner._visible_execution_members)
         JournalWindow._run_history_followups(owner)
         self.assertEqual(["backfill", "enrichment"], calls[-2:])
 
@@ -692,18 +694,24 @@ class JournalDetachedFlowTests(unittest.TestCase):
         at = datetime(2026, 9, 16, 10)
         planned = TradeFill("plan-order", "005930", "삼성전자", "매수", at, 1, 70000, origin_scope=scope)
         legacy = TradeFill("old-order", "005930", "삼성전자", "매수", at, 1, 70000)
+        member_only = TradeFill("member-order", "005930", "삼성전자", "매수", at, 1, 70000, origin_scope=scope)
         owner = SimpleNamespace(
             _fills_table=QTableWidget(0, 9), _select_journal_cell=lambda *_: None,
             _visible_execution_plans={planned: OrderPlanRef("close<a>", "close_confirm/v1", 3)},
+            _visible_execution_members={planned: "member<a>", member_only: "member-b"},
         )
 
-        JournalWindow._render_fills(owner, (planned, legacy))
+        JournalWindow._render_fills(owner, (planned, legacy, member_only))
 
         item = owner._fills_table.item(0, 8)
         self.assertEqual("plan-order", item.text())
         self.assertIn("close&lt;a&gt;", item.toolTip())
         self.assertIn("승인 판본 3", item.toolTip())
+        self.assertIn("실행 멤버 member&lt;a&gt;", item.toolTip())
         self.assertEqual("", owner._fills_table.item(1, 8).toolTip())
+        self.assertEqual("member-order", owner._fills_table.item(2, 8).text())
+        self.assertIn("실행 멤버 member-b", owner._fills_table.item(2, 8).toolTip())
+        self.assertNotIn("계획", owner._fills_table.item(2, 8).toolTip())
 
     def test_loaded_legacy_review_is_not_autosaved_and_edits_use_legacy_write_contract(self) -> None:
         saved: list[tuple[TradeReview, AccountScope | None]] = []

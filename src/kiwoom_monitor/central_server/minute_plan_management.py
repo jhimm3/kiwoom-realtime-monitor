@@ -161,11 +161,16 @@ class MinutePlanManagement:
 
     async def _fresh_cut(self):
         recovery = await self._bundle.monitor.refresh_recovery()
-        risk = await drain_thread_call(self._repository.load_latest_mock_automation_risk, self._bundle.account_ref)
+        cut = getattr(self._bundle.monitor, 'latest_automation_execution_cut', None)
+        if cut is not None:
+            recovery, risk = cut['recovery'], cut['risk']
+        else:
+            risk = await drain_thread_call(self._repository.load_latest_mock_automation_risk, self._bundle.account_ref)
         if risk is None:
             raise ValueError('CLOSE current native Risk is unavailable')
         await drain_thread_call(record_mock_automation_recovery_from_risk, self._repository, self._bundle.runtime,
-            recovery, risk, account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id)
+            recovery, risk, account_ref=self._bundle.account_ref, spec_id=self._spec.spec_id,
+            **({'observation': cut['observation']} if cut is not None else {}))
         return recovery, risk
 
     def _management_input(self, record, control, quote, enabled, notice):
@@ -202,6 +207,7 @@ class MinutePlanManagement:
         settings = (await drain_thread_call(self._store.load_document, 'server_operational_settings', 'global', 'current')
                     if record.intent.side is OrderSide.BUY else None)
         enabled = (record.intent.side is OrderSide.BUY and control.desired_state.value == 'RUNNING' and not control.entry_resume_required
+                   and (control.account_selection is None or control.account_selection.allows_entry(self._spec.spec_id))
                    and minute_current_shadow_matches(self._spec, context['event'], settings['document'] if settings else None))
         quote = self._price(record.intent.symbol) if self._price is not None else None
         token = self._management_input(record, control, quote, enabled, notice)
@@ -214,6 +220,7 @@ class MinutePlanManagement:
             claim = prepare_claim(self._repository, self._bundle.runtime, self._bundle.repository,
                 self._spec, current, parameters=self._parameters, event=context['event'], quote=current_quote,
                 recovery=cut['recovery'], risk=cut['risk'], entry_enabled=enabled,
+                verified_peer_orders=cut.get('verified_peer_orders'),
                 **({'panic_trigger': notice} if self._panic else {'protection_notice': notice}))
             if claim is not None:
                 outcome.update(claim.assessment)

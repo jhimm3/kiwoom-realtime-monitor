@@ -62,10 +62,12 @@ READ_ONLY_ENDPOINTS = {
     "ka20005": "/api/dostk/chart",
     "ka20006": "/api/dostk/chart",
     "kt00007": "/api/dostk/acnt",
+    "kt00009": "/api/dostk/acnt",
     "kt00015": "/api/dostk/acnt",
 }
 MOCK_ACCOUNT_ENDPOINTS = {
     "kt00007": "/api/dostk/acnt",  # scoped historical fills
+    "kt00009": "/api/dostk/acnt",  # dated physical execution IDs
     "kt00015": "/api/dostk/acnt",  # scoped historical costs
     "ka00001": "/api/dostk/acnt",  # verified account identity
     "kt00001": "/api/dostk/acnt",  # orderable cash
@@ -88,6 +90,7 @@ REQUEST_PRIORITIES = {
     "ka10001": 35,
     "ka10100": 35,
     "kt00007": 45,
+    "kt00009": 45,
     "kt00015": 50,
     "ka10054": 65,
     "ka10080": 70,

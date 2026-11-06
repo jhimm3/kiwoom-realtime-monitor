@@ -30,7 +30,7 @@ from kiwoom_monitor.application.mock_automation_candidate import evaluate_candid
 PROFILE = {
     "provider": "kiwoom_mock", "profile_id": "mock-one", "label": "모의 1",
     "configured": True, "supported": True, "disabled": False,
-    "account_ref": "account-one", "revision": 4,
+    "account_ref": "22222222-2222-2222-2222-222222222222", "revision": 4,
 }
 
 
@@ -66,13 +66,16 @@ class FakeContent:
     def load_candidate_events(self, *, after_sequence, limit):
         return {"events": [], "has_more": False, "next_cursor": None}
 
-    def load_mock_automation_specs(self, account_ref):
+    def load_mock_automation_specs(self, account_ref, *, include_admission_refs=False):
         return {"account_ref": account_ref, "specs": [
             {"spec": {"spec_id": "blocked", "strategy_ref": "s"},
              "readiness": "BLOCKED", "reasons": ["TBD"]},
             {"spec": {"spec_id": "ready", "strategy_ref": "s"},
              "readiness": "READY", "reasons": []},
         ]}
+
+    def load_mock_automation_account_selections(self, account_ref, *, credential_profile_id):
+        return {"account_ref": account_ref, "selections": []}
 
     def load_mock_automation_status(self, account_ref, *, credential_profile_id):
         return {
@@ -81,7 +84,75 @@ class FakeContent:
         }
 
 
+def account_selection_documents():
+    from datetime import timezone
+    from kiwoom_monitor.domain.execution_activation import MockAutomationAccountLimits, MockAutomationAccountSelection
+    from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
+    identities = ["mock_automation_spec_" + value * 64 for value in ("a", "b")]
+    limits = {"maximum_concurrent_strategies": 2, "maximum_concurrent_positions": 3,
+              "maximum_capital_won": 700000, "maximum_daily_loss_won": 4000, "maximum_data_gap_seconds": 7,
+              "maximum_submission_unknown_count": 0, "maximum_reconnect_count": 2, "maximum_balance_mismatch_count": 0}
+    selection = MockAutomationAccountSelection(
+        account_scope=AccountScope("kiwoom", AccountEnvironment.MOCK, PROFILE["account_ref"]),
+        credential_profile_id=PROFILE["profile_id"], binding_revision=2,
+        binding_verified_at=datetime(2026, 9, 21, tzinfo=timezone.utc),
+        frozen_at=datetime(2026, 9, 21, 1, tzinfo=timezone.utc),
+        member_spec_ids=tuple(identities), execution_order_spec_ids=tuple(reversed(identities)),
+        limits=MockAutomationAccountLimits(**limits),
+    )
+    specs = [{"spec": {"spec_id": identity, "strategy_ref": name, "maximum_capital_won": capital},
+              "readiness": "READY"} for identity, name, capital in zip(identities, ("돌파", "종가"), (150000, 550000))]
+    return selection.to_dict(), specs
+
+
 class MockAutomationDialogPolicyTests(unittest.TestCase):
+    def test_group_readiness_requires_explicit_order_and_every_current_ready_member(self):
+        context = MockAutomationWorker(FakeContent(), FakeCredentials(), "refresh")._load_context("", "")
+        selection, specs = account_selection_documents()
+        context.update(account_selections=[selection], selected_account_selection_id=selection["selection_id"],
+                       specs=specs, selected_spec_id=selection["member_spec_ids"][0])
+        self.assertTrue(operation_availability(context)["start"])
+        for changed in (
+            {key: value for key, value in selection.items() if key != "execution_order_spec_ids"},
+            {**selection, "execution_order_spec_ids": [selection["member_spec_ids"][0]] * 2},
+            {**selection, "binding_revision": 1},
+            {**selection, "credential_profile_id": "other"},
+        ):
+            with self.subTest(selection=changed):
+                context["account_selections"] = [changed]
+                self.assertFalse(operation_availability(context)["start"])
+        context["account_selections"] = [selection]
+        context["specs"][1]["readiness"] = "BLOCKED"
+        self.assertFalse(operation_availability(context)["start"])
+        context["status"].update(runtime_mode="AUTOMATIC", control={"desired_state": "RUNNING",
+            "active_spec_id": selection["member_spec_ids"][0]})
+        self.assertTrue(operation_availability(context)["stop"])
+
+    def test_worker_saves_exact_selection_and_restores_authoritative_active_identity(self):
+        selection, specs = account_selection_documents()
+        content = FakeContent()
+        content.publish_mock_automation_account_selection = Mock(return_value={"status": "saved", "orders_started": False})
+        content.load_mock_automation_specs = Mock(return_value={"specs": specs})
+        content.load_mock_automation_account_selections = Mock(return_value={"selections": [selection]})
+        values = {"account_ref": PROFILE["account_ref"], "credential_profile_id": PROFILE["profile_id"],
+                  "expected_binding_revision": 2, "selection": selection}
+        worker = MockAutomationWorker(content, FakeCredentials(), "publish_account_selection", values)
+        completed, failed = Mock(), Mock()
+        worker.completed.connect(completed); worker.failed.connect(failed); worker.run()
+        failed.assert_not_called(); completed.assert_called_once()
+        content.publish_mock_automation_account_selection.assert_called_once_with(**values)
+        context = completed.call_args.args[1]
+        self.assertEqual(selection["selection_id"], context["selected_account_selection_id"])
+        self.assertEqual(selection["member_spec_ids"][0], context["selected_spec_id"])
+        self.assertIsNone(context["status"]["control"])
+        active = {**selection, "selection_id": "different-active-selection"}
+        content.load_mock_automation_status = Mock(return_value={"control": {
+            "active_spec_id": selection["member_spec_ids"][0], "account_selection": active},
+            "runner": {"account_selection_id": selection["selection_id"]}})
+        restored = worker._load_context("", "", selection["selection_id"])
+        self.assertEqual(active["selection_id"], restored["selected_account_selection_id"])
+        self.assertFalse(operation_availability(restored)["start"])
+
     def test_operational_refresh_and_commands_never_load_publication_shadow_history(self):
         content, credentials = FakeContent(), FakeCredentials()
         content.load_candidate_events = Mock(side_effect=AssertionError("operational Shadow read"))
@@ -303,6 +374,160 @@ class MockAutomationDialogControlTests(unittest.TestCase):
     def tearDown(self):
         self.dialog.deleteLater()
         self.app.processEvents()
+
+    def test_selected_original_management_uses_current_target_epoch_and_exact_saved_readback(self):
+        dialog = self.dialog
+        dialog._management_packet = dict(operation_id='original-order', packet_sha256='a' * 64,
+            account_ref='original-source', symbol='005930')
+        binding = self.context['candidate_binding']
+        context = dict(credential_profile_id=PROFILE['profile_id'], credential_revision=PROFILE['revision'],
+            canonical_account_ref=PROFILE['account_ref'], binding_revision=binding['binding_revision'],
+            spec_id='original-spec', execution_run_id='original-run')
+        status = dict(operation_id='original-order', packet_sha256='a' * 64, account_ref='original-source',
+            reconciliation_ready=True, management_ready=False,
+            installation=dict(target_account_ref=PROFILE['account_ref']),
+            management=dict(context=context, status='RECONCILIATION_ONLY', settings_revision=self.context['account_settings']['revision']),
+            control=dict(desired_state='STOPPED', control_revision=9))
+        dialog._completed('selected_status', {'selected_management': status})
+        self.assertTrue(dialog._management_accept.isEnabled())
+        with patch.object(dialog, '_start_worker') as start:
+            dialog._request_selected_management('selected_accept')
+        values = start.call_args.args[1]
+        self.assertEqual((PROFILE['account_ref'], PROFILE['revision'], binding['binding_revision'], 9),
+            (values['account_ref'], values['credential_revision'], values['binding_revision'], values['expected_control_revision']))
+        self.assertNotIn('source_identity_proof', values)
+        self.assertNotIn('spec_id', values)
+        self.assertEqual(self.context['account_settings']['revision'], values['expected_settings_revision'])
+        applied = deepcopy(status)
+        applied['management']['status'] = 'MANAGEMENT_READY'
+        applied['management_ready'] = True
+        applied['control']['desired_state'] = 'RUNNING'
+        dialog._completed('selected_accept', {'selected_management': applied})
+        self.assertIn('실행 상태 미확인', dialog._management_label.text())
+        applied['supervisor'] = dict(runner=dict(spec_id='original-spec', execution_run_id='original-run'))
+        dialog._completed('selected_status', {'selected_management': applied})
+        self.assertIn('원주문 관리 연결됨', dialog._management_label.text())
+        applied['management']['context']['credential_revision'] -= 1
+        dialog._completed('selected_status', {'selected_management': applied})
+        self.assertFalse(dialog._management_accept.isEnabled())
+        self.assertNotIn('원주문 관리 연결됨', dialog._management_label.text())
+
+    def test_account_selection_editor_requires_inputs_and_preserves_explicit_anchor_order_and_limits(self):
+        from datetime import timezone
+        from kiwoom_monitor.presentation.mock_automation_dialog import MockAutomationAccountSelectionDialog
+        selection, specs = account_selection_documents()
+        binding = self.context["candidate_binding"]
+        now = datetime(2026, 9, 21, 2, tzinfo=timezone.utc)
+        editor = MockAutomationAccountSelectionDialog(specs, binding, PROFILE["profile_id"],
+                                                      now_provider=lambda: now, parent=self.dialog)
+        self.addCleanup(editor.deleteLater)
+        self.assertTrue(all(not field.text() for field in editor._limit_inputs.values()))
+        self.assertTrue(all(not field.text() and not check.isChecked()
+                            for check, field in editor._member_inputs.values()))
+        self.assertIsNone(editor._anchor.currentData())
+        with self.assertRaisesRegex(ValueError, "선택"):
+            editor.publication_values()
+        for identity, (check, field) in editor._member_inputs.items():
+            check.setChecked(True)
+            field.setText("2" if identity == selection["member_spec_ids"][0] else "1")
+        editor._anchor.setCurrentIndex(1)
+        with self.assertRaisesRegex(ValueError, "공통 한도"):
+            editor.publication_values()
+        for name, field in editor._limit_inputs.items():
+            field.setText(str(selection["limits"][name]))
+        values = editor.publication_values()
+        document = values["selection"]
+        self.assertEqual(selection["member_spec_ids"], document["member_spec_ids"])
+        self.assertEqual(list(reversed(selection["member_spec_ids"])), document["execution_order_spec_ids"])
+        self.assertEqual(selection["limits"], document["limits"])
+        self.assertEqual(now.isoformat(), document["frozen_at"])
+        self.assertEqual([150000, 550000], [row["spec"]["maximum_capital_won"] for row in specs])
+        self.assertEqual((PROFILE["account_ref"], PROFILE["profile_id"], 2),
+                         (values["account_ref"], values["credential_profile_id"], values["expected_binding_revision"]))
+        restored = MockAutomationAccountSelectionDialog(specs, binding, PROFILE["profile_id"],
+            now_provider=lambda: now, selection=selection, parent=self.dialog)
+        self.addCleanup(restored.deleteLater)
+        self.assertEqual(["2", "1"], [field.text() for _, field in restored._member_inputs.values()])
+        self.assertEqual(selection["limits"], restored.publication_values()["selection"]["limits"])
+        passive = {key: value for key, value in selection.items() if key != "execution_order_spec_ids"}
+        unranked = MockAutomationAccountSelectionDialog(specs, binding, PROFILE["profile_id"],
+            now_provider=lambda: now, selection=passive, parent=self.dialog)
+        self.addCleanup(unranked.deleteLater)
+        self.assertTrue(all(not field.text() for _, field in unranked._member_inputs.values()))
+        with self.assertRaisesRegex(ValueError, "실행 순서"):
+            unranked.publication_values()
+
+    def test_account_selection_editor_rejects_duplicate_missing_order_and_unselected_anchor(self):
+        from datetime import timezone
+        from kiwoom_monitor.presentation.mock_automation_dialog import MockAutomationAccountSelectionDialog
+        selection, specs = account_selection_documents()
+        editor = MockAutomationAccountSelectionDialog(specs, self.context["candidate_binding"], PROFILE["profile_id"],
+            now_provider=lambda: datetime(2026, 9, 21, 2, tzinfo=timezone.utc), selection=selection, parent=self.dialog)
+        self.addCleanup(editor.deleteLater)
+        first, second = list(editor._member_inputs.values())
+        for a, b, error in (("1", "1", "중복"), ("1", "3", "빠짐없이"), ("", "2", "모두")):
+            with self.subTest(order=(a, b)):
+                first[1].setText(a); second[1].setText(b)
+                with self.assertRaisesRegex(ValueError, error):
+                    editor.publication_values()
+        first[0].setChecked(False); second[1].setText("1")
+        with self.assertRaisesRegex(ValueError, "계좌 기준"):
+            editor.publication_values()
+
+    def test_saved_group_start_and_controls_use_anchor_separately_from_execution_priority(self):
+        selection, specs = account_selection_documents()
+        self.context.update(specs=specs, selected_spec_id=selection["member_spec_ids"][0],
+            account_selections=[selection], selected_account_selection_id=selection["selection_id"])
+        self.dialog._completed("refresh", self.context)
+        self.assertIn("저장됨 · 시작 전 구성", self.dialog._selection_details.text())
+        self.assertIn("종가 → 돌파", self.dialog._selection_details.text())
+        self.assertIn("700,000", self.dialog._selection_details.text())
+        self.assertTrue(self.dialog._start.isEnabled())
+        self.assertFalse(self.dialog._spec.isEnabled())
+        with patch.object(self.dialog, "_start_worker") as start_worker:
+            self.dialog._request("start")
+            operation, values = start_worker.call_args.args
+            self.assertEqual("start", operation)
+            self.assertEqual(selection["selection_id"], values["account_selection_id"])
+            self.assertEqual(selection["member_spec_ids"][0], values["spec_id"])
+            self.assertNotEqual(selection["execution_order_spec_ids"][0], values["spec_id"])
+            self.assertEqual((7, 4), (values["expected_settings_revision"], values["credential_revision"]))
+            self.context["status"]["control"] = {"active_spec_id": values["spec_id"], "control_revision": 9,
+                                                 "desired_state": "STOPPED", "account_selection": selection}
+            self.dialog._reason.setText("명시 재개")
+            for command in ("stop", "resume"):
+                self.dialog._request(command)
+                payload = start_worker.call_args.args[1]
+                self.assertEqual(selection["member_spec_ids"][0], payload["spec_id"])
+                self.assertNotIn("account_selection_id", payload)
+                self.assertEqual((9, "명시 재개"), (payload["expected_control_revision"], payload["reason"]))
+
+    def test_group_status_keeps_saved_applied_unknown_and_member_reservations_separate(self):
+        selection, specs = account_selection_documents()
+        self.context.update(specs=specs, selected_spec_id=selection["member_spec_ids"][0],
+            account_selections=[selection], selected_account_selection_id=selection["selection_id"])
+        self.context["status"].update(runtime_mode="AUTOMATIC", control={"active_spec_id": selection["member_spec_ids"][0],
+            "desired_state": "RUNNING", "account_selection": selection}, runner={
+                "version": "mock_automation_account_runner_status/v1", "account_selection_id": selection["selection_id"],
+                "execution_order_spec_ids": selection["execution_order_spec_ids"], "members": [
+                    {"spec_id": selection["member_spec_ids"][0], "state": "STOPPED", "planned_protection": {
+                        "state": "SUBMISSION_UNKNOWN", "plan_quantity": 2, "reserved_quantity": 2,
+                        "detailed_filled_quantity": 0}},
+                    {"spec_id": selection["member_spec_ids"][1], "state": "READY"}]})
+        self.dialog._completed("refresh", self.context)
+        self.assertIn("현재 제어에 적용됨", self.dialog._selection_details.text())
+        self.assertIn("계좌 공통 실행", self.dialog._runtime.text())
+        self.assertIn("돌파 · 중지 · 보호 매도 접수 미확인 · 계획 보유 2주 · 주문 예약 2주 · 상세 체결 0주",
+                      self.dialog._members_status.text())
+        self.assertIn("종가 · 준비", self.dialog._members_status.text())
+        self.context["status"]["runner"]["account_selection_id"] = "conflicting-runner-selection"
+        self.dialog._completed("refresh", self.context)
+        self.assertIn("적용 상태 미확인", self.dialog._selection_details.text())
+        self.context["selected_account_selection_id"] = "missing-selection-id"
+        self.dialog._completed("refresh", self.context)
+        self.assertEqual("missing-selection-id", self.dialog._selection.currentData())
+        self.assertIn("저장 내용을 확인할 수 없습니다", self.dialog._selection_details.text())
+        self.assertFalse(self.dialog._start.isEnabled())
 
     def test_close_candidate_opens_explicit_ready_review_without_starting_orders(self):
         from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
@@ -567,6 +792,30 @@ class MockAutomationDialogControlTests(unittest.TestCase):
             self.assertEqual(current, '현재 조건 재판단·정정 우선' in self.dialog._spec.currentText())
             self.assertEqual('leader-explicit', self.dialog._spec.currentData())
 
+    def test_explicit_leader_v3_review_shows_reentry_terms_and_keeps_v2_staged_values(self):
+        from kiwoom_monitor.presentation.mock_automation_dialog import MockAutomationPublicationDialog
+        from tests.unit.test_leader_position_steps import staged_config
+        config = staged_config().to_dict()
+        for version in ('leader_breakout_execution/v2', 'leader_breakout_execution/v3'):
+            with self.subTest(version=version):
+                parameters = deepcopy(config)
+                parameters['execution_contract']['version'] = version
+                if version.endswith('/v3'):
+                    parameters['execution_contract']['reentry_rule'] = 'new_independent_setup_after_confirmed_flat/v1'
+                candidate = {'package': {'candidate_spec': {'family': 'leader_breakout/v1', 'parameters': parameters}}}
+                original = deepcopy(candidate)
+                review = MockAutomationPublicationDialog(candidate, {}, PROFILE['profile_id'],
+                    ({'event_id': 'explicit-shadow'},), self.dialog)
+                self.addCleanup(review.deleteLater)
+                self.assertIsNotNone(review._position_terms)
+                text = review._position_terms.text()
+                self.assertIn('최초 진입 2주', text)
+                self.assertIn('추가 매수 1주', text)
+                self.assertEqual(version.endswith('/v3'), '새 독립 셋업으로만 재진입' in text)
+                self.assertEqual(version.endswith('/v3'), '같은 셋업의 시각·세대만 바꿔' in text)
+                self.assertEqual('', review._plan_policy_path.text())
+                self.assertEqual(original, candidate)
+
     def test_publication_review_waits_for_thread_finish_and_posts_exact_fresh_selection(self):
         import sys
         import threading
@@ -589,10 +838,10 @@ class MockAutomationDialogControlTests(unittest.TestCase):
         content.load_mock_automation_candidates = Mock(side_effect=candidates)
         content.load_candidate_events = Mock(return_value={"events": [event], "has_more": False, "next_cursor": None})
         content.publish_mock_automation_spec = Mock(return_value={"status": "saved", "orders_started": False})
-        def specs(account_ref):
+        def specs(account_ref, **kwargs):
             if content.publish_mock_automation_spec.called:
                 raise RuntimeError("publication followup unavailable")
-            return original_specs(account_ref)
+            return original_specs(account_ref, **kwargs)
         content.load_mock_automation_specs = Mock(side_effect=specs)
         for operation in ("start", "stop", "resume"):
             setattr(content, f"{operation}_mock_automation", Mock())

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, nullcontext
+from copy import deepcopy
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Mapping, Protocol
 
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
 
 
 class ForwardEvaluationStore(Protocol):
+    def load_selected_order_management_policy(self, context: dict[str, Any], *, _reader: Any = None) -> dict[str, Any]: ...
     def mock_automation_read_scope(self) -> AbstractContextManager[Any]: ...
     def upsert_documents(self, collection: str, values: list[dict[str, Any]]) -> None: ...
     def insert_immutable_document(
@@ -109,6 +111,9 @@ class ForwardEvaluationStore(Protocol):
     ) -> dict[str, dict[str, Any]]: ...
     def save_mock_automation_control(
         self, value: dict[str, Any], *, expected_revision: int, resume_owner_token: str | None = None,
+    ) -> bool: ...
+    def replace_mock_automation_control(
+        self, value: dict[str, Any], *, expected_revision: int, expected_selection_id: str | None, owner_token: str,
     ) -> bool: ...
 
 
@@ -142,8 +147,31 @@ class ForwardEvaluationRepository:
     MOCK_AUTOMATION_RISK_COLLECTION = "execution_mock_automation_risk_snapshots"
     MOCK_AUTOMATION_CURRENT_RISK_COLLECTION = "execution_mock_automation_current_risk"
 
-    def __init__(self, store: ForwardEvaluationStore) -> None:
+    def __init__(self, store: ForwardEvaluationStore, *, selected_management_context=None) -> None:
         self._store = store
+        from kiwoom_monitor.domain.selected_order_evidence import (
+            SelectedOrderManagementContext, selected_order_management_context_from_dict)
+        self._selected_management_context = (selected_management_context if isinstance(
+            selected_management_context, SelectedOrderManagementContext) else
+            selected_order_management_context_from_dict(selected_management_context)
+            if selected_management_context is not None else None)
+        self._selected_management_policy = None
+
+    @property
+    def selected_management_context(self):
+        return self._selected_management_context
+
+    @property
+    def selected_management_policy(self):
+        return deepcopy(self._management_policy())
+
+    def _management_policy(self, *, _reader=None):
+        if self._selected_management_context is None:
+            raise ValueError('an explicit selected management context is required')
+        if self._selected_management_policy is None:
+            self._selected_management_policy = self._store.load_selected_order_management_policy(
+                self._selected_management_context.to_dict(), **({'_reader': _reader} if _reader is not None else {}))
+        return self._selected_management_policy
 
     def mock_automation_read_scope(self) -> AbstractContextManager[Any]:
         factory = getattr(self._store, 'mock_automation_read_scope', None)
@@ -269,8 +297,8 @@ class ForwardEvaluationRepository:
         return self._save_immutable(self.MOCK_AUTOMATION_ACCOUNT_SELECTION_COLLECTION,
             value.account_scope.account_ref, value.selection_id, value.to_dict())
 
-    def load_mock_automation_account_selection(self, account_ref: str, selection_id: str):
-        document = self._find(self.MOCK_AUTOMATION_ACCOUNT_SELECTION_COLLECTION, account_ref, selection_id)
+    def load_mock_automation_account_selection(self, account_ref: str, selection_id: str, *, _reader: Any = None):
+        document = self._find(self.MOCK_AUTOMATION_ACCOUNT_SELECTION_COLLECTION, account_ref, selection_id, _reader=_reader)
         value = mock_automation_account_selection_from_dict(document) if document is not None else None
         if value is not None and value.selection_id != selection_id:
             raise ValueError('account selection stored identity conflict')
@@ -648,6 +676,14 @@ class ForwardEvaluationRepository:
             **({"resume_owner_token": resume_owner_token} if resume_owner_token is not None else {}),
         )
 
+    def replace_mock_automation_control(self, value: MockAutomationControl, *, expected_revision: int,
+            expected_selection_id: str | None, owner_token: str) -> bool:
+        value = mock_automation_control_from_dict(value.to_dict())
+        if value.control_revision != expected_revision + 1 or not owner_token:
+            raise ValueError('mock account replacement requires the current revision and owner')
+        return self._store.replace_mock_automation_control(value.to_dict(), expected_revision=expected_revision,
+            expected_selection_id=expected_selection_id, owner_token=owner_token)
+
     def save_mock_automation_recovery_decision(
         self, value: MockAutomationRecoveryDecision,
     ) -> bool:
@@ -667,6 +703,7 @@ class ForwardEvaluationRepository:
                     value.account_ref, spec_id=value.spec_id, admission_id=value.admission_id,
                     lease_receipt_id=value.lease_receipt_id, **reader_args,
                 )
+                lineage = self._selected_management_lineage(lineage, value, **reader_args)
                 spec_document = lineage.get("spec")
                 spec = mock_automation_spec_from_dict(spec_document) if spec_document else None
                 if spec is None:
@@ -748,6 +785,7 @@ class ForwardEvaluationRepository:
             value.account_ref, spec_id=value.spec_id, admission_id=value.admission_id,
             lease_receipt_id=value.lease_receipt_id, recovery_decision_id=value.recovery_decision_id,
         )
+        lineage = self._selected_management_lineage(lineage, value)
         spec_document = lineage.get("spec")
         spec = mock_automation_spec_from_dict(spec_document) if spec_document else None
         admission, lease, recovery = (lineage.get(name) for name in ("admission", "lease", "recovery"))
@@ -1181,6 +1219,22 @@ class ForwardEvaluationRepository:
         revisions = self.load_stage_revisions(strategy_ref)
         return revisions[-1].stage if revisions else StrategyLifecycleStage.DRAFT
 
+    def _selected_management_lineage(self, lineage, value, *, _reader=None):
+        context = self._selected_management_context
+        if context is None:
+            return lineage
+        if ((value.account_ref, value.spec_id, value.admission_id, value.execution_run_id)
+                != (context.account_ref, context.spec_id, context.admission_id, context.execution_run_id)):
+            raise ValueError('selected management lineage scope changed')
+        # Only past policy/admission and the new C lease are borrowed.
+        # Recovery, Risk and control remain current native publications.
+        return {**lineage,
+            'spec': self._find(self.MOCK_AUTOMATION_SPEC_COLLECTION, value.account_ref, value.spec_id, _reader=_reader),
+            'admission': self._find(self.MOCK_AUTOMATION_ADMISSION_COLLECTION,
+                value.account_ref, value.admission_id, _reader=_reader),
+            'lease': self._find(self.MOCK_AUTOMATION_LEASE_COLLECTION,
+                value.account_ref, value.lease_receipt_id, _reader=_reader)}
+
     def _save_immutable(
         self, collection: str, owner: str, key: str, document: Mapping[str, Any],
     ) -> bool:
@@ -1189,7 +1243,26 @@ class ForwardEvaluationRepository:
     def _find(self, collection: str, owner: str, key: str, *, _reader: Any = None) -> dict[str, Any] | None:
         reader_args = {} if _reader is None else {"_reader": _reader}
         row = self._store.load_document(collection, owner, key, **reader_args)
-        return _document(row) if row is not None else None
+        if row is not None:
+            return _document(row)
+        context = self._selected_management_context
+        if context is None:
+            return None
+        view = self._management_policy(_reader=_reader)
+        original = next((item['document'] for item in view['documents']
+            if (item['collection'], item['owner'], item['key']) == (collection, owner, key)), None)
+        if original is not None:
+            return deepcopy(original)
+        if collection == self.MOCK_AUTOMATION_ADMISSION_COLLECTION and owner == context.account_ref and key == context.admission_id:
+            return next((deepcopy(item['document']) for item in view['documents']
+                if (item['collection'], item['owner'], item['key'])
+                == (self.MOCK_AUTOMATION_ADMISSION_BY_SPEC_COLLECTION, context.account_ref, context.spec_id)), None)
+        receipt = view['current_lease_receipt']
+        if owner == context.account_ref and (
+                collection == self.MOCK_AUTOMATION_LEASE_BY_ADMISSION_COLLECTION and key == context.admission_id
+                or collection == self.MOCK_AUTOMATION_LEASE_COLLECTION and key == receipt['receipt_id']):
+            return deepcopy(receipt)
+        return None
 
     def _has_passing_forward_report(
         self, strategy_ref: str, evidence_refs: tuple[str, ...],

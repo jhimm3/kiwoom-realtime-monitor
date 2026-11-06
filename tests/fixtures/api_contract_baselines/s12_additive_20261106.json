@@ -1,0 +1,826 @@
+{
+  "review_basis": [
+    "S12 account selection publication/replacement and selected-order public A/B/C/D contract; nine added HTTP operations, eight added path keys.",
+    "Literal request properties, strict extra-field policy, auth/path/query metadata and route insertion order reviewed against mock_publication_routes.py, mock_automation_routes.py, selected_order_recovery_routes.py and research_read_routes.py; app.py registers the selected router immediately before the dataset router whose first route is market/snapshots/{kind}.",
+    "No OpenAPI/model-generated oracle. Released baselines and every existing method/schema/frame/task remain in the full equality comparison."
+  ],
+  "reviewed_additive_paths": {
+    "/api/v1/research/mock-automation-account-selections": {
+      "post": {
+        "summary": "Publish Mock Account Selection",
+        "operationId": "publish_mock_account_selection_api_v1_research_mock_automation_account_selections_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MockAutomationAccountSelectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/research/mock-automation-account-selections/{account_ref}": {
+      "get": {
+        "summary": "List Mock Account Selections",
+        "operationId": "list_mock_account_selections_api_v1_research_mock_automation_account_selections__account_ref__get",
+        "parameters": [
+          {
+            "name": "account_ref",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Account Ref"
+            }
+          },
+          {
+            "name": "credential_profile_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 96,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "title": "Credential Profile Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/research/micro-inputs": {
+      "post": {
+        "summary": "Research Micro Frozen Inputs",
+        "operationId": "research_micro_frozen_inputs_api_v1_research_micro_inputs_post",
+        "parameters": [
+          {
+            "name": "evidence_sha256",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Evidence Sha256"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Research Micro Frozen Inputs Api V1 Research Micro Inputs Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mock-automation/replace-selection": {
+      "post": {
+        "summary": "Replace Mock Automation Selection",
+        "operationId": "replace_mock_automation_selection_api_v1_mock_automation_replace_selection_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MockAutomationReplaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management": {
+      "get": {
+        "summary": "Management Status",
+        "operationId": "management_status_api_v1_mock_automation_selected_order_evidence__operation_id__management_get",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Operation Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mock-automation/selected-order-evidence/{operation_id}/assessment": {
+      "post": {
+        "summary": "Assess",
+        "operationId": "assess_api_v1_mock_automation_selected_order_evidence__operation_id__assessment_post",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Operation Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectedOrderRecoveryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mock-automation/selected-order-evidence/{operation_id}/bootstrap": {
+      "post": {
+        "summary": "Bootstrap",
+        "operationId": "bootstrap_api_v1_mock_automation_selected_order_evidence__operation_id__bootstrap_post",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Operation Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectedOrderRecoveryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mock-automation/selected-order-evidence/{operation_id}/prepare-management": {
+      "post": {
+        "summary": "Prepare Management",
+        "operationId": "prepare_management_api_v1_mock_automation_selected_order_evidence__operation_id__prepare_management_post",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Operation Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectedOrderManagementRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mock-automation/selected-order-evidence/{operation_id}/accept-management": {
+      "post": {
+        "summary": "Accept Management",
+        "operationId": "accept_management_api_v1_mock_automation_selected_order_evidence__operation_id__accept_management_post",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Operation Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectedOrderManagementAcceptance"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "reviewed_additive_schemas": {
+    "MockAutomationAccountSelectionRequest": {
+      "properties": {
+        "account_ref": {
+          "type": "string",
+          "maxLength": 36,
+          "minLength": 36,
+          "title": "Account Ref"
+        },
+        "credential_profile_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,96}$",
+          "title": "Credential Profile Id"
+        },
+        "expected_binding_revision": {
+          "type": "integer",
+          "minimum": 1.0,
+          "title": "Expected Binding Revision"
+        },
+        "selection": {
+          "additionalProperties": true,
+          "type": "object",
+          "title": "Selection"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "account_ref",
+        "credential_profile_id",
+        "expected_binding_revision",
+        "selection"
+      ],
+      "title": "MockAutomationAccountSelectionRequest"
+    },
+    "MockAutomationReplaceRequest": {
+      "properties": {
+        "account_ref": {
+          "type": "string",
+          "maxLength": 36,
+          "minLength": 36,
+          "title": "Account Ref"
+        },
+        "credential_profile_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,96}$",
+          "title": "Credential Profile Id"
+        },
+        "spec_id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Spec Id"
+        },
+        "expected_control_revision": {
+          "type": "integer",
+          "minimum": 1.0,
+          "title": "Expected Control Revision"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Reason"
+        },
+        "expected_settings_revision": {
+          "type": "integer",
+          "minimum": 1.0,
+          "title": "Expected Settings Revision"
+        },
+        "credential_revision": {
+          "type": "integer",
+          "minimum": 1.0,
+          "title": "Credential Revision"
+        },
+        "account_selection_id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Account Selection Id"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "account_ref",
+        "credential_profile_id",
+        "spec_id",
+        "expected_control_revision",
+        "reason",
+        "expected_settings_revision",
+        "credential_revision",
+        "account_selection_id"
+      ],
+      "title": "MockAutomationReplaceRequest"
+    },
+    "SelectedOrderRecoveryRequest": {
+      "properties": {
+        "credential_profile_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,96}$",
+          "title": "Credential Profile Id"
+        },
+        "credential_revision": {
+          "type": "integer",
+          "minimum": 1.0,
+          "title": "Credential Revision"
+        },
+        "account_ref": {
+          "type": "string",
+          "maxLength": 36,
+          "minLength": 36,
+          "title": "Account Ref"
+        },
+        "binding_revision": {
+          "type": "integer",
+          "minimum": 1.0,
+          "title": "Binding Revision"
+        },
+        "packet_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Packet Sha256"
+        },
+        "source_identity_proof": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Identity Proof"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "credential_profile_id",
+        "credential_revision",
+        "account_ref",
+        "binding_revision",
+        "packet_sha256"
+      ],
+      "title": "SelectedOrderRecoveryRequest"
+    },
+    "SelectedOrderManagementRequest": {
+      "properties": {
+        "credential_profile_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,96}$",
+          "title": "Credential Profile Id"
+        },
+        "credential_revision": {
+          "type": "integer",
+          "minimum": 1.0,
+          "title": "Credential Revision"
+        },
+        "account_ref": {
+          "type": "string",
+          "maxLength": 36,
+          "minLength": 36,
+          "title": "Account Ref"
+        },
+        "binding_revision": {
+          "type": "integer",
+          "minimum": 1.0,
+          "title": "Binding Revision"
+        },
+        "packet_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Packet Sha256"
+        },
+        "expected_settings_revision": {
+          "type": "integer",
+          "minimum": 1.0,
+          "title": "Expected Settings Revision"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "credential_profile_id",
+        "credential_revision",
+        "account_ref",
+        "binding_revision",
+        "packet_sha256",
+        "expected_settings_revision"
+      ],
+      "title": "SelectedOrderManagementRequest"
+    },
+    "SelectedOrderManagementAcceptance": {
+      "properties": {
+        "credential_profile_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,96}$",
+          "title": "Credential Profile Id"
+        },
+        "credential_revision": {
+          "type": "integer",
+          "minimum": 1.0,
+          "title": "Credential Revision"
+        },
+        "account_ref": {
+          "type": "string",
+          "maxLength": 36,
+          "minLength": 36,
+          "title": "Account Ref"
+        },
+        "binding_revision": {
+          "type": "integer",
+          "minimum": 1.0,
+          "title": "Binding Revision"
+        },
+        "packet_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Packet Sha256"
+        },
+        "expected_settings_revision": {
+          "type": "integer",
+          "minimum": 1.0,
+          "title": "Expected Settings Revision"
+        },
+        "expected_control_revision": {
+          "type": "integer",
+          "minimum": 1.0,
+          "title": "Expected Control Revision"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "credential_profile_id",
+        "credential_revision",
+        "account_ref",
+        "binding_revision",
+        "packet_sha256",
+        "expected_settings_revision",
+        "expected_control_revision"
+      ],
+      "title": "SelectedOrderManagementAcceptance"
+    }
+  },
+  "optional_schema_properties": {
+    "MockAutomationStartRequest": {
+      "account_selection_id": {
+        "anyOf": [
+          {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Account Selection Id"
+      }
+    },
+    "OperationalSettingsUpdate": {
+      "shadow_candidate_configs": {
+        "anyOf": [
+          {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "title": "Shadow Candidate Configs"
+      }
+    }
+  },
+  "optional_parameter": {
+    "path": "/api/v1/research/mock-automation-specs/{account_ref}",
+    "method": "get",
+    "before": "authorization",
+    "parameter": {
+      "name": "include_admission_refs",
+      "in": "query",
+      "required": false,
+      "schema": {
+        "type": "boolean",
+        "default": false,
+        "title": "Include Admission Refs"
+      }
+    }
+  },
+  "route_insertions": [
+    {
+      "before": "/api/v1/mock-automation/accounts/{account_ref}",
+      "paths": [
+        "/api/v1/research/mock-automation-account-selections",
+        "/api/v1/research/mock-automation-account-selections/{account_ref}"
+      ]
+    },
+    {
+      "before": "/api/v1/mock-automation/unfilled-population",
+      "paths": [
+        "/api/v1/mock-automation/replace-selection"
+      ]
+    },
+    {
+      "before": "/api/v1/market/snapshots/{kind}",
+      "paths": [
+        "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
+        "/api/v1/mock-automation/selected-order-evidence/{operation_id}/assessment",
+        "/api/v1/mock-automation/selected-order-evidence/{operation_id}/bootstrap",
+        "/api/v1/mock-automation/selected-order-evidence/{operation_id}/prepare-management",
+        "/api/v1/mock-automation/selected-order-evidence/{operation_id}/accept-management"
+      ]
+    }
+  ],
+  "diagnostic_migration": {
+    "review_basis": "Schema migration25 close_gap_observation_windows adds only one observation-window expression index and its migration receipt. The diagnostic native fixture has no observation/execution/selected data. Assert the exact DDL, row and injected KST receipt, then remove only those two additions in a private in-memory copy. Keep the original complete storage hashes.",
+    "row": [
+      25,
+      "close_gap_observation_windows",
+      "2026-10-10T12:00:00+09:00"
+    ],
+    "index_name": "idx_central_observation_window",
+    "index_ddl": "CREATE INDEX idx_central_observation_window ON central_observation_revisions(kind,subject,datetime(effective_at))",
+    "resource_other_rows": {
+      "before": 24,
+      "after": 25
+    }
+  }
+}

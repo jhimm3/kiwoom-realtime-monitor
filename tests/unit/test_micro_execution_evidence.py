@@ -31,6 +31,12 @@ def _scenario(events):
             "clock_id": "fixture-clock", "events": events}
 
 
+def _frozen_scenario(events, **changes):
+    return {**_scenario(events), "version": "micro-frozen-evidence/v1",
+            "provenance": {"source_kind": "historical_reconstruction", "source_ref": "frozen-case-17",
+                           "source_version": "joined-reconstruction/v2"}, **changes}
+
+
 def _policy(variant="VI_GAP_UP"):
     policy = {"version": "micro-policy/v1", "variant": variant, "quantity": 5,
               "min_reaction_bps": 50, "max_spread_bps": 125, "stop_loss_bps": 100, "take_profit_bps": 200}
@@ -49,6 +55,44 @@ def _entry_market(*, direction="UP", release_price=101, trade_price=103):
 
 
 class MicroExecutionEvidenceTests(unittest.TestCase):
+    def test_frozen_research_consumes_recorded_inputs_without_native_confirmation(self):
+        events = _entry_market() + [
+            _event("ORDER_ARRIVED", "arrive", 4, order_id="entry"),
+            _event("FILL", "detail", 5, order_id="entry", price_won=104, quantity=2),
+            _event("CANCELLED", "cancel", 6, order_id="entry", filled_quantity=2),
+        ]
+        events[1]["provenance"] = {"source_ref": "release-detail-17", "source_version": "frozen/v2"}
+        result = replay_micro_execution(_frozen_scenario(events), _policy())
+        self.assertEqual(("OPEN", 2, 2), (result["status"], result["position_quantity"], result["protected_quantity"]))
+        inputs = result["input_assessment"]
+        self.assertEqual(([], True, "RECORDED", 101, False), (inputs["missing_inputs"], inputs["tradable"],
+            inputs["cross_stream_order"], inputs["vi_release_execution_price"], inputs["native_confirmation"]))
+        self.assertEqual("historical_reconstruction", result["evidence_provenance"]["source_kind"])
+        self.assertEqual(events[1]["provenance"], result["evidence"][1]["provenance"])
+        self.assertFalse(result["order_authorized"])
+        self.assertEqual(result, replay_micro_execution(json.loads(json.dumps(_frozen_scenario(events))), _policy()))
+
+    def test_frozen_cut_missing_inputs_and_unproven_order_do_not_invent_evidence(self):
+        cut = (_START + timedelta(seconds=1)).isoformat()
+        events = _entry_market()
+        result = replay_micro_execution(_frozen_scenario(events, decision_at=cut), _policy())
+        self.assertEqual([], result["decisions"])
+        self.assertEqual(["book", "trade"], result["input_assessment"]["unavailable_event_refs"])
+        self.assertIn("instrument_tradability", result["input_assessment"]["missing_inputs"])
+        for change in ({"stream_id": "independent-book"}, {"sequence": 8}):
+            rows = _entry_market(); rows[2] |= change
+            unverified = replay_micro_execution(_frozen_scenario(rows), _policy())
+            self.assertEqual(("UNKNOWN", []), (unverified["status"], unverified["decisions"]))
+            self.assertIn("cross_stream_order", unverified["input_assessment"]["missing_inputs"])
+        events[1]["data"].pop("release_price_won")
+        events[2]["data"].pop("tradable")
+        missing = replay_micro_execution(_frozen_scenario(events), _policy())
+        self.assertEqual(("UNKNOWN", []), (missing["status"], missing["decisions"]))
+        self.assertIsNone(missing["input_assessment"]["vi_release_execution_price"])
+        self.assertIsNone(missing["input_assessment"]["tradable"])
+        with self.assertRaisesRegex(ValueError, "declared research source"):
+            replay_micro_execution(_frozen_scenario(events, provenance={"source_kind": "native_confirmed"}), _policy())
+
     def test_variant_policies_use_distinct_evidence_and_emit_no_guessed_fill(self):
         cases = (
             ("VI_GAP_UP", _entry_market(), ["activation", "release", "book", "trade"]),
@@ -225,6 +269,42 @@ class MicroExecutionEvidenceTests(unittest.TestCase):
 
 
 class MicroNativeShadowInputTests(unittest.TestCase):
+    def test_frozen_http_inputs_use_sha_bound_research_without_changing_native_inputs(self):
+        import hashlib
+        from fastapi import FastAPI, Header, HTTPException
+        from fastapi.testclient import TestClient
+        from kiwoom_monitor.central_server.research_read_routes import create_research_read_router
+
+        def authorize(authorization: str = Header(default="")):
+            if authorization != "Bearer research":
+                raise HTTPException(status_code=401)
+
+        with closing(SQLiteQueryStore(Path(":memory:"))) as store:
+            store.initialize()
+            app = FastAPI()
+            app.include_router(create_research_read_router(store, authorize, lambda: None, now_provider=lambda: _START))
+            document = {"scenario": _frozen_scenario(_entry_market()), "policy": _policy()}
+            body = json.dumps(document).encode()
+            digest = hashlib.sha256(body).hexdigest()
+            path = "/api/v1/research/micro-inputs?evidence_sha256=" + digest
+            headers = {"Authorization": "Bearer research"}
+            with TestClient(app) as client:
+                self.assertEqual(401, client.post(path, content=body).status_code)
+                response = client.post(path, content=body, headers=headers)
+                self.assertEqual(200, response.status_code, response.text)
+                result = response.json()
+                self.assertEqual(([], 101, False, None), (result["input_assessment"]["missing_inputs"],
+                    result["input_assessment"]["vi_release_execution_price"], result["order_authorized"], result["candidate"]))
+                self.assertEqual(digest, result["evidence_sha256"])
+                self.assertEqual(document["scenario"]["events"], result["evidence"])
+                self.assertEqual(422, client.post(path, content=body + b" ", headers=headers).status_code)
+                native = client.get("/api/v1/research/micro-inputs?symbol=005930&venue=KRX&variant=VI_GAP_UP", headers=headers)
+                self.assertEqual(200, native.status_code, native.text)
+                self.assertEqual(("UNKNOWN", None), (native.json()["status"], native.json()["candidate"]))
+                self.assertIn("native_instrument_tradability", native.json()["missing_inputs"])
+                self.assertIn("native_cross_stream_order", native.json()["missing_inputs"])
+                self.assertIn("native_vi_release_execution_price", native.json()["missing_inputs"])
+
     def test_actual_collector_and_native_vi_store_expose_observations_without_a_candidate(self):
         now = [_START]
 

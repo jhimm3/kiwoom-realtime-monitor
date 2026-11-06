@@ -17,13 +17,16 @@ class MockAutomationRunner:
     """Own concrete execution lifetime; business consumers use the Episode."""
 
     def __init__(self, episode: MockAutomationEpisode, *, monitor: Any = None,
-                 poll_seconds: float = 1.0, member_episodes=(), execution_order=None) -> None:
+                 poll_seconds: float = 1.0, member_episodes=(), execution_order=None, account_selection=None,
+                 borrowed_episodes=()) -> None:
         self._episode = episode
         self._episodes = (episode, *member_episodes)
         self._execution_episodes = self._episodes
         if len(self._episodes) > 1:
             if (len({value.spec_id for value in self._episodes}) != len(self._episodes)
-                    or any(not value.shares_account_membership(episode) for value in self._episodes)):
+                    or any(not value.shares_account_membership(episode) and not (
+                        account_selection is not None and account_selection.matches_admission(
+                            **value.admission_ref.to_dict())) for value in self._episodes)):
                 raise ValueError('MOCK_AUTOMATION_RUNNER_MEMBERS_MISMATCH')
             # The anchor remains the account's compatibility handle. It does
             # not establish trading priority; that order must be explicit.
@@ -32,6 +35,14 @@ class MockAutomationRunner:
                 raise ValueError('MOCK_AUTOMATION_EXPLICIT_MEMBER_EXECUTION_ORDER_REQUIRED')
             members = {value.spec_id: value for value in self._episodes}
             self._execution_episodes = tuple(members[identity] for identity in execution_order)
+        if account_selection is not None and (
+                account_selection.primary_spec_id != episode.spec_id
+                or set(account_selection.member_spec_ids) != {value.spec_id for value in self._episodes}
+                or account_selection.execution_order_spec_ids is None
+                or tuple(value.spec_id for value in self._execution_episodes) != account_selection.execution_order_spec_ids):
+            raise ValueError('MOCK_AUTOMATION_RUNNER_MEMBERS_MISMATCH')
+        self._account_selection = account_selection
+        self._owned_episodes = tuple(value for value in self._episodes if value not in borrowed_episodes)
         self._monitor = monitor
         self._poll_seconds = max(0.25, float(poll_seconds))
         self._task: asyncio.Task[None] | None = None
@@ -40,10 +51,34 @@ class MockAutomationRunner:
         self._native_risk_listener = None
         self._inputs_attached = False
         self._execution_inputs_attached = False
+        self.bind_execution_callbacks()
+
+    def bind_execution_callbacks(self):
         for value in self._episodes:
             value.bind_execution_callbacks(
                 scheduled_task_present=self._has_scheduled_task, capture_wake=self._capture_wake,
             )
+
+    async def pause_for_replacement(self):
+        """Drain scheduling while retaining the original Episode and input observations."""
+        task, self._task = self._task, None
+        self._retire_wake()
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    def adopt_episodes_from(self, previous):
+        if previous._task is not None:
+            raise RuntimeError('MOCK_AUTOMATION_REPLACEMENT_NOT_DRAINED')
+        if any(value not in self._episodes for value in previous._owned_episodes):
+            raise RuntimeError('MOCK_AUTOMATION_REPLACEMENT_LOST_MEMBER')
+        previous._detach_inputs()
+        previous._owned_episodes = ()
+        self._owned_episodes = self._episodes
+        self.bind_execution_callbacks()
 
     @property
     def episode(self) -> MockAutomationEpisode:
@@ -52,6 +87,28 @@ class MockAutomationRunner:
     @property
     def episodes(self) -> tuple[MockAutomationEpisode, ...]:
         return self._episodes
+
+    @property
+    def account_selection_id(self):
+        return self._account_selection.selection_id if self._account_selection is not None else None
+
+    @property
+    def status(self):
+        if self._account_selection is None:
+            return self._episode.status
+        anchor = self._episode.status
+        return {
+            'version': 'mock_automation_account_runner_status/v1',
+            'account_ref': anchor['account_ref'],
+            'execution_run_id': anchor['execution_run_id'],
+            'account_selection_id': self._account_selection.selection_id,
+            'anchor_spec_id': self._account_selection.primary_spec_id,
+            'execution_order_spec_ids': list(self._account_selection.execution_order_spec_ids),
+            'admission_refs': [value.admission_ref.to_dict() for value in self._episodes],
+            'entry_spec_ids': [value for value in self._account_selection.member_spec_ids
+                               if self._account_selection.allows_entry(value)],
+            'members': [value.status for value in self._episodes],
+        }
 
     def episode_for_spec(self, spec_id: str) -> MockAutomationEpisode | None:
         return next((value for value in self._episodes if value.spec_id == spec_id), None)
@@ -109,7 +166,7 @@ class MockAutomationRunner:
                                               else self._observe_native_risk)
                 setter(self._native_risk_listener)
             source_setter = getattr(monitor, 'set_automation_execution_inputs_enabled', None)
-            if any(value.needs_native_execution_inputs for value in self._episodes) and callable(source_setter):
+            if (self._account_selection is not None or any(value.needs_native_execution_inputs for value in self._episodes)) and callable(source_setter):
                 self._execution_inputs_attached = True
                 source_setter(True)
             self._inputs_attached = True
@@ -145,23 +202,40 @@ class MockAutomationRunner:
             self._task = asyncio.create_task(self._run(), name="mock-automation-runner")
 
     async def close(self) -> None:
-        for value in self._episodes:
-            value.begin_close(retire_wake=self._retire_wake)
-        self._detach_inputs()
-        if self._task is None:
-            await self._finish_episodes(scheduled_task_was_present=False)
-            return
-        self._task.cancel()
+        first_error = None
+        for value in self._owned_episodes:
+            try:
+                value.begin_close(retire_wake=self._retire_wake)
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
         try:
-            await self._task
-        except asyncio.CancelledError:
-            pass
-        self._task = None
-        await self._finish_episodes(scheduled_task_was_present=True)
+            self._detach_inputs()
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+        task = self._task
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+            self._task = None
+        try:
+            await self._finish_episodes(scheduled_task_was_present=task is not None)
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+        if first_error is not None:
+            raise first_error
 
     async def _finish_episodes(self, *, scheduled_task_was_present):
         first_error = None
-        for value in self._episodes:
+        for value in self._owned_episodes:
             try:
                 await value.finish_close(scheduled_task_was_present=scheduled_task_was_present)
             except BaseException as error:

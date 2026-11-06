@@ -49,6 +49,7 @@ class JournalSchemaTests(unittest.TestCase):
                 connection.execute("CREATE TABLE trade_setup_cycle_overrides(group_id TEXT NOT NULL,cycle_index INTEGER NOT NULL,manual_type TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL,origin_broker TEXT NOT NULL DEFAULT 'legacy',origin_environment TEXT NOT NULL DEFAULT 'unknown',origin_account_ref TEXT NOT NULL DEFAULT 'legacy-unassigned',canonical_account_ref TEXT NOT NULL DEFAULT 'legacy-unassigned',PRIMARY KEY(group_id,cycle_index))")
                 connection.execute("DROP TABLE journal_selected_settings_receipts")
                 connection.execute("ALTER TABLE journal_execution_event_projections DROP COLUMN order_plan_json")
+                connection.execute("ALTER TABLE journal_execution_event_projections DROP COLUMN member_spec_id")
                 connection.execute("DELETE FROM journal_schema_migrations WHERE version>=10")
                 connection.execute("INSERT INTO trade_setup_classifications VALUES(?,?,?,?,?,?,?,?,?,?)", ("same", "기타", 7, '[ "원문" ]', "상따", "2026-09-01T09:00:00", "legacy", "unknown", "legacy-unassigned", "legacy-unassigned"))
                 connection.execute("INSERT INTO trade_setup_cycle_overrides VALUES(?,?,?,?,?,?,?,?)", ("same", 0, "돌파", "2026-09-01T09:00:01", "legacy", "unknown", "legacy-unassigned", "legacy-unassigned"))
@@ -124,7 +125,7 @@ class JournalSchemaTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as connection:
                 connection.execute("DROP TABLE journal_execution_event_projections")
                 connection.execute("DROP TABLE journal_execution_projection_states")
-                connection.execute("DELETE FROM journal_schema_migrations WHERE version IN (9,12)")
+                connection.execute("DELETE FROM journal_schema_migrations WHERE version IN (9,12,13)")
                 connection.commit()
 
             initialize_journal_database(path)

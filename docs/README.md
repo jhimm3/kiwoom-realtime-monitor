@@ -12,8 +12,9 @@
 | 검사용 소스·설치물·운영 판정과 과거 증거 | [상태 찾아보기](CURRENT_STATUS.md) |
 | 미완료·운영 확인·사용자 보류 | [남은 작업](OPEN_ITEMS.md) |
 | 전체 재설계 목표·작업 순서 | [기준 계획 v1](architecture/app-target-20261023.md#11-이번-재설계-기준-계획-v1) — 승인·현재 단계는 0절만 확인 |
+| 승인 12절 개발·라이브러리 비교와 실제 수락 | [S12-01~05 로드맵](architecture/section12-development-roadmap-20261105.md) · [개발5/5·대표11/11 최종 수락](architecture/section12-development-roadmap-20261105.md#s12-final-development-acceptance) — 개발·격리 검사와 과거 실증/운영 전환을 분리 |
 | 실행 컴퓨터/로컬 SSD·NAS 장후 보관 | [v1 목표 배치·단계](architecture/app-target-20261023.md#portable-execution-target) — 설계 채택과 구현/OS 수락 구분 |
-| 범용 기능 오픈소스 활용 | [후보 감사·전환 계획](architecture/opensource-assessment-20261030.md) · [최신 기능별 비교](architecture/opensource-assessment-20261030.md#system-wide-supplement) — A조사, B경계 제안, C미실행 비교, D개별 승인 |
+| 범용 기능 오픈소스 활용 | [후보 감사·전환 계획](architecture/opensource-assessment-20261030.md) · [최신 기능별 비교](architecture/opensource-assessment-20261030.md#system-wide-supplement) · [S12 실제 비교 판정](architecture/section12-development-roadmap-20261105.md) — A조사, B경계 제안, C동일 입력 비교, D역할별 도입 판단 |
 | 돌파·종가베팅·신규주·낙주 목표 | [네 운용군 설계](architecture/app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [186개 연구의 리팩토링 반영](architecture/app-target-20261023.md#mimosa-research-refactor-contract) · [통합 연구 r003](research/mimosa-capture-study-20261030/00_미모사_전체매매전략_통합연구보고서.md) — 공통 입력/계좌·목적별 계획/수명·재사용·백테스트 명세;설계와 구현/검증 구분 |
 | 매매 계산량·순간 지연 절감 | [공통 계산·증분 갱신·영향 계획 계약](architecture/app-target-20261023.md#strategy-compute-efficiency) — 입력/판본 공유·정정/만료·관련 계획만 재평가;손절·주문/FILL·권한/필수 저장·복구 보존 및 기존 검사/계측 |
 | R3 상세·과거 실행/실패·연결 근거 | [R3 백로그](../REFACTOR_BACKLOG.md) — 관련 ID/계약만 선택 참조 |

@@ -18,26 +18,183 @@ from kiwoom_monitor.central_server.database_codec import _event_document, _json_
 PLAN_POSITION_COLLECTION = "execution_mock_plan_positions"
 
 
+def _execution_runtime_lease_scope(cursor, p, owner_key, owner_token, now, *,
+                                   selected_management_context=None, selected_management_owner=None):
+    """Serialize canonical collisions; explicit current context alone maps authority."""
+    from .database_account_identity import _execution_runtime_scope_keys
+    scope = _execution_runtime_scope_keys(cursor, p, owner_key)
+    canonical = scope['canonical_owner_key']
+    if p == '%s':
+        cursor.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', ('execution-runtime-owner:' + canonical,))
+        scope = _execution_runtime_scope_keys(cursor, p, owner_key)
+        if scope['canonical_owner_key'] != canonical:
+            raise RuntimeError('EXECUTION_CANONICAL_SCOPE_CHANGED')
+    selected = None
+    if selected_management_context is not None:
+        from .selected_order_bootstrap import require_selected_management_owner
+        selected = require_selected_management_owner(cursor, p, selected_management_context, owner_token, now,
+            current_owner=selected_management_owner)
+        context = selected['context']
+        if (owner_key != 'mock:' + context.account_ref or canonical != 'mock:' + context.canonical_account_ref
+                or not owner_token.startswith(context.execution_run_id + ':')):
+            raise RuntimeError('SELECTED_MANAGEMENT_RUNTIME_SCOPE_CHANGED')
+    elif scope['origin_requires_management']:
+        raise RuntimeError('SELECTED_MANAGEMENT_CONTEXT_REQUIRED')
+    keys = scope['related_owner_keys']
+    cursor.execute('SELECT owner_key,lease_expires_at FROM central_execution_runtime_leases '
+        f'WHERE owner_key IN ({",".join(p for _ in keys)})' + (' FOR UPDATE' if p == '%s' else ''), keys)
+    for key, expires in cursor.fetchall():
+        expiry = expires if isinstance(expires, datetime) else datetime.fromisoformat(expires)
+        if key != canonical and expiry > now:
+            raise RuntimeError('EXECUTION_CANONICAL_OWNERSHIP_CONFLICT')
+    return canonical, selected
+
+
+def _selected_target_management_pending(cursor, p, account, lease_owner):
+    """Retained installation markers alone do not permanently lock a flat target."""
+    import hashlib
+    from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, execution_broker_legs
+
+    current = _plan_document(cursor, p, 'execution_selected_order_management_current', account, account)
+    if (current is not None and current.get('lease_owner_sha256')
+            == hashlib.sha256(lease_owner.encode()).hexdigest()):
+        return True  # An active selected token cannot shed its restricted context.
+    target = "document_json->>'target_account_ref'" if p == '%s' else "json_extract(document_json,'$.target_account_ref')"
+    cursor.execute(f'SELECT owner,document_key FROM central_documents WHERE collection={p} AND {target}={p}',
+        ('execution_selected_order_management_installations', account))
+    installed = tuple(tuple(row) for row in cursor.fetchall())
+    if current is not None:
+        context = current.get('context') or {}
+        if (not isinstance(context, dict) or context.get('canonical_account_ref') != account
+                or (context.get('account_ref'), context.get('intent_id')) not in installed):
+            return True
+    for origin, identity in installed:
+        raw = _execution_intent_row(cursor, identity, p)
+        if raw is None:
+            return True
+        original = _json_document(raw[0])
+        plan = original.get('plan') or {}
+        if (original.get('account_ref') != origin or original.get('environment') != 'mock'
+                or not plan.get('plan_id') or not plan.get('policy_ref')):
+            return True
+        head = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, origin, plan['plan_id'])
+        if (head is None or head.get('version') != 'mock_plan_position/v1'
+                or (head.get('plan_id'), head.get('run_id'), head.get('symbol'), head.get('policy_ref'))
+                != (plan['plan_id'], original['run_id'], original['symbol'], plan['policy_ref'])
+                or type(head.get('quantity')) is not int or head['quantity'] != 0
+                or type(head.get('unreconciled_sell_quantity', 0)) is not int
+                or head.get('unreconciled_sell_quantity', 0) != 0):
+            return True
+        plan_key = "document_json->'plan'->>'plan_id'" if p == '%s' else "json_extract(document_json,'$.plan.plan_id')"
+        before, bought, sold, found = '', 0, 0, False
+        while True:
+            cursor.execute('SELECT document_json FROM central_execution_intents '
+                f'WHERE environment={p} AND account_ref={p} AND run_id={p} AND {plan_key}={p} '
+                f'AND intent_id>{p} ORDER BY intent_id LIMIT 400',
+                ('mock', origin, original['run_id'], plan['plan_id'], before))
+            page = cursor.fetchall()
+            for row in page:
+                document = _json_document(row[0])
+                try:
+                    record = _record_from_document(document)
+                    if ((record.intent.account_ref, record.intent.run_id, record.intent.symbol)
+                            != (origin, original['run_id'], original['symbol'])
+                            or record.intent.plan is None or record.intent.plan.policy_ref != plan['policy_ref']
+                            or record.state not in TERMINAL_ORDER_STATES
+                            or record.detailed_filled_quantity != record.broker_reported_filled_quantity
+                            or record.filled_quantity != record.detailed_filled_quantity
+                            or record.amendment is not None and record.amendment.reconciliation_pending
+                            or any(leg.state not in TERMINAL_ORDER_STATES
+                                or leg.detailed_filled_quantity != leg.broker_reported_filled_quantity
+                                or leg.filled_quantity != leg.detailed_filled_quantity
+                                for leg in execution_broker_legs(record))):
+                        return True
+                except (TypeError, ValueError, KeyError):
+                    return True
+                found = True
+                if record.intent.side.value == 'BUY': bought += record.detailed_filled_quantity
+                else: sold += record.detailed_filled_quantity
+                before = record.intent.intent_id
+            if len(page) < 400:
+                break
+        if not found or bought != sold:
+            return True
+    return False
+
+
 def _native_execution_scope(ownership, control):
     """Borrow verified control facts without a second lookup or caller scope hints.
 
     These private fields exist only in the local validator call chain. They are
     overwritten at each native ownership/control entry and never persisted.
     """
-    member = ownership.get('active_spec_id') if control.get('account_selection') is not None else None
+    management = control.get('_native_selected_management_context')
+    if management is not None:
+        return {**ownership, '_native_checkpoint_key': management['_native_checkpoint_key'],
+                '_native_member_evidence': management['_native_member_evidence'],
+                '_native_account_selection': None,
+                '_native_selected_management_context': management}
+    selection = control.get('account_selection')
+    member = ownership.get('active_spec_id') if selection is not None else None
+    legacy_retained = bool(selection is not None and any(
+        ref['spec_id'] == member and ref['original_selection_id'] is None
+        for ref in selection.get('retained_admission_refs', ())))
+    if legacy_retained:
+        member = None  # Original checkpoint/proof coordinates stay unchanged.
     return {**ownership, '_native_checkpoint_key': 'member:' + member if member is not None else 'current',
-            '_native_member_evidence': member is not None}
+            '_native_member_evidence': member is not None,
+            '_native_account_selection': selection, '_native_selected_management_context': None}
 
 
 def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
                                  value: dict[str, Any], p: str, *, now_provider=None,
-                                 new_intent_claim=False, submission_claim=False, amendment_claim=False, control_facts=None):
+                                 new_intent_claim=False, submission_claim=False, amendment_claim=False,
+                                 control_facts=None, event_kind=None):
     if 'mock_account_member_spec_id' in value and (new_intent_claim or 'plan' not in value):
         raise ValueError('account member attribution is assigned only by the native plan claim')
     if ownership is None:
         if "plan" in value:
             raise RuntimeError("PLANNED_EXECUTION_OWNER_REQUIRED")
         return  # Offline ledger/import callers keep the existing unowned contract.
+    now = kst_now() if now_provider is None else now_provider()
+    selected = None
+    lease_key = ownership['owner_key']
+    # Responses to durable STARTED records remain facts after STOP. Existing
+    # plan/physical-ledger validators still check them before the native write.
+    reconciliation_facts = {'FILL', 'BROKER_FILL_AGGREGATE', 'BROKER_RECONCILED',
+                            'AMENDMENT_FILL_OBSERVED', 'AMENDMENT_RECOVERED',
+                            'ORDER_ACCEPTED', 'SUBMISSION_RESPONSE_UNKNOWN', 'SUBMISSION_REJECTED',
+                            'CANCEL_ACCEPTED', 'CANCEL_RESPONSE_UNKNOWN', 'CANCEL_REJECTED',
+                            'AMENDMENT_ACCEPTED', 'AMENDMENT_RESPONSE_UNKNOWN', 'AMENDMENT_REJECTED'}
+    command_claim = (new_intent_claim or submission_claim or amendment_claim
+                     or 'intent_id' in value and event_kind not in reconciliation_facts)
+    if control_facts is not None:
+        control_facts.pop('_native_selected_management_context', None)
+    if ownership.get('selected_management_context') is not None:
+        lease_key, selected = _execution_runtime_lease_scope(cursor, p, lease_key, ownership['owner_token'], now,
+            selected_management_context=ownership['selected_management_context'],
+            selected_management_owner=ownership.get('selected_management_owner'))
+        context = selected['context']
+        accounts = {context.account_ref} if 'intent_id' in value else {context.account_ref, context.canonical_account_ref}
+        if (value.get('account_ref') not in accounts or ownership['run_id'] != context.execution_run_id
+                or ownership.get('active_spec_id') not in (None, context.spec_id)):
+            raise RuntimeError('SELECTED_MANAGEMENT_RUNTIME_SCOPE_CHANGED')
+        if value.get('side') == 'BUY' and (new_intent_claim or submission_claim or amendment_claim):
+            raise RuntimeError('SELECTED_MANAGEMENT_NEW_BUY_FORBIDDEN')
+        if selected['status'] != 'MANAGEMENT_READY' and command_claim:
+            raise RuntimeError('SELECTED_MANAGEMENT_NOT_READY')
+    else:
+        # An alias or pending installation is collision evidence, never an
+        # alternative native order authority, including a hand-inserted lease.
+        account = str(value.get('account_ref') or '')
+        cursor.execute(f'SELECT 1 FROM central_account_scope_aliases WHERE origin_account_ref={p} '
+            f'AND environment={p} UNION ALL SELECT 1 FROM central_documents WHERE collection={p} AND owner={p} LIMIT 1',
+            (account, 'mock', 'execution_selected_order_management_installations', account))
+        if cursor.fetchone() is not None:
+            raise RuntimeError('SELECTED_MANAGEMENT_CONTEXT_REQUIRED')
+        if (command_claim and _selected_target_management_pending(cursor, p, account, ownership['owner_token'])):
+            raise RuntimeError('SELECTED_MANAGEMENT_CONTEXT_REQUIRED')
     if (new_intent_claim and value.get('policy_version') == 'mock-protection-exit/v1'
             and ownership.get('protection_claim') is None):
         raise RuntimeError('MOCK_PROTECTION_CLAIM_REQUIRED')
@@ -45,20 +202,21 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
                              or ownership.get("planned_cancel_claim") is not None):
         raise RuntimeError('MOCK_PROTECTIVE_CANCEL_RETRY_CANNOT_CREATE_ORDER')
     if (not ownership["owner_token"].startswith(f"{ownership['run_id']}:")
-            or value.get("environment") != "mock" or ownership["owner_key"] != f"mock:{value.get('account_ref')}"
+            or value.get("environment") != "mock"
+            or selected is None and ownership["owner_key"] != f"mock:{value.get('account_ref')}"
             or ("run_id" in value and value["run_id"] != ownership["run_id"])):
         raise RuntimeError("EXECUTION_OWNER_SCOPE_MISMATCH")
     cursor.execute("SELECT owner_token,lease_expires_at FROM central_execution_runtime_leases "
-                   f"WHERE owner_key={p}" + (" FOR UPDATE" if p == "%s" else ""), (ownership["owner_key"],))
+                   f"WHERE owner_key={p}" + (" FOR UPDATE" if p == "%s" else ""), (lease_key,))
     row = cursor.fetchone()
     expiry = row[1] if row and isinstance(row[1], datetime) else datetime.fromisoformat(str(row[1])) if row else None
-    if not row or row[0] != ownership["owner_token"] or expiry <= (
-            kst_now() if now_provider is None else now_provider()):
+    if not row or row[0] != ownership["owner_token"] or expiry <= now:
         raise RuntimeError("EXECUTION_OWNERSHIP_LOST")
     control = {}
     control_revision = ownership.get("control_revision")
     entry_claim = (new_intent_claim or submission_claim or amendment_claim) and value.get("side") == "BUY"
-    if control_revision is not None or (entry_claim and ownership["run_id"].startswith("mock_auto_run_")):
+    if (control_revision is not None or (entry_claim and ownership["run_id"].startswith("mock_auto_run_"))
+            or selected is not None and command_claim):
         cursor.execute(
             "SELECT document_json FROM central_documents WHERE collection=" + p
             + " AND owner=" + p + " AND document_key=" + p
@@ -71,8 +229,21 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
         )
         control_row = cursor.fetchone()
         control = _json_document(control_row[0]) if control_row else {}
+        control.pop('_native_selected_management_context', None)
         if control_facts is not None:
             control_facts.update(control)
+        if (selected is not None and command_claim
+                and (control.get('desired_state') != 'RUNNING' or not control.get('entry_resume_required'))):
+            raise RuntimeError('SELECTED_MANAGEMENT_CONTROL_CHANGED')
+        if selected is not None and command_claim:
+            from .database_account_settings import _load_account_settings
+            settings = _load_account_settings(cursor, {'broker': 'kiwoom', 'environment': 'mock',
+                'account_ref': selected['context'].canonical_account_ref}, p, lock=True)
+            if (type(selected.get('settings_revision')) is not int
+                    or settings.get('revision') != selected['settings_revision']
+                    or settings.get('active_profile_id') != selected['context'].credential_profile_id
+                    or settings.get('monitor_enabled') is not True or settings.get('mock_order_enabled') is not True):
+                raise RuntimeError('SELECTED_MANAGEMENT_EXECUTION_SETTINGS_CHANGED')
         stopped_close_management = False
         if (control.get('desired_state') == 'STOPPED' and value.get('plan') is not None
                 and value.get('policy_version') in {'close_execution_adapter/v1', 'panic_execution_adapter/v1'}
@@ -91,16 +262,21 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
                 stopped_close_management = (allows_stopped_close_management(bound_spec)
                     if value.get('policy_version') == 'close_execution_adapter/v1' else allows_stopped_panic_management(bound_spec))
         if control_revision is not None and (
-            (control.get("desired_state") != "RUNNING" and not stopped_close_management)
+            (selected is None and control.get("desired_state") != "RUNNING" and not stopped_close_management)
             or int(control.get("control_revision", 0)) != int(control_revision)
-            or not _control_member_allowed(cursor, p, control, str(value.get('account_ref') or ''),
-                                           ownership.get('active_spec_id'))
+            or selected is None and not _control_member_allowed(cursor, p, control, str(value.get('account_ref') or ''),
+                                           ownership.get('active_spec_id'),
+                                           entry=(new_intent_claim or submission_claim) and value.get('side') == 'BUY')
             or control.get("execution_run_id") != ownership["run_id"]
         ):
             raise RuntimeError("MOCK_AUTOMATION_CONTROL_CHANGED")
         if (entry_claim and control.get("execution_run_id") == ownership["run_id"]
                 and control.get("entry_resume_required", False)):
             raise RuntimeError("CREDENTIAL_CHANGE_REQUIRES_EXPLICIT_ENTRY_RESUME")
+    if selected is not None:
+        control['_native_selected_management_context'] = selected
+        if control_facts is not None:
+            control_facts['_native_selected_management_context'] = selected
     ownership = _native_execution_scope(ownership, control)
     if ownership.get('replacement_claim') is not None and 'intent_id' in value:
         _require_mock_replacement_claim(cursor, ownership, value, p, new_intent_claim=new_intent_claim,
@@ -135,24 +311,39 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
         ):
             _require_planned_leader_protection_claim(cursor, p, value, ownership, stored=stored_value,
                                                      now_provider=now_provider, submission_claim=submission_claim)
+        if selected is not None and not ownership['selected_management_owner']():
+            raise RuntimeError('SELECTED_MANAGEMENT_OWNER_CHANGED')
         return stored_value
+    if selected is not None and not ownership['selected_management_owner']():
+        raise RuntimeError('SELECTED_MANAGEMENT_OWNER_CHANGED')
 
 
-def _plan_document(cursor, p, collection, account, key):
+def _plan_document(cursor, p, collection, account, key, *, selected_management=None):
     cursor.execute(
         f"SELECT document_json FROM central_documents WHERE collection={p} AND owner={p} AND document_key={p}"
         + (" FOR UPDATE" if p == "%s" else ""),
         (collection, account, key),
     )
     row = cursor.fetchone()
-    return _json_document(row[0]) if row is not None else None
+    if row is not None:
+        return _json_document(row[0])
+    if selected_management is not None:
+        from .selected_order_bootstrap import selected_management_policy_document
+        return selected_management_policy_document(cursor, p, collection, account, key, selected_management)
+    return None
 
 
-def _control_member_allowed(cursor, p, control, account, spec_id):
+def _control_member_allowed(cursor, p, control, account, spec_id, *, entry=False):
     """Read frozen membership in the same native transaction as the order claim."""
     selection = _account_control_selection(cursor, p, control, account)
-    return (spec_id in selection.member_spec_ids if selection is not None
+    return ((selection.allows_entry(spec_id) if entry else spec_id in selection.member_spec_ids) if selection is not None
             else control.get('active_spec_id') == spec_id)
+
+
+def _control_entry_enabled(control, spec_id):
+    from kiwoom_monitor.application.mock_automation_admission import mock_automation_control_from_dict
+    selection = mock_automation_control_from_dict(control).account_selection
+    return selection is None or selection.allows_entry(spec_id)
 
 
 def _account_control_limits(control):
@@ -194,9 +385,13 @@ def _account_control_selection(cursor, p, control, account, *, verify_admissions
             if document is None:
                 raise RuntimeError('MOCK_ACCOUNT_MEMBER_ADMISSION_MISSING')
             admission = mock_automation_admission_from_dict(document)
-            if (admission.version != MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION
+            retained = getattr(selection, 'retained_admission_ref', lambda _: None)(spec_id)
+            original_standalone = (admission.version == 'mock_automation_admission/v1' and retained is not None
+                                   and retained.original_selection_id is None)
+            if (admission.version != MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION and not original_standalone
                     or admission.spec_id != spec_id or admission.account_ref != account
-                    or admission.account_selection_id != selection.selection_id
+                    or not selection.matches_admission(spec_id=spec_id, admission_id=admission.admission_id,
+                        original_selection_id=admission.account_selection_id, execution_run_id=admission.execution_run_id)
                     or admission.execution_run_id != value.execution_run_id
                     or _plan_document(cursor, p, 'execution_mock_automation_admissions', account,
                                       admission.admission_id) != document):
@@ -214,15 +409,192 @@ def _account_control_selection(cursor, p, control, account, *, verify_admissions
 
 def _require_account_control_change(cursor, p, value, current, account):
     from kiwoom_monitor.application.mock_automation_admission import MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION
-    if current.get('version') == MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION and (
-            value.get('version') != current.get('version')
-            or value.get('account_selection') != current.get('account_selection')):
+    if current and value.get('account_selection') != current.get('account_selection'):
         raise RuntimeError('MOCK_ACCOUNT_EXPLICIT_HANDOFF_REQUIRED')
     running = value.get('desired_state') == 'RUNNING'
     _account_control_selection(cursor, p, value, account, verify_admissions=running, require_current_binding=running)
 
 
-def _require_planned_resume_control(cursor, p, value, current, owner_token, now_provider):
+def _require_account_replacement_control(cursor, p, value, current, owner_token, now_provider):
+    """Only this explicit CAS can extend membership while retaining original admissions."""
+    from kiwoom_monitor.domain.execution_activation import MockAutomationAccountSelectionV2
+    from kiwoom_monitor.application.mock_automation_admission import mock_automation_control_from_dict
+
+    account = value['account_ref']
+    if mock_automation_control_from_dict(current).to_dict() != current:
+        raise RuntimeError('MOCK_ACCOUNT_REPLACEMENT_CONTROL_CHANGED')
+    previous = _account_control_selection(cursor, p, current, account, verify_admissions=True)
+    selected = _account_control_selection(cursor, p, value, account, verify_admissions=True)
+    if not isinstance(selected, MockAutomationAccountSelectionV2):
+        raise RuntimeError('MOCK_ACCOUNT_REPLACEMENT_SCOPE_CHANGED')
+    mutable = {'account_selection', 'control_revision', 'changed_at', 'reason', 'version'}
+    if ({key: item for key, item in value.items() if key not in mutable}
+            != {key: item for key, item in current.items() if key not in mutable}
+            or selected.primary_spec_id != current.get('active_spec_id')
+            or datetime.fromisoformat(value['changed_at']) < selected.frozen_at):
+        raise RuntimeError('MOCK_ACCOUNT_REPLACEMENT_CONTROL_CHANGED')
+    retained = {ref.spec_id for ref in selected.retained_admission_refs}
+    previous_ids = set(previous.member_spec_ids if previous is not None else (current['active_spec_id'],))
+    if (not previous_ids <= retained
+            or not retained <= previous_ids | set(selected.entry_spec_ids)):
+        raise RuntimeError('MOCK_ACCOUNT_REPLACEMENT_RETAINED_MEMBERS_CHANGED')
+    for identity in retained:
+        reference = selected.retained_admission_ref(identity)
+        original = _plan_document(cursor, p, 'execution_mock_automation_admissions', account, reference.admission_id)
+        if (original is None or original != _plan_document(cursor, p,
+                'execution_mock_automation_admission_by_spec', account, identity)
+                or original.get('account_selection_id') != reference.original_selection_id
+                or original.get('execution_run_id') != current['execution_run_id']):
+            raise RuntimeError('MOCK_ACCOUNT_REPLACEMENT_ADMISSION_CHANGED')
+    projected_selection, _ = _retained_execution_member_projection(cursor, p, account,
+        selection_id=selected.selection_id, expected_control_revision=current['control_revision'])
+    if projected_selection != selected:
+        raise RuntimeError('MOCK_ACCOUNT_REPLACEMENT_PROJECTION_CHANGED')
+    _require_account_resume_control(cursor, p, value, current, owner_token, now_provider, replacement=True)
+
+
+def _require_account_resume_control(cursor, p, value, current, owner_token, now_provider, *, replacement=False):
+    """One account CAS independently rechecks every member against one native cut."""
+    from kiwoom_monitor.application.mock_automation_admission import (
+        MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION, mock_automation_control_from_dict,
+        mock_automation_admission_from_dict, mock_automation_lease_receipt_from_dict,
+    )
+    from kiwoom_monitor.application.mock_automation_recovery import (
+        MockAutomationAccountRecoveryDecision, MockAutomationRecoveryStatus, mock_automation_recovery_decision_from_dict,
+    )
+    from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
+    from kiwoom_monitor.domain.execution_activation import LEADER_NATIVE_PLAN_MODE, mock_automation_spec_from_dict
+    from kiwoom_monitor.domain.order_contract import OrderSide, TERMINAL_ORDER_STATES
+    from kiwoom_monitor.domain.time_basis import same_aware_instant
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, execution_broker_legs
+    from .database_account_identity import _account_binding_row, _latest_account_binding_row
+
+    if not replacement and (current.get('version') != MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION
+            or value.get('desired_state') != 'RUNNING' or value.get('entry_resume_required')
+            or (current.get('desired_state') != 'STOPPED' and not current.get('entry_resume_required'))):
+        return
+    selected = mock_automation_control_from_dict(value)
+    selection = selected.account_selection
+    account, run_id = selected.account_ref, selected.execution_run_id
+    if (not owner_token or (current.get('active_spec_id'), current.get('execution_run_id'))
+            != (selection.primary_spec_id, run_id)
+            or not replacement and value.get('planned_review_resume_id') is not None):
+        raise RuntimeError('MOCK_ACCOUNT_RESUME_SCOPE_CHANGED')
+    if p == '%s':
+        cursor.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',
+                       (f'{selection.credential_profile_id}:kiwoom:mock',))
+    binding_row = _latest_account_binding_row(cursor, selection.credential_profile_id, 'kiwoom', 'mock', p)
+    binding = _account_binding_row(binding_row) if binding_row else {}
+    if ((binding.get('account_ref'), binding.get('binding_revision'), binding.get('verification_method'))
+            != (account, selection.binding_revision, 'ka00001')
+            or not same_aware_instant(binding.get('verified_at', ''), selection.binding_verified_at)):
+        raise RuntimeError('MOCK_ACCOUNT_RESUME_BINDING_CHANGED')
+
+    def document(collection, key):
+        result = _plan_document(cursor, p, collection, account, key)
+        if result is None:
+            raise RuntimeError('MOCK_ACCOUNT_RESUME_PROOF_MISSING')
+        return result
+
+    risk_doc = document('execution_mock_automation_current_risk', account)
+    risk = mock_automation_risk_snapshot_from_dict(risk_doc)
+    now = now_provider()
+    if ((risk.account_ref, risk.execution_run_id, risk.binding_revision) != (account, run_id, selection.binding_revision)
+            or document('execution_mock_automation_risk_snapshots', risk.snapshot_id) != risk_doc
+            or not risk.reconciliation_complete or risk.submission_unknown_count or risk.balance_mismatch_count
+            or risk.broker_query_started_at < datetime.fromisoformat(current['changed_at'])):
+        raise RuntimeError('MOCK_ACCOUNT_RESUME_RISK_CHANGED')
+    cursor.execute('SELECT COALESCE(MAX(e.accepted_sequence),0) FROM central_execution_events e '
+        'JOIN central_execution_intents i ON i.intent_id=e.intent_id '
+        f'WHERE i.environment={p} AND i.account_ref={p}', ('mock', account))
+    if cursor.fetchone()[0] != risk.execution_event_high_watermark:
+        raise RuntimeError('MOCK_ACCOUNT_RESUME_NATIVE_EVENTS_CHANGED')
+    active = tuple(_record_from_document(_json_document(row[0])) for row in
+                   _account_active_execution_rows(cursor, 'mock', account, 401, p))
+    if any(ref.original_selection_id is None for ref in getattr(selection, 'retained_admission_refs', ())):
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import project_execution_record
+        _, projection = _retained_execution_member_projection(cursor, p, account,
+            **(dict(selection_id=selection.selection_id, expected_control_revision=current['control_revision'])
+               if replacement else {}), intent_ids=tuple(record.intent.intent_id for record in active))
+        active = tuple(project_execution_record(record, projection) for record in active)
+    if len(active) == 401:
+        raise RuntimeError('MOCK_ACCOUNT_RESUME_ORDER_COVERAGE_CHANGED')
+    broker_ids, reserved = {}, 0
+    for record in active:
+        member = getattr(record, 'member_spec_id', None)
+        if (member not in selection.member_spec_ids or record.intent.run_id != run_id
+                or record.state.value not in {'ACCEPTED', 'PARTIALLY_FILLED'}
+                or record.amendment is not None and record.amendment.reconciliation_pending):
+            raise RuntimeError('MOCK_ACCOUNT_RESUME_ORDER_COVERAGE_CHANGED')
+        legs = execution_broker_legs(record)
+        if not legs:
+            raise RuntimeError('MOCK_ACCOUNT_RESUME_ORDER_COVERAGE_CHANGED')
+        for leg in legs:
+            if leg.state in TERMINAL_ORDER_STATES or not leg.remaining_quantity:
+                continue
+            if leg.broker_order_id in broker_ids or leg.detailed_filled_quantity != leg.broker_reported_filled_quantity:
+                raise RuntimeError('MOCK_ACCOUNT_RESUME_ORDER_COVERAGE_CHANGED')
+            broker_ids[leg.broker_order_id] = member
+            if record.intent.side is OrderSide.BUY:
+                reserved += leg.remaining_quantity * leg.limit_price
+    reviews = getattr(selected, 'planned_review_resume_ids', {})
+    common_cut = None
+    for member_id in selection.member_spec_ids:
+        spec = mock_automation_spec_from_dict(document('execution_mock_automation_specs', member_id))
+        admission = mock_automation_admission_from_dict(document('execution_mock_automation_admission_by_spec', member_id))
+        receipt = mock_automation_lease_receipt_from_dict(document('execution_mock_automation_lease_by_admission', admission.admission_id))
+        recovery_doc = document('execution_mock_automation_current_recovery', admission.admission_id)
+        recovery = mock_automation_recovery_decision_from_dict(recovery_doc)
+        if ((spec.account_scope.account_ref, spec.credential_profile_id, spec.binding_revision, spec.data_path)
+                != (account, selection.credential_profile_id, selection.binding_revision, risk.data_path)
+                or not same_aware_instant(spec.binding_verified_at.isoformat(), selection.binding_verified_at)
+                or not isinstance(recovery, MockAutomationAccountRecoveryDecision)
+                or (recovery.account_ref, recovery.execution_run_id, recovery.admission_id, recovery.lease_receipt_id,
+                    recovery.spec_id, recovery.account_selection_id, recovery.member_spec_ids)
+                != (account, run_id, admission.admission_id, receipt.receipt_id, member_id,
+                    selection.selection_id, selection.member_spec_ids)
+                or (recovery.risk_snapshot_id, recovery.risk_reconciliation_revision, recovery.account_as_of)
+                != (risk.snapshot_id, risk.reconciliation_revision, risk.account_as_of)
+                or document('execution_mock_automation_recovery_decisions', recovery.decision_id) != recovery_doc
+                or recovery.observed_at < datetime.fromisoformat(current['changed_at'])
+                or recovery.status not in {MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED,
+                                           MockAutomationRecoveryStatus.MANAGE_ONLY_ORDERS_DISABLED}
+                or recovery.open_order_count != len(broker_ids) or recovery.reserved_open_buy_won != reserved
+                or set(recovery.own_open_order_ids) != {identity for identity, member in broker_ids.items() if member == member_id}
+                or set(recovery.other_member_open_order_ids) != {identity for identity, member in broker_ids.items() if member != member_id}
+                or recovery.own_position_quantities != risk.owned_for_member(member_id)):
+            raise RuntimeError('MOCK_ACCOUNT_RESUME_MEMBER_RECOVERY_CHANGED')
+        cut = (recovery.recovery_fingerprint, recovery.observation_input_ref, recovery.observed_at)
+        if not recovery.observation_input_ref or common_cut is not None and common_cut != cut:
+            raise RuntimeError('MOCK_ACCOUNT_RESUME_CUT_CHANGED')
+        common_cut = cut
+        age = min(selection.limits.maximum_data_gap_seconds, spec.maximum_data_gap_seconds)
+        if any(not 0 <= (now - at).total_seconds() <= age for at in (risk.observed_at, risk.account_as_of)):
+            raise RuntimeError('MOCK_ACCOUNT_RESUME_RISK_STALE')
+        retained = getattr(selection, 'retained_admission_ref', lambda _: None)(member_id)
+        checkpoint_key = ('current' if retained is not None and retained.original_selection_id is None
+                          else 'member:' + member_id)
+        checkpoint = _plan_document(cursor, p, 'execution_mock_automation_runner_current', account, checkpoint_key) or {}
+        if replacement:
+            continue  # Replacement preserves every existing review and does not resume entries.
+        if spec.execution_plan_mode == LEADER_NATIVE_PLAN_MODE:
+            _require_planned_resume_control(cursor, p,
+                {**value, 'active_spec_id': member_id, 'planned_review_resume_id': reviews.get(member_id)},
+                {**current, 'active_spec_id': member_id}, owner_token, now_provider,
+                member_context=dict(spec=spec, risk=risk, admission=admission, recovery=recovery,
+                                    checkpoint=checkpoint, now=now, active=active))
+        else:
+            notice = checkpoint.get('protection_review')
+            if member_id in reviews or notice and notice.get('state') != 'RESOLVED_FLAT':
+                raise RuntimeError('MOCK_ACCOUNT_RESUME_REVIEW_SCOPE_CHANGED')
+            if notice and ((checkpoint.get('spec_id'), checkpoint.get('execution_run_id')) != (member_id, run_id)
+                    or recovery.own_position_quantities or recovery.own_open_order_ids
+                    or risk.pending_sells_for_member(member_id)
+                    or risk.broker_query_started_at < datetime.fromisoformat(notice['requested_at'])):
+                raise RuntimeError('MOCK_ACCOUNT_RESUME_REVIEW_FLAT_CHANGED')
+
+
+def _require_planned_resume_control(cursor, p, value, current, owner_token, now_provider, *, member_context=None):
     """Fence the existing RUNNING CAS against one acknowledged flat native review."""
     from kiwoom_monitor.application.mock_automation_admission import mock_automation_admission_from_dict
     from kiwoom_monitor.application.mock_automation_execution import (
@@ -251,13 +623,18 @@ def _require_planned_resume_control(cursor, p, value, current, owner_token, now_
         if owner_token is not None or resume_id is not None:
             raise RuntimeError("PLANNED_RESUME_SCOPE_CHANGED")
         return
-    spec_doc = _plan_document(cursor, p, "execution_mock_automation_specs", account, current_spec_id)
+    spec_doc = (member_context['spec'].to_dict() if member_context is not None else
+                _plan_document(cursor, p, "execution_mock_automation_specs", account, current_spec_id))
     if not spec_doc or spec_doc.get("execution_plan_mode") != LEADER_NATIVE_PLAN_MODE:
         if owner_token is not None or resume_id is not None:
             raise RuntimeError("PLANNED_RESUME_SCOPE_CHANGED")
         return
     if not owner_token or (current.get("active_spec_id"), current.get("execution_run_id")) != (spec_id, run_id):
         raise RuntimeError("PLANNED_RESUME_SCOPE_CHANGED")
+    if member_context is not None and not member_context['checkpoint'].get('protection_review'):
+        if resume_id is not None:
+            raise RuntimeError('PLANNED_RESUME_REVIEW_CHANGED')
+        return
 
     def document(collection, key):
         result = _plan_document(cursor, p, collection, account, key)
@@ -266,22 +643,29 @@ def _require_planned_resume_control(cursor, p, value, current, owner_token, now_
         return result
 
     spec = mock_automation_spec_from_dict(spec_doc)
-    now = now_provider()
+    now = member_context['now'] if member_context is not None else now_provider()
     # The binding writer uses this same key, after the account lease/control
     # acquisition above. A newer binding cannot cross the flat CAS.
-    if p == "%s":
+    if p == "%s" and member_context is None:
         cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"{spec.credential_profile_id}:kiwoom:mock",))
-    binding = _latest_account_binding_row(cursor, spec.credential_profile_id, "kiwoom", "mock", p)
-    latest = _account_binding_row(binding) if binding else {}
-    if ((latest.get("account_ref"), latest.get("binding_revision"), latest.get("verification_method"))
-            != (account, spec.binding_revision, "ka00001")
-            or not same_aware_instant(latest.get("verified_at", ""), spec.binding_verified_at)):
-        raise RuntimeError("PLANNED_RESUME_BINDING_CHANGED")
-    risk = mock_automation_risk_snapshot_from_dict(document("execution_mock_automation_current_risk", account))
-    admission = mock_automation_admission_from_dict(document("execution_mock_automation_admission_by_spec", spec_id))
-    recovery = mock_automation_recovery_decision_from_dict(document(
-        "execution_mock_automation_current_recovery", admission.admission_id,
-    ))
+    if member_context is None:
+        binding = _latest_account_binding_row(cursor, spec.credential_profile_id, "kiwoom", "mock", p)
+        latest = _account_binding_row(binding) if binding else {}
+        if ((latest.get("account_ref"), latest.get("binding_revision"), latest.get("verification_method"))
+                != (account, spec.binding_revision, "ka00001")
+                or not same_aware_instant(latest.get("verified_at", ""), spec.binding_verified_at)):
+            raise RuntimeError("PLANNED_RESUME_BINDING_CHANGED")
+        risk = mock_automation_risk_snapshot_from_dict(document("execution_mock_automation_current_risk", account))
+        admission = mock_automation_admission_from_dict(document("execution_mock_automation_admission_by_spec", spec_id))
+        recovery = mock_automation_recovery_decision_from_dict(document(
+            "execution_mock_automation_current_recovery", admission.admission_id))
+        occupied = (recovery.open_order_count or recovery.position_count or recovery.reserved_open_buy_won
+                    or risk.owned_position_quantities or risk.pending_sell_quantities)
+    else:
+        risk, admission, recovery = (member_context[name] for name in ('risk', 'admission', 'recovery'))
+        occupied = (recovery.own_position_quantities or recovery.own_open_order_ids
+                    or risk.owned_for_member(spec_id) or risk.pending_sells_for_member(spec_id)
+                    or any(record.member_spec_id == spec_id for record in member_context['active']))
     age = spec.maximum_data_gap_seconds
     if ((risk.account_ref, risk.execution_run_id, risk.binding_revision, risk.data_path)
             != (account, run_id, spec.binding_revision, spec.data_path)
@@ -290,15 +674,15 @@ def _require_planned_resume_control(cursor, p, value, current, owner_token, now_
             or recovery.status is not MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED
             or (recovery.risk_snapshot_id, recovery.risk_reconciliation_revision, recovery.account_as_of)
             != (risk.snapshot_id, risk.reconciliation_revision, risk.account_as_of)
-            or recovery.open_order_count or recovery.position_count or recovery.reserved_open_buy_won
-            or not risk.reconciliation_complete or risk.owned_position_quantities or risk.pending_sell_quantities
+            or occupied or not risk.reconciliation_complete
             or risk.submission_unknown_count or risk.balance_mismatch_count or age is None
             or risk.broker_query_started_at < datetime.fromisoformat(current["changed_at"])
             or any(not 0 <= (now - at).total_seconds() <= age for at in (risk.observed_at, risk.account_as_of))
-            or _account_active_execution_rows(cursor, "mock", account, 1, p)):
+            or member_context is None and _account_active_execution_rows(cursor, 'mock', account, 1, p)):
         raise RuntimeError("PLANNED_RESUME_NATIVE_FLAT_CHANGED")
 
-    checkpoint = _plan_document(cursor, p, "execution_mock_automation_runner_current", account, "current") or {}
+    checkpoint = (member_context['checkpoint'] if member_context is not None else
+                  _plan_document(cursor, p, "execution_mock_automation_runner_current", account, "current") or {})
     notice = checkpoint.get("protection_review")
     if not notice:
         if resume_id is not None:
@@ -400,6 +784,7 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider, *, account
         mock_automation_order_policy_version,
     )
     from kiwoom_monitor.application.mock_automation_recovery import (
+        MockAutomationAccountRecoveryDecision,
         MockAutomationRecoveryStatus,
         mock_account_recovery_fingerprint,
         mock_automation_recovery_decision_from_dict,
@@ -412,6 +797,12 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider, *, account
     if recovery is None:
         raise RuntimeError("PLANNED_EXECUTION_APPROVAL_REQUIRED")
     account_ref = value["account_ref"]
+    management = ownership.get('_native_selected_management_context')
+    context = management['context'] if management is not None else None
+    if management is not None:
+        if management['status'] != 'MANAGEMENT_READY' or value['side'] != 'SELL':
+            raise RuntimeError('SELECTED_MANAGEMENT_SELL_ONLY')
+        from .selected_order_bootstrap import selected_management_policy_document
     gate_doc = _plan_document(cursor, p, "execution_mock_automation_approved_gates", account_ref, value["intent_id"])
     if gate_doc is None:
         raise RuntimeError("PLANNED_EXECUTION_APPROVAL_REQUIRED")
@@ -433,7 +824,9 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider, *, account
         or gate.decided_at != datetime.fromisoformat(value["created_at"])
     ):
         raise RuntimeError("PLANNED_EXECUTION_APPROVAL_CHANGED")
-    spec_doc = _plan_document(cursor, p, "execution_mock_automation_specs", account_ref, gate.spec_id)
+    spec_doc = (selected_management_policy_document(cursor, p, 'execution_mock_automation_specs', account_ref,
+                    gate.spec_id, management) if management is not None
+                else _plan_document(cursor, p, 'execution_mock_automation_specs', account_ref, gate.spec_id))
     risk_doc = _plan_document(cursor, p, "execution_mock_automation_current_risk", account_ref, account_ref)
     recovery_doc = _plan_document(
         cursor, p, "execution_mock_automation_current_recovery", account_ref, gate.admission_id,
@@ -441,31 +834,63 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider, *, account
     if spec_doc is None or risk_doc is None or recovery_doc is None:
         raise RuntimeError("PLANNED_EXECUTION_RISK_OR_RECOVERY_MISSING")
     spec = mock_automation_spec_from_dict(spec_doc)
-    profile_doc = _plan_document(cursor, p, "execution_forward_profiles", spec.strategy_ref, spec.forward_profile_id)
-    if profile_doc is None:
-        raise RuntimeError("PLANNED_EXECUTION_FORWARD_PROFILE_MISSING")
-    profile = forward_spec_from_dict(profile_doc)
+    if management is None:
+        profile_doc = _plan_document(cursor, p, 'execution_forward_profiles', spec.strategy_ref, spec.forward_profile_id)
+        if profile_doc is None:
+            raise RuntimeError('PLANNED_EXECUTION_FORWARD_PROFILE_MISSING')
+        profile = forward_spec_from_dict(profile_doc)
+        family = profile.family_version
+    else:
+        from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
+        from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, PANIC_NATIVE_PLAN_MODE
+        package_doc = selected_management_policy_document(cursor, p,
+            'execution_mock_automation_candidate_packages', spec.strategy_ref, spec.candidate_package_hash, management)
+        if package_doc is None:
+            raise RuntimeError('SELECTED_MANAGEMENT_ORIGINAL_PACKAGE_MISSING')
+        package = candidate_package_from_dict(package_doc)
+        family = package.candidate_spec['family']
+        allowed = {LEADER_NATIVE_PLAN_MODE: {'leader_breakout/v1'},
+                   CLOSE_NATIVE_PLAN_MODE: {'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'},
+                   PANIC_NATIVE_PLAN_MODE: {'panic_rebound/v1'}}
+        if (family not in allowed.get(spec.execution_plan_mode, set())
+                or context.spec_id != spec.spec_id or context.admission_id != gate.admission_id
+                or context.execution_run_id != value['run_id']
+                or package.package_hash != spec.candidate_package_hash
+                or value['plan']['plan_id'] != management['_policy_view']['source_plan_position']['plan_id']):
+            raise RuntimeError('SELECTED_MANAGEMENT_ORIGINAL_POLICY_CHANGED')
+        profile = None
     if (gate.version == MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION and (
             spec.execution_plan_mode != LEADER_NATIVE_PLAN_MODE
-            or profile.family_version != 'leader_breakout/v1' or gate.action not in {'ADD', 'REDUCE'})):
+            or family != 'leader_breakout/v1' or gate.action not in {'ADD', 'REDUCE'})):
         raise RuntimeError('PLANNED_POSITION_ACTION_FAMILY_CHANGED')
     if gate.version == MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION:
         source = _plan_document(cursor, p, 'execution_leader_decisions', account_ref,
-                                value['intent_id'] if account_limits is not None else value['decision_id']) or {}
+                                value['intent_id'] if ownership.get('_native_member_evidence') else value['decision_id']) or {}
         raw = (source.get('snapshot') or {}).get('feature_values', [{}])[0].get('value', {})
         if not raw.get('position_step') or raw.get('proposal') != gate.action:
             raise RuntimeError('PLANNED_POSITION_ACTION_EVIDENCE_MISSING')
-    policy = mock_automation_order_policy_version(profile.family_version, spec.session_profile)
+    policy = mock_automation_order_policy_version(family, spec.session_profile)
     if policy == 'leader_execution_adapter/v1' and value['side'] == 'SELL' and ownership.get('protection_claim') is not None:
         policy = PROTECTION_EXIT_VERSION  # The ownership transaction already validated the typed proof.
     if (
-        (profile.profile_id, profile.account_ref, profile.strategy_ref, profile.environment, profile.session_profile)
-        != (spec.forward_profile_id, account_ref, spec.strategy_ref, value["environment"], spec.session_profile)
+        (profile is not None and
+         (profile.profile_id, profile.account_ref, profile.strategy_ref, profile.environment, profile.session_profile)
+         != (spec.forward_profile_id, account_ref, spec.strategy_ref, value['environment'], spec.session_profile))
         or value["policy_version"] != policy
     ):
         raise RuntimeError("PLANNED_EXECUTION_FORWARD_PROFILE_CHANGED")
     risk = mock_automation_risk_snapshot_from_dict(risk_doc)
+    active = None
     if account_limits is not None:
+        rows = _account_active_execution_rows(cursor, 'mock', account_ref, 401, p)
+        if len(rows) > 400:
+            raise RuntimeError('EXECUTION_ACCOUNT_OPEN_ORDERS_INCOMPLETE')
+        active = [_json_document(row[0]) for row in rows]
+        unknown = sum(row['state'] == 'SUBMISSION_UNKNOWN' for row in active)
+        if unknown > account_limits.maximum_submission_unknown_count:
+            raise RuntimeError('MOCK_ACCOUNT_SUBMISSION_UNKNOWN_LIMIT')
+        if spec.maximum_submission_unknown_count is not None and unknown > spec.maximum_submission_unknown_count:
+            raise RuntimeError('EXECUTION_PLAN_SUBMISSION_UNKNOWN_LIMIT')
         if (risk.submission_unknown_count > account_limits.maximum_submission_unknown_count
                 or risk.balance_mismatch_count > account_limits.maximum_balance_mismatch_count
                 or value['side'] == 'BUY' and (
@@ -476,6 +901,24 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider, *, account
                     or risk.reconnect_count > account_limits.maximum_reconnect_count)):
             raise RuntimeError('MOCK_ACCOUNT_RISK_LIMIT')
     current = mock_automation_recovery_decision_from_dict(recovery_doc)
+    selection = ownership.get('_native_account_selection')
+    if selection is not None and active is not None:
+        _, projection = _retained_execution_member_projection(cursor, p, account_ref,
+            intent_ids=tuple(row['intent_id'] for row in active),
+            _selection=selection)
+        active = [{**row, 'mock_account_member_spec_id': projection[row['intent_id']]}
+                  if row['intent_id'] in projection else row for row in active]
+    peer_orders = set()
+    covered_buy_won = 0
+    if selection is not None:
+        if (not isinstance(current, MockAutomationAccountRecoveryDecision)
+                or current.account_selection_id != selection['selection_id']
+                or current.member_spec_ids != tuple(selection['member_spec_ids'])
+                or gate.spec_id not in current.member_spec_ids
+                or current.own_position_quantities != risk.owned_for_member(gate.spec_id)):
+            raise RuntimeError('PLANNED_EXECUTION_ACCOUNT_RECOVERY_CHANGED')
+        peer_orders = set(current.other_member_open_order_ids)
+        covered_buy_won = _account_recovery_order_coverage(active, recovery, current, selection, gate.spec_id)
     now = kst_now() if now_provider is None else now_provider()
     max_age = (min(spec.maximum_data_gap_seconds, account_limits.maximum_data_gap_seconds)
                if account_limits is not None and spec.maximum_data_gap_seconds is not None
@@ -488,7 +931,8 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider, *, account
     if (
         spec.account_scope.account_ref != account_ref or spec.spec_id != gate.spec_id
         or spec.strategy_ref != gate.strategy_ref or value["venue"] != spec.supported_venue
-        or risk.binding_revision != spec.binding_revision or not risk.reconciliation_complete
+        or risk.binding_revision != (context.binding_revision if context is not None else spec.binding_revision)
+        or not risk.reconciliation_complete
         or (risk.account_ref, risk.execution_run_id) != (account_ref, value["run_id"])
         or (risk.snapshot_id, risk.reconciliation_revision) != (gate.risk_snapshot_id, gate.risk_reconciliation_revision)
         or (current.account_ref, current.execution_run_id, current.spec_id) != (account_ref, value["run_id"], gate.spec_id)
@@ -502,29 +946,67 @@ def _require_plan_approval(cursor, p, value, ownership, now_provider, *, account
         or expiry != gate.decided_at + timedelta(seconds=max(1, int(spec.maximum_data_gap_seconds)))
         or any(not 0 <= (now - at).total_seconds() <= max_age
                for at in (gate.decided_at, gate.server_now, risk.observed_at, risk.account_as_of))
-        or any(order.state not in TERMINAL_ORDER_STATES for order in recovery.orders)
+        or any(order.state not in TERMINAL_ORDER_STATES and order.broker_order_id not in peer_orders
+               for order in recovery.orders)
     ):
         raise RuntimeError("PLANNED_EXECUTION_RISK_OR_RECOVERY_CHANGED")
     event_type = "e.document_json->>'event_type'" if p == "%s" else "json_extract(e.document_json,'$.event_type')"
+    financial_events = "'FILL','BROKER_FILL_AGGREGATE'"
+    if selection is not None:
+        financial_events += ",'AMENDMENT_STARTED','AMENDMENT_ACCEPTED','AMENDMENT_RECOVERED','AMENDMENT_RESPONSE_UNKNOWN'"
     cursor.execute(
         "SELECT 1 FROM central_execution_events e JOIN central_execution_intents i ON i.intent_id=e.intent_id "
         f"WHERE i.environment='mock' AND i.account_ref={p} AND e.accepted_sequence>{p} "
-        f"AND {event_type} IN ('FILL','BROKER_FILL_AGGREGATE') LIMIT 1",
+        f"AND {event_type} IN ({financial_events}) LIMIT 1",
         (account_ref, risk.execution_event_high_watermark),
     )
     if cursor.fetchone() is not None:
         raise RuntimeError("PLANNED_EXECUTION_RISK_OR_RECOVERY_CHANGED")
-    return gate.gate_id, spec, gate.action
+    return gate.gate_id, spec, gate.action, active, covered_buy_won
+
+
+def _account_recovery_order_coverage(active, recovery, current, selection, spec_id):
+    """Reproduce peer attribution from native physical orders in this transaction."""
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, execution_broker_legs
+    from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES, OrderSide
+    working = {order.broker_order_id: order for order in recovery.orders if order.state not in TERMINAL_ORDER_STATES}
+    own, peers, covered = set(), set(), set()
+    reserved = 0
+    for row in active:
+        record = _record_from_document(row)
+        for leg in execution_broker_legs(record):
+            snapshot = working.get(leg.broker_order_id)
+            if snapshot is None:
+                continue  # A later native reservation remains additional cash usage.
+            member = getattr(record, 'member_spec_id', None)
+            if (member not in selection['member_spec_ids'] or record.intent.run_id != current.execution_run_id
+                    or record.intent.account_ref != current.account_ref
+                    or record.state.value not in {'ACCEPTED', 'PARTIALLY_FILLED'}
+                    or record.amendment is not None and record.amendment.reconciliation_pending
+                    or leg.state in TERMINAL_ORDER_STATES or leg.broker_order_id in covered
+                    or (record.intent.symbol, leg.remaining_quantity, leg.detailed_filled_quantity,
+                        leg.broker_reported_filled_quantity)
+                    != (snapshot.symbol, snapshot.remaining_quantity, snapshot.filled_quantity, snapshot.filled_quantity)):
+                raise RuntimeError('PLANNED_EXECUTION_ACCOUNT_ORDER_COVERAGE_CHANGED')
+            covered.add(leg.broker_order_id)
+            (own if member == spec_id else peers).add(leg.broker_order_id)
+            if record.intent.side is OrderSide.BUY:
+                reserved += leg.remaining_quantity * leg.limit_price
+    if (covered != set(working) or own != set(current.own_open_order_ids)
+            or peers != set(current.other_member_open_order_ids) or reserved != recovery.account.reserved_open_buy_won):
+        raise RuntimeError('PLANNED_EXECUTION_ACCOUNT_ORDER_COVERAGE_CHANGED')
+    return reserved
 
 
 def _claim_plan_position(cursor, p, value, ownership, now_provider, *, control=None):
+    ownership = _native_execution_scope(ownership, control or {})
     account_ref, ref = value["account_ref"], value["plan"]
     from kiwoom_monitor.application.mock_automation_admission import (
         MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION, mock_automation_control_from_dict,
     )
     selection = (mock_automation_control_from_dict(control).account_selection
                  if control and control.get('version') == MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION else None)
-    gate_id, spec, action = _require_plan_approval(cursor, p, value, ownership, now_provider,
+    gate_id, spec, action, active, covered = _require_plan_approval(cursor, p, value, ownership, now_provider,
         account_limits=selection.limits if selection is not None else None)
     head = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account_ref, ref["plan_id"])
     if head is None:
@@ -540,12 +1022,15 @@ def _claim_plan_position(cursor, p, value, ownership, now_provider, *, control=N
         raise RuntimeError("EXECUTION_PLAN_REVISION_CHANGED")
     if head.get("unreconciled_sell_quantity"):
         raise RuntimeError("EXECUTION_PLAN_RECONCILIATION_REQUIRED")
-    if selection is not None and head.get('spec_id') != spec.spec_id:
+    scoped_head = (_retained_plan_position_view(cursor, p, selection, head)
+                   if selection is not None else head)
+    if selection is not None and scoped_head.get('spec_id') != spec.spec_id:
         raise RuntimeError('EXECUTION_PLAN_MEMBER_MISMATCH')
-    rows = _account_active_execution_rows(cursor, "mock", account_ref, 401, p)
-    if len(rows) > 400:
-        raise RuntimeError("EXECUTION_ACCOUNT_OPEN_ORDERS_INCOMPLETE")
-    active = [_json_document(row[0]) for row in rows]
+    if active is None:
+        rows = _account_active_execution_rows(cursor, "mock", account_ref, 401, p)
+        if len(rows) > 400:
+            raise RuntimeError("EXECUTION_ACCOUNT_OPEN_ORDERS_INCOMPLETE")
+        active = [_json_document(row[0]) for row in rows]
     if (spec.maximum_submission_unknown_count is not None
             and sum(row["state"] == "SUBMISSION_UNKNOWN" for row in active) > spec.maximum_submission_unknown_count):
         raise RuntimeError("EXECUTION_PLAN_SUBMISSION_UNKNOWN_LIMIT")
@@ -560,9 +1045,10 @@ def _claim_plan_position(cursor, p, value, ownership, now_provider, *, control=N
         buys = [row for row in active if row["side"] == "BUY"]
         if any(row.get("limit_price") is None for row in buys):
             raise RuntimeError("EXECUTION_ACCOUNT_RESERVATION_UNKNOWN")
-        reserved = sum(_unfilled_quantity(row) * row["limit_price"] for row in buys)
+        reserved = sum(_planned_buy_reservation(row) if selection is not None
+                       else _unfilled_quantity(row) * row['limit_price'] for row in buys)
         required = value["quantity"] * value["limit_price"]
-        free = account.available_cash_won - account.reserved_open_buy_won - reserved
+        free = account.available_cash_won - account.reserved_open_buy_won - (reserved - covered)
         capital_limit = spec.maximum_capital_won
         member_committed = reserved
         if selection is not None:
@@ -582,8 +1068,80 @@ def _claim_plan_position(cursor, p, value, ownership, now_provider, *, control=N
         cursor, p, account_ref, {**head, "revision": head["revision"] + 1},
         datetime.fromisoformat(value["created_at"]),
     )
+    management = ownership.get('_native_selected_management_context')
+    member = (management['context'].member_spec_id if management is not None
+              else spec.spec_id if selection is not None else None)
     return {**value, "mock_plan_approval": gate_id,
-            **({'mock_account_member_spec_id': spec.spec_id} if selection is not None else {})}
+            **({'mock_account_member_spec_id': member} if member is not None else {})}
+
+
+def _retained_plan_position_view(cursor, p, selection, head, *, documents=None):
+    """Validate legacy ownership and FIFO without rewriting the mutable head.
+
+    Only current occupied/reserved plans need this transaction-local view. The
+    plan ledger and original approvals remain the source; no fabricated lots or
+    same-run attribution is accepted.
+    """
+    from kiwoom_monitor.domain.execution_activation import MockAutomationAccountSelectionV2
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, execution_broker_legs
+
+    if (head.get('spec_id') is not None or 'capital_lots' in head
+            or not isinstance(selection, MockAutomationAccountSelectionV2)):
+        return head
+    account, run_id = selection.account_scope.account_ref, head['run_id']
+    orders, pages = _leader_plan_ledger(cursor, p, account, run_id, head['plan_id'])
+    if not orders or head.get('unreconciled_sell_quantity'):
+        raise RuntimeError('MOCK_RETAINED_PLAN_UNCONFIRMED')
+    cache = {} if documents is None else documents
+    projection = {}
+    identities = tuple(orders)
+    # Reuse the existing projection read-page budget, without imposing a new
+    # lifetime order-count limit on a plan.
+    for offset in range(0, len(identities), 400):
+        projection.update(_retained_projection_rows(cursor, p, account, selection, run_id,
+            identities[offset:offset + 400], cache))
+    members = set(projection.values())
+    if set(projection) != set(orders) or len(members) != 1:
+        raise RuntimeError('MOCK_RETAINED_PLAN_OWNER_UNCONFIRMED')
+    fills = []
+    for identity, document in orders.items():
+        record = _record_from_document(document)
+        intent = record.intent
+        if ((intent.account_ref, intent.run_id, intent.symbol, intent.plan.plan_id, intent.plan.policy_ref)
+                != (account, run_id, head['symbol'], head['plan_id'], head['policy_ref'])
+                or record.filled_quantity != record.detailed_filled_quantity
+                or record.broker_reported_filled_quantity != record.detailed_filled_quantity
+                or any(leg.broker_reported_filled_quantity != leg.detailed_filled_quantity
+                       for leg in execution_broker_legs(record))):
+            raise RuntimeError('MOCK_RETAINED_PLAN_DETAILS_UNCONFIRMED')
+        detailed = [(sequence, event) for sequence, event in pages[identity] if event['event_type'] == 'FILL']
+        if sum(event['quantity'] for _, event in detailed) != record.detailed_filled_quantity:
+            raise RuntimeError('MOCK_RETAINED_PLAN_DETAILS_UNCONFIRMED')
+        fills.extend((sequence, intent.side.value, event) for sequence, event in detailed)
+    lots, seen, last_fill = [], set(), 0
+    for sequence, side, event in sorted(fills, key=lambda item: item[0]):
+        identity = (event['intent_id'], event['broker_order_id'], event['broker_execution_id'])
+        if (identity in seen or not identity[1] or not identity[2]
+                or type(event['quantity']) is not int or event['quantity'] <= 0
+                or type(event['price']) is not int or event['price'] <= 0):
+            raise RuntimeError('MOCK_RETAINED_PLAN_FILL_UNCONFIRMED')
+        seen.add(identity)
+        if side == 'BUY':
+            lots.append([event['quantity'], event['price']])
+        else:
+            remaining = event['quantity']
+            while remaining and lots:
+                taken = min(remaining, lots[0][0])
+                remaining -= taken
+                lots[0][0] -= taken
+                if not lots[0][0]:
+                    lots.pop(0)
+            if remaining:
+                raise RuntimeError('MOCK_RETAINED_PLAN_NEGATIVE_POSITION')
+        last_fill = sequence
+    if (sum(quantity for quantity, _ in lots), last_fill) != (head['quantity'], head['fill_cursor']):
+        raise RuntimeError('MOCK_RETAINED_PLAN_FILL_CUT_CHANGED')
+    return {**head, 'spec_id': next(iter(members)), 'capital_lots': lots}
 
 
 def _claim_account_plan_capacity(cursor, p, value, spec, selection, active):
@@ -602,6 +1160,9 @@ def _claim_account_plan_capacity(cursor, p, value, spec, selection, active):
         raise RuntimeError('MOCK_ACCOUNT_POSITION_LIMIT')
     if any(identity not in heads for identity in active_ids):
         raise RuntimeError('MOCK_ACCOUNT_PLAN_RESERVATION_UNVERIFIED')
+    documents = {}
+    heads = {identity: _retained_plan_position_view(cursor, p, selection, head, documents=documents)
+             for identity, head in heads.items()}
     basis = member_basis = 0
     for head in heads.values():
         lots = head.get('capital_lots')
@@ -621,12 +1182,23 @@ def _claim_account_plan_capacity(cursor, p, value, spec, selection, active):
         raise RuntimeError('MOCK_ACCOUNT_POSITION_LIMIT')
     if len(members) > selection.limits.maximum_concurrent_strategies:
         raise RuntimeError('MOCK_ACCOUNT_STRATEGY_LIMIT')
-    reserved = sum(_unfilled_quantity(row) * row['limit_price'] for row in buys)
+    reserved = sum(_planned_buy_reservation(row) for row in buys)
     required = value['quantity'] * value['limit_price']
     if basis + reserved + required > selection.limits.maximum_capital_won:
         raise RuntimeError('MOCK_ACCOUNT_CAPITAL_UNAVAILABLE')
-    return member_basis + sum(_unfilled_quantity(row) * row['limit_price'] for row in buys
+    return member_basis + sum(_planned_buy_reservation(row) for row in buys
                               if heads[row['plan']['plan_id']]['spec_id'] == spec.spec_id)
+
+
+def _planned_buy_reservation(row):
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, execution_broker_legs
+    from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
+    record = _record_from_document(row)
+    if record.amendment is not None and record.amendment.reconciliation_pending:
+        raise RuntimeError('MOCK_ACCOUNT_AMENDMENT_RECONCILIATION_REQUIRED')
+    legs = execution_broker_legs(record)
+    return (sum(leg.remaining_quantity * leg.limit_price for leg in legs if leg.state not in TERMINAL_ORDER_STATES)
+            if legs else _unfilled_quantity(row) * row['limit_price'])
 
 
 def _unfilled_quantity(order):
@@ -697,8 +1269,62 @@ def _validate_broker_ledger_write(cursor, p, stored, intent, event, ownership, n
     return stored
 
 
+def _verified_native_order_management_peers(cursor, p, record, recovery, risk, control, kind):
+    from kiwoom_monitor.application.minute_order_management import verified_current_order_peers
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, project_execution_record
+    rows = _account_active_execution_rows(cursor, 'mock', record.intent.account_ref, 401, p)
+    if len(rows) > 400:
+        raise RuntimeError(f'{kind}_CURRENT_ORDER_ACCOUNT_COVERAGE_CHANGED')
+    raw = tuple(_json_document(row[0]) for row in rows)
+    management = control.get('_native_selected_management_context') if control else None
+    if management is not None:
+        try:
+            return verified_current_order_peers(record, recovery, risk,
+                tuple(_record_from_document(value) for value in raw), control,
+                selected_management_context=management['context'], selected_management_policy=management['_policy_view'])
+        except (ValueError, TypeError, KeyError) as error:
+            raise RuntimeError(f'{kind}_CURRENT_ORDER_ACCOUNT_COVERAGE_CHANGED') from error
+    selected = control.get('account_selection') if control else None
+    _, projection = _retained_execution_member_projection(cursor, p, record.intent.account_ref,
+        intent_ids=tuple(value['intent_id'] for value in raw),
+        _selection=selected) if selected is not None else (None, {})
+    projected = project_execution_record(record, projection)
+    try:
+        result = verified_current_order_peers(projected, recovery, risk,
+            tuple(project_execution_record(_record_from_document(value), projection) for value in raw), control)
+        return ({**result, 'legacy_evidence_scope': True} if record.intent.intent_id in projection else result)
+    except (ValueError, TypeError, KeyError) as error:
+        raise RuntimeError(f'{kind}_CURRENT_ORDER_ACCOUNT_COVERAGE_CHANGED') from error
+
+
+def _selected_management_original_claim_view(cursor, p, stored, ownership):
+    """Supply an original source marker only in this validated claim's view."""
+    management = (ownership or {}).get('_native_selected_management_context')
+    if management is None or stored is None or stored.get('mock_plan_approval'):
+        return stored
+    context = management['context']
+    source_ids = management['_policy_view']['source_intent_ids']
+    if stored.get('intent_id') not in source_ids:
+        return stored  # New SELLs obtain their own current native marker.
+    from dataclasses import asdict
+    from kiwoom_monitor.application.mock_automation_execution import (
+        mock_automation_decision_gate_from_dict, MockAutomationGateStatus)
+    document = _plan_document(cursor, p, 'execution_mock_automation_approved_gates',
+        context.account_ref, stored['intent_id'], selected_management=management)
+    gate = mock_automation_decision_gate_from_dict(document) if document is not None else None
+    if (gate is None or gate.status is not MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION
+            or (gate.intent_id, gate.spec_id, gate.admission_id, gate.account_ref, gate.execution_run_id,
+                gate.strategy_decision_id, gate.symbol, gate.quantity, gate.limit_price)
+            != (stored['intent_id'], context.spec_id, context.admission_id, context.account_ref,
+                context.execution_run_id, stored['decision_id'], stored['symbol'], stored['quantity'], stored['limit_price'])
+            or gate.plan is None or asdict(gate.plan) != stored.get('plan')):
+        raise RuntimeError('SELECTED_MANAGEMENT_ORIGINAL_APPROVAL_CHANGED')
+    return {**stored, 'mock_plan_approval': gate.gate_id}
+
+
 def _require_minute_order_management_claim(cursor, p, stored, value, event, ownership, now_provider, control):
     ownership = _native_execution_scope(ownership, control or {}) if ownership is not None else None
+    stored = _selected_management_original_claim_view(cursor, p, stored, ownership)
     from kiwoom_monitor.domain.execution_activation import (
         CLOSE_ORDER_MANAGEMENT_VERSION, PANIC_ORDER_MANAGEMENT_VERSION, LEADER_ORDER_MANAGEMENT_VERSION,
     )
@@ -728,17 +1354,17 @@ def _require_minute_order_management_claim(cursor, p, stored, value, event, owne
             or recovery is None or not control or ownership.get('control_revision') is None):
         raise RuntimeError(f'{kind}_CURRENT_ORDER_CLAIM_REQUIRED')
     account = value['account_ref']
-    spec, package, entry, candidate = _minute_native_documents(cursor, p, account, ownership['active_spec_id'], stored['plan']['plan_id'], kind=kind)
-    approval = _plan_document(cursor, p, 'execution_mock_automation_approved_gates', account, stored['intent_id'])
+    management = ownership.get('_native_selected_management_context')
+    spec, package, entry, candidate = _minute_native_documents(cursor, p, account, ownership['active_spec_id'],
+        stored['plan']['plan_id'], kind=kind, selected_management=management)
+    approval = _plan_document(cursor, p, 'execution_mock_automation_approved_gates', account, stored['intent_id'],
+                              selected_management=management)
     risk_doc = _plan_document(cursor, p, 'execution_mock_automation_current_risk', account, account)
     head_doc = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, stored['plan']['plan_id'])
     if (approval is None or approval['gate_id'] != stored['mock_plan_approval']
             or approval['spec_id'] != spec.spec_id or approval.get('plan') != stored['plan']
             or risk_doc is None or head_doc is None):
         raise RuntimeError(f'{kind}_CURRENT_ORDER_ORIGINAL_APPROVAL_CHANGED')
-    active = [_json_document(row[0]) for row in _account_active_execution_rows(cursor, 'mock', account, 2, p)]
-    if len(active) != 1 or active[0]['intent_id'] != stored['intent_id']:
-        raise RuntimeError(f'{kind}_CURRENT_ORDER_ACCOUNT_COVERAGE_CHANGED')
     record = _record_from_document(stored)
     plan = OrderPlanRef(**claim['plan'])
     head = plan_position_from_document(head_doc, stored['run_id'], stored['symbol'], plan)
@@ -746,7 +1372,8 @@ def _require_minute_order_management_claim(cursor, p, stored, value, event, owne
         raise RuntimeError(f'{kind}_CURRENT_ORDER_PLAN_REVISION_CHANGED')
     settings = _plan_document(cursor, p, 'server_operational_settings', 'global', 'current') if stored['side'] == 'BUY' else None
     enabled = (stored['side'] == 'BUY' and control.get('desired_state') == 'RUNNING'
-               and not control.get('entry_resume_required', False) and minute_current_shadow_matches(spec, candidate, settings))
+               and not control.get('entry_resume_required', False) and _control_entry_enabled(control, spec.spec_id)
+               and minute_current_shadow_matches(spec, candidate, settings))
     root_id = mock_automation_intent_id(spec.spec_id, entry['decision']['decision_id'])
     root = record
     if stored['side'] == 'SELL':
@@ -754,6 +1381,7 @@ def _require_minute_order_management_claim(cursor, p, stored, value, event, owne
         root = _record_from_document(_json_document(row[0])) if row else None
     notice = claim.get('protection_notice')
     risk = mock_automation_risk_snapshot_from_dict(risk_doc)
+    peers = _verified_native_order_management_peers(cursor, p, record, recovery, risk, control, kind)
     exit_evidence = (_plan_document(cursor, p, exit_collection, account, exit_key(record.intent.plan))
                      if stored['side'] == 'SELL' else None)
     panic_trigger = claim.get('panic_trigger')
@@ -763,10 +1391,14 @@ def _require_minute_order_management_claim(cursor, p, stored, value, event, owne
         event=candidate, entry_evidence=entry, record=record, head=head,
         order_events=[_json_document(row[0]) for row in _execution_event_rows(cursor, stored['intent_id'], p)],
         recovery=recovery, risk=risk, quote=claim['quote'], decided_at=datetime.fromisoformat(claim['decided_at']),
+        verified_peer_orders=peers,
         now=kst_now() if now_provider is None else now_provider(), entry_enabled=enabled, root=root,
         exit_evidence=exit_evidence, **(dict(panic_trigger=panic_trigger) if panic else dict(protection_notice=notice,
         root_fill_events=[_json_document(row[0]) for row in _execution_event_rows(cursor, root_id, p)] if notice is not None else (),
-        stop_risk=_close_native_stop_risk(cursor, p, account, spec, notice, root_id, checkpoint_key=ownership.get('_native_checkpoint_key', 'current')) if notice is not None else None)))
+        stop_risk=_close_native_stop_risk(cursor, p, account, spec, notice, root_id,
+            checkpoint_key=ownership.get('_native_checkpoint_key', 'current'),
+            selected_management=management) if notice is not None else None,
+        **_selected_management_close_terms(ownership))))
     expected_action = 'AMEND' if event['event_type'] == 'AMENDMENT_STARTED' else 'CANCEL'
     if (assessed != claim or claim['action'] != expected_action
             or event['broker_order_id'] != claim['broker_order_id']
@@ -790,8 +1422,9 @@ def _require_leader_order_management_claim(cursor, p, stored, value, event, owne
 
     claim = ownership.get('amendment_claim' if event['event_type'] == 'AMENDMENT_STARTED' else 'planned_cancel_claim')
     account = value['account_ref']
+    management = ownership.get('_native_selected_management_context')
     def document(collection, key, owner=account):
-        result = _plan_document(cursor, p, collection, owner, key)
+        result = _plan_document(cursor, p, collection, owner, key, selected_management=management)
         if result is None:
             raise RuntimeError('LEADER_CURRENT_ORDER_EVIDENCE_MISSING')
         return result
@@ -810,9 +1443,6 @@ def _require_leader_order_management_claim(cursor, p, stored, value, event, owne
                 approval['symbol'], approval['quantity'], approval['limit_price'])
             != (stored['run_id'], account, stored['decision_id'], stored['symbol'], stored['quantity'], stored['limit_price'])):
         raise RuntimeError('LEADER_CURRENT_ORDER_ORIGINAL_APPROVAL_CHANGED')
-    active = [_json_document(row[0]) for row in _account_active_execution_rows(cursor, 'mock', account, 2, p)]
-    if len(active) != 1 or active[0]['intent_id'] != stored['intent_id']:
-        raise RuntimeError('LEADER_CURRENT_ORDER_ACCOUNT_COVERAGE_CHANGED')
     record = _record_from_document(stored)
     plan = OrderPlanRef(**claim['plan'])
     head = plan_position_from_document(document(PLAN_POSITION_COLLECTION, stored['plan']['plan_id']), stored['run_id'], stored['symbol'], plan)
@@ -820,9 +1450,11 @@ def _require_leader_order_management_claim(cursor, p, stored, value, event, owne
         raise RuntimeError('LEADER_CURRENT_ORDER_PLAN_REVISION_CHANGED')
     pin = document('execution_leader_position_context', stored['plan']['plan_id'])
     now = kst_now() if now_provider is None else now_provider()
-    settings = document('server_operational_settings', 'current', 'global') if stored['side'] == 'BUY' else None
+    settings = (document('server_operational_settings', 'current', 'global')
+                if stored['side'] == 'BUY' and management is None else None)
     enabled = (stored['side'] == 'BUY' and control.get('desired_state') == 'RUNNING'
-        and not control.get('entry_resume_required', False) and leader_current_entry_matches(config, pin, settings, now))
+        and not control.get('entry_resume_required', False) and _control_entry_enabled(control, spec.spec_id)
+        and leader_current_entry_matches(config, pin, settings, now))
     notice = claim.get('protection_notice')
     stop_risk = None
     plan_entry_notional = None
@@ -840,15 +1472,18 @@ def _require_leader_order_management_claim(cursor, p, stored, value, event, owne
             trigger = notice['planned_leader_stop']
             stop_risk = mock_automation_risk_snapshot_from_dict(document('execution_mock_automation_risk_snapshots', trigger['risk_snapshot_id']))
             if staged_pages is not None:
+                stop_cursor = _leader_native_risk_high_watermark(ownership, stop_risk,
+                    [row for events in staged_pages.values() for row in events])
                 quantity = sum((1 if staged_orders[identity]['side'] == 'BUY' else -1) * row['quantity']
                     for identity, events in staged_pages.items() for sequence, row in events
-                    if sequence <= stop_risk.execution_event_high_watermark and row['event_type'] == 'FILL')
+                    if sequence <= stop_cursor and row['event_type'] == 'FILL')
             else:
                 cursor.execute(f'SELECT accepted_sequence,document_json FROM central_execution_events WHERE intent_id={p} ORDER BY accepted_sequence',
                                (stored['intent_id'],))
-                quantity = sum(row['quantity'] for sequence, raw in cursor.fetchall()
-                    if sequence <= stop_risk.execution_event_high_watermark
-                    and (row := _json_document(raw))['event_type'] == 'FILL' and row['broker_execution_id'])
+                events = [(sequence, _json_document(raw)) for sequence, raw in cursor.fetchall()]
+                stop_cursor = _leader_native_risk_high_watermark(ownership, stop_risk, events)
+                quantity = sum(row['quantity'] for sequence, row in events
+                    if sequence <= stop_cursor and row['event_type'] == 'FILL' and row['broker_execution_id'])
             if quantity != trigger['stop_loss']['quantity']:
                 raise RuntimeError('LEADER_CURRENT_ORDER_ORIGINAL_STOP_FILLS_CHANGED')
     source = (notice['planned_leader_protection_exit'] if stored['policy_version'] == 'mock-protection-exit/v1'
@@ -859,12 +1494,14 @@ def _require_leader_order_management_claim(cursor, p, stored, value, event, owne
                 'mock_automation_plan_action_gate/v1',
                 leader_position_action_ref(config, pin, source['snapshot']['feature_values'][0]['value'])):
             raise RuntimeError('LEADER_CURRENT_ORDER_POSITION_ACTION_CHANGED')
+    current_risk = mock_automation_risk_snapshot_from_dict(document('execution_mock_automation_current_risk', account))
+    peers = _verified_native_order_management_peers(cursor, p, record, ownership['plan_recovery'], current_risk, control, 'LEADER')
     assessed = assess_leader_order_management(spec, run_id=stored['run_id'], config=config, position_proof=pin,
         record=record, head=head, order_events=[_json_document(row[0]) for row in _execution_event_rows(cursor, stored['intent_id'], p)],
-        recovery=ownership['plan_recovery'], risk=mock_automation_risk_snapshot_from_dict(document('execution_mock_automation_current_risk', account)),
+        recovery=ownership['plan_recovery'], risk=current_risk, verified_peer_orders=peers,
         quote=claim['quote'], decided_at=datetime.fromisoformat(claim['decided_at']), now=now, entry_enabled=enabled,
         decision_source=source, protection_notice=notice, stop_risk=stop_risk,
-        plan_entry_notional_won=plan_entry_notional)
+        plan_entry_notional_won=plan_entry_notional, **_selected_management_close_terms(ownership))
     action = 'AMEND' if event['event_type'] == 'AMENDMENT_STARTED' else 'CANCEL'
     if (assessed != claim or claim['action'] != action or event['broker_order_id'] != claim['broker_order_id']
             or action == 'AMEND' and (event['quantity'], event['price']) != (claim['quantity'], claim['limit_price'])):
@@ -921,7 +1558,7 @@ def _apply_plan_execution_event(cursor, p, intent, event, sequence):
     )
 
 
-def _minute_native_documents(cursor, p, account, spec_id, plan_id, *, kind='CLOSE'):
+def _minute_native_documents(cursor, p, account, spec_id, plan_id, *, kind='CLOSE', selected_management=None):
     """Read one original minute-strategy scope in the existing native transaction."""
     from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
     from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, PANIC_NATIVE_PLAN_MODE, mock_automation_spec_from_dict
@@ -935,13 +1572,14 @@ def _minute_native_documents(cursor, p, account, spec_id, plan_id, *, kind='CLOS
     else:
         raise ValueError('unsupported native minute-strategy scope')
 
-    spec_doc = _plan_document(cursor, p, "execution_mock_automation_specs", account, spec_id)
+    spec_doc = _plan_document(cursor, p, 'execution_mock_automation_specs', account, spec_id,
+                              selected_management=selected_management)
     if spec_doc is None:
         raise RuntimeError(f"{kind}_EXECUTION_SPEC_MISSING")
     spec = mock_automation_spec_from_dict(spec_doc)
     package_doc = _plan_document(cursor, p, "execution_mock_automation_candidate_packages",
-                                 spec.strategy_ref, spec.candidate_package_hash)
-    proof = _plan_document(cursor, p, collection, account, plan_id)
+                                 spec.strategy_ref, spec.candidate_package_hash, selected_management=selected_management)
+    proof = _plan_document(cursor, p, collection, account, plan_id, selected_management=selected_management)
     if package_doc is None or proof is None:
         raise RuntimeError(f"{kind}_ENTRY_EVIDENCE_MISSING")
     package = candidate_package_from_dict(package_doc)
@@ -949,13 +1587,19 @@ def _minute_native_documents(cursor, p, account, spec_id, plan_id, *, kind='CLOS
     if (spec.execution_plan_mode != mode or family not in families
             or package.package_hash != spec.candidate_package_hash):
         raise RuntimeError(f"{kind}_ENTRY_PACKAGE_CHANGED")
-    cursor.execute(f"SELECT document_json,expires_at FROM central_shadow_candidate_events WHERE event_id={p}"
-                   + (" FOR UPDATE" if p == "%s" else ""), (proof["snapshot"]["candidate_event_id"],))
-    row = cursor.fetchone()
-    if row is None:
-        raise RuntimeError(f"{kind}_SHADOW_CANDIDATE_MISSING")
-    event = _json_document(row[0])
-    event["expires_at"] = row[1].isoformat() if isinstance(row[1], datetime) else str(row[1])
+    if selected_management is None:
+        cursor.execute(f"SELECT document_json,expires_at FROM central_shadow_candidate_events WHERE event_id={p}"
+                       + (" FOR UPDATE" if p == "%s" else ""), (proof['snapshot']['candidate_event_id'],))
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError(f'{kind}_SHADOW_CANDIDATE_MISSING')
+        event = _json_document(row[0])
+        event['expires_at'] = row[1].isoformat() if isinstance(row[1], datetime) else str(row[1])
+    else:
+        from copy import deepcopy
+        event = deepcopy(selected_management['_policy_view']['shadow_candidate'])
+        if event is None or event.get('event_id') != proof['snapshot']['candidate_event_id']:
+            raise RuntimeError(f'{kind}_SHADOW_CANDIDATE_MISSING')
     if f"{event.get('strategy_id')}/{event.get('strategy_version')}" != family:
         raise RuntimeError(f'{kind}_ENTRY_PACKAGE_CHANGED')
     return spec, package, proof, event
@@ -977,23 +1621,43 @@ def _close_native_gap_observations(cursor, p, observations):
     return [rows[ref] for ref in refs]
 
 
-def _close_native_stop_risk(cursor, p, account, spec, notice, root_id, *, checkpoint_key='current'):
+def _selected_management_close_terms(ownership):
+    management = (ownership or {}).get('_native_selected_management_context')
+    if management is None:
+        return {}
+    context = management['context']
+    return {'selected_management_context': context, 'source_risk_snapshot_ids': tuple(
+        item['key'] for item in management['_policy_view']['documents']
+        if item['collection'] == 'execution_mock_automation_risk_snapshots' and item['owner'] == context.account_ref)}
+
+
+def _close_native_stop_risk(cursor, p, account, spec, notice, root_id, *, checkpoint_key='current',
+                            selected_management=None):
     """Read the acknowledged stop and the historical native fill cut, never a newer basis."""
     from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
 
     if notice is None:
         return None
-    checkpoint = _plan_document(cursor, p, 'execution_mock_automation_runner_current', account, checkpoint_key)
+    checkpoint = _plan_document(cursor, p, 'execution_mock_automation_runner_current', account, checkpoint_key,
+                                selected_management=selected_management)
     document = _plan_document(cursor, p, 'execution_mock_automation_risk_snapshots', account,
-                              notice['risk_trigger']['snapshot_id'])
+                              notice['risk_trigger']['snapshot_id'], selected_management=selected_management)
     if (checkpoint is None or document is None or checkpoint.get('protection_review') != notice
             or (checkpoint.get('account_ref'), checkpoint.get('spec_id'), checkpoint.get('execution_run_id'),
                 checkpoint.get('candidate_package_hash'))
             != (account, spec.spec_id, notice['execution_run_id'], spec.candidate_package_hash)):
         raise RuntimeError('CLOSE_DURABLE_STOP_CHANGED')
     risk = mock_automation_risk_snapshot_from_dict(document)
+    watermark = risk.execution_event_high_watermark
+    if selected_management is not None and any(
+            (item['collection'], item['owner'], item['key'])
+            == ('execution_mock_automation_risk_snapshots', account, risk.snapshot_id)
+            for item in selected_management['_policy_view']['documents']):
+        watermark = max((item['target_accepted_sequence']
+            for item in selected_management['_policy_view']['installation']['event_coordinates']
+            if item['source_accepted_sequence'] <= watermark), default=0)
     cursor.execute(f'SELECT document_json FROM central_execution_events WHERE intent_id={p} '
-                   f'AND accepted_sequence<={p} ORDER BY accepted_sequence', (root_id, risk.execution_event_high_watermark))
+                   f'AND accepted_sequence<={p} ORDER BY accepted_sequence', (root_id, watermark))
     fills = [_json_document(row[0]) for row in cursor.fetchall()]
     if sum(row['quantity'] for row in fills if row['event_type'] == 'FILL') != notice['risk_trigger']['stop_loss']['quantity']:
         raise RuntimeError('CLOSE_STOP_NATIVE_FILL_CUT_CHANGED')
@@ -1009,20 +1673,23 @@ def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider,
     from kiwoom_monitor.application.mock_automation_execution import mock_automation_intent_id
     from kiwoom_monitor.application.section12_minute_research import MinuteShadowConfig
     from kiwoom_monitor.domain.order_contract import OrderPlanRef
-    from kiwoom_monitor.domain.strategy_contract import _id
+    from kiwoom_monitor.domain.strategy_contract import _id, shadow_candidate_config_for_spec
     from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, plan_position_from_document
 
     if value.get("side") not in {"BUY", "SELL"} or value.get("plan") is None:
         raise RuntimeError("CLOSE_EXECUTION_REQUIRES_NATIVE_PLAN")
     account = value["account_ref"]
     spec, package, proof, event = _minute_native_documents(cursor, p, account, ownership["active_spec_id"],
-                                                         value["plan"]["plan_id"])
+        value['plan']['plan_id'], selected_management=ownership.get('_native_selected_management_context'))
     now = kst_now() if now_provider is None else now_provider()
     if value["side"] == "BUY":
         settings = _plan_document(cursor, p, "server_operational_settings", "global", "current")
         if settings is None or settings.get("shadow_candidate_enabled") is not True:
             raise RuntimeError("CLOSE_SHADOW_NOT_ENABLED")
-        config = MinuteShadowConfig.from_document(settings["shadow_candidate_config"])
+        selected = shadow_candidate_config_for_spec(settings, spec.spec_id)
+        if selected is None:
+            raise RuntimeError("CLOSE_CURRENT_SHADOW_CHANGED")
+        config = MinuteShadowConfig.from_document(selected)
         monitor_id = _id("section12-minute-shadow", {"config": config.to_dict(), "session_profile": spec.session_profile,
             "universe_max_age_seconds": settings["shadow_candidate_universe_max_age_seconds"]})
         if event["run_id"] != monitor_id or config.strategy.family != package.candidate_spec['family']:
@@ -1040,7 +1707,9 @@ def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider,
         if exit_proof is None or head_doc is None or root_row is None:
             raise RuntimeError("CLOSE_EXIT_EVIDENCE_MISSING")
         notice = exit_proof['snapshot'].get('protection_notice')
-        stop_risk = _close_native_stop_risk(cursor, p, account, spec, notice, root_id, checkpoint_key=ownership.get('_native_checkpoint_key', 'current'))
+        stop_risk = _close_native_stop_risk(cursor, p, account, spec, notice, root_id,
+            checkpoint_key=ownership.get('_native_checkpoint_key', 'current'),
+            selected_management=ownership.get('_native_selected_management_context'))
         head = plan_position_from_document(head_doc, value["run_id"], value["symbol"], plan)
         # Creating the intent reserves exactly one head revision. Submission
         # rechecks that reservation, without treating it as a new position.
@@ -1058,7 +1727,7 @@ def _require_close_execution_claim(cursor, p, value, ownership, *, now_provider,
             trigger_quote=exit_proof["snapshot"]["trigger_quote"], quote=exit_proof["snapshot"]["quote"],
             decided_at=datetime.fromisoformat(value["created_at"]), now=now,
             gap_observations=_close_native_gap_observations(cursor, p, exit_proof['snapshot'].get('gap_observations')),
-            protection_notice=notice, stop_risk=stop_risk)
+            protection_notice=notice, stop_risk=stop_risk, **_selected_management_close_terms(ownership))
         if prepared is None:
             raise RuntimeError("CLOSE_EXIT_TRIGGER_MISSING")
         expected, decision, plan = prepared
@@ -1086,6 +1755,42 @@ def _require_panic_trigger_checkpoint(cursor, p, account, spec, run_id, candidat
     return stored
 
 
+def _require_panic_current_minute_revisions(cursor, p, event, now):
+    """Fence only this entry's required minute slots, retaining every revision.
+
+    A later known correction needs a new Shadow decision. Future revisions
+    are not current knowledge, and an existing position's SELL never calls here.
+    """
+    from kiwoom_monitor.central_server.database_codec import _observation_revision_columns, observation_revision_result_rows
+
+    refs = tuple(dict.fromkeys((*event['panic_entry_setup']['input_refs'], event['reference_revision_id'])))
+    if not refs or any(not isinstance(ref, str) or not ref for ref in refs):
+        raise RuntimeError('PANIC_CURRENT_INPUT_REVISIONS_MISSING')
+    slots = ','.join(p for _ in refs)
+    cursor.execute(f'SELECT {_observation_revision_columns(postgres=p == "%s")} '
+        f'FROM central_observation_revisions WHERE revision_id IN ({slots})', refs)
+    rows = observation_revision_result_rows(cursor.fetchall())
+    if {row['revision_id'] for row in rows} != set(refs):
+        raise RuntimeError('PANIC_CURRENT_INPUT_REVISIONS_MISSING')
+    available_column = 'available_at' if p == '%s' else 'julianday(available_at)'
+    current_time = p if p == '%s' else f'julianday({p})'
+    for row in rows:
+        available = datetime.fromisoformat(row['available_at']) if row['available_at'] else None
+        if (row['kind'] != 'minute_bar' or row['payload'].get('code') != event['symbol']
+                or row['subject'] not in {event['symbol'], event['symbol'] + ':KRX'}
+                or row['completeness'] != 'complete' or row['payload'].get('capture_quality') != 'complete'
+                or available is None or available.utcoffset() is None or available > now):
+            raise RuntimeError('PANIC_CURRENT_INPUT_REVISIONS_UNPROVEN')
+        cursor.execute('SELECT revision_id FROM central_observation_revisions '
+            f'WHERE kind={p} AND subject={p} AND observation_key={p} '
+            f'AND {available_column}<={current_time} '
+            f'ORDER BY {available_column} DESC,accepted_sequence DESC LIMIT 1',
+            ('minute_bar', row['subject'], row['observation_key'], now if p == '%s' else now.isoformat()))
+        latest = cursor.fetchone()
+        if latest is None or latest[0] != row['revision_id']:
+            raise RuntimeError('PANIC_CURRENT_INPUT_REVISIONS_CHANGED')
+
+
 def _require_panic_execution_claim(cursor, p, value, ownership, *, now_provider, submission_claim):
     from dataclasses import asdict, replace
     from kiwoom_monitor.application.panic_mock_execution import (
@@ -1100,7 +1805,7 @@ def _require_panic_execution_claim(cursor, p, value, ownership, *, now_provider,
         raise RuntimeError('PANIC_EXECUTION_REQUIRES_NATIVE_PLAN')
     account = value['account_ref']
     spec, package, proof, event = _minute_native_documents(cursor, p, account, ownership['active_spec_id'],
-                                                         value['plan']['plan_id'], kind='PANIC')
+        value['plan']['plan_id'], kind='PANIC', selected_management=ownership.get('_native_selected_management_context'))
     now = kst_now() if now_provider is None else now_provider()
     if value['side'] == 'BUY':
         if _require_panic_trigger_checkpoint(cursor, p, account, spec, value['run_id'], event, checkpoint_key=ownership.get('_native_checkpoint_key', 'current')) is not None:
@@ -1108,6 +1813,7 @@ def _require_panic_execution_claim(cursor, p, value, ownership, *, now_provider,
         settings = _plan_document(cursor, p, 'server_operational_settings', 'global', 'current')
         if not minute_current_shadow_matches(spec, event, settings):
             raise RuntimeError('PANIC_CURRENT_SHADOW_CHANGED')
+        _require_panic_current_minute_revisions(cursor, p, event, now)
         expected, decision, plan = build_panic_entry_evidence(spec, run_id=value['run_id'],
             parameters=package.candidate_spec['parameters'], event=event, quote=proof['snapshot']['quote'],
             decided_at=datetime.fromisoformat(value['created_at']), now=now)
@@ -1155,14 +1861,12 @@ def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider
     from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
     from kiwoom_monitor.domain.execution_activation import mock_automation_spec_from_dict
     from kiwoom_monitor.application.breakout_strategy import StrategyState
-    lock = ' FOR UPDATE' if p == '%s' else ''
+    management = ownership.get('_native_selected_management_context')
     def document(collection, owner, key):
-        cursor.execute(f'SELECT document_json FROM central_documents WHERE collection={p} AND owner={p} AND document_key={p}'+lock,
-            (collection, owner, key))
-        row = cursor.fetchone()
-        if not row:
+        row = _plan_document(cursor, p, collection, owner, key, selected_management=management)
+        if row is None:
             raise RuntimeError('LEADER_EXECUTION_EVIDENCE_MISSING')
-        return _json_document(row[0])
+        return row
     account = value['account_ref']
     spec = mock_automation_spec_from_dict(document('execution_mock_automation_specs', account, ownership['active_spec_id']))
     package = candidate_package_from_dict(document('execution_mock_automation_candidate_packages', spec.strategy_ref, spec.candidate_package_hash))
@@ -1244,20 +1948,172 @@ def _require_leader_execution_claim(cursor, ownership, value, p, *, now_provider
         if now >= datetime.fromisoformat(raw['valid_until']):
             raise RuntimeError('LEADER_ENTRY_SIGNAL_EXPIRED')
         settings = document('server_operational_settings', 'global', 'current')
-        live = LeaderBreakoutPolicy.from_dict(settings['shadow_candidate_config'])
+        from kiwoom_monitor.domain.strategy_contract import shadow_candidate_config_for_spec
+        selected = shadow_candidate_config_for_spec(settings, spec.spec_id)
+        if selected is None:
+            raise RuntimeError('LEADER_CURRENT_ENTRY_CONTEXT_CHANGED')
+        live = LeaderBreakoutPolicy.from_dict(selected)
         if (LeaderBreakoutConfig.from_dict(live.to_dict()).rules_hash != config.rules_hash
                 or context not in live.contexts or now >= datetime.fromisoformat(context.valid_until)):
             raise RuntimeError('LEADER_CURRENT_ENTRY_CONTEXT_CHANGED')
         if hasattr(config.execution_contract, 'position_steps') and settings.get('shadow_candidate_enabled') is not True:
             raise RuntimeError('LEADER_CURRENT_ENTRY_DISABLED')
     if raw.get('position_step') is not None:
-        _require_leader_position_action(cursor, p, value, spec, configured, proof, raw, state, now)
+        _require_leader_position_action(cursor, p, value, spec, configured, proof, raw, state, now,
+            member_evidence=ownership.get('_native_member_evidence') is True, selected_management=management)
+    elif expected.decision.final_action == 'ENTER':
+        from kiwoom_monitor.application.leader_breakout import leader_reentry_enabled
+        if leader_reentry_enabled(config):
+            _require_leader_reentry_claim(cursor, p, value, ownership, spec, context, state, now)
 
 
-def _require_leader_position_action(cursor, p, value, spec, config, pin, raw, state, now):
+def _require_leader_reentry_claim(cursor, p, value, ownership, spec, context, state, now):
+    """One native setup claim and the latest own completed plan, never all history."""
+    from kiwoom_monitor.application.leader_breakout import leader_setup_key, _time, _id
+    from kiwoom_monitor.application.mock_automation_execution import _content_id
+    from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
+    from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
+    from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, execution_broker_legs, project_execution_record
+    account, run_id = value['account_ref'], value['run_id']
+    risk_doc = _plan_document(cursor, p, 'execution_mock_automation_current_risk', account, account)
+    risk = mock_automation_risk_snapshot_from_dict(risk_doc) if risk_doc else None
+    selection = ownership.get('_native_account_selection')
+    group = selection is not None
+    try:
+        owned = (risk.owned_for_member(spec.spec_id) if group else risk.owned_position_quantities) if risk else None
+        pending = (risk.pending_sells_for_member(spec.spec_id) if group else risk.pending_sell_quantities) if risk else None
+    except ValueError as error:
+        raise RuntimeError('LEADER_REENTRY_RISK_UNCONFIRMED') from error
+    if (risk is None or not risk.reconciliation_complete or owned or pending
+            or risk.submission_unknown_count or risk.balance_mismatch_count
+            or state.status != 'flat' or state.position_quantity not in (None, 0)):
+        raise RuntimeError('LEADER_REENTRY_REQUIRES_CONFIRMED_OWN_FLAT')
+    others = set((ownership.get('_native_account_selection') or {}).get('member_spec_ids', ())) - {spec.spec_id}
+    rows = _account_active_execution_rows(cursor, 'mock', account, 401, p)
+    if len(rows) > 400:
+        raise RuntimeError('LEADER_REENTRY_ACTIVE_ORDER_COVERAGE_UNCONFIRMED')
+    active = tuple(_json_document(row[0]) for row in rows)
+    selected, projection = (_retained_execution_member_projection(cursor, p, account, _selection=selection,
+        intent_ids=tuple(row['intent_id'] for row in active)) if group else (None, {}))
+    for row in active:
+        record = project_execution_record(_record_from_document(row), projection)
+        if record.intent.intent_id == value['intent_id'] or record.intent.run_id != run_id:
+            continue
+        if not group or getattr(record, 'member_spec_id', None) not in others:
+            raise RuntimeError('LEADER_REENTRY_OWN_ORDER_UNCONFIRMED')
+    # Follow accepted-sequence keyset pages only until the newest own FILL.
+    # A verified retained peer may have no raw member field. Never skip an
+    # unassigned/manual row merely because its account/run matches a peer.
+    event_type = "e.document_json->>'event_type'" if p == '%s' else "json_extract(e.document_json,'$.event_type')"
+    member = "i.document_json->>'mock_account_member_spec_id'" if p == '%s' else "json_extract(i.document_json,'$.mock_account_member_spec_id')"
+    predicate, params = '', ['mock', account, run_id, 'FILL']
+    if group and others:
+        predicate = f' AND ({member} IS NULL OR {member} NOT IN (' + ','.join(p for _ in others) + '))'
+        params.extend(sorted(others))
+    page_size = (400 if selected is not None and any(ref.original_selection_id is None
+                 for ref in selected.retained_admission_refs) else 1)
+    latest, before = None, None
+    while True:
+        boundary = f' AND e.accepted_sequence<{p}' if before is not None else ''
+        cursor.execute('SELECT i.document_json,e.accepted_sequence,e.document_json '
+            'FROM central_execution_events e JOIN central_execution_intents i ON i.intent_id=e.intent_id '
+            f'WHERE i.environment={p} AND i.account_ref={p} AND i.run_id={p} AND {event_type}={p}'
+            + predicate + boundary + f' ORDER BY e.accepted_sequence DESC LIMIT {page_size}',
+            tuple(params) + ((before,) if before is not None else ()))
+        page = cursor.fetchall()
+        documents = tuple(_json_document(row[0]) for row in page)
+        _, projection = (_retained_execution_member_projection(cursor, p, account, _selection=selection,
+            intent_ids=tuple(row['intent_id'] for row in documents)) if group else (None, {}))
+        for row, document in zip(page, documents, strict=True):
+            previous = project_execution_record(_record_from_document(document), projection)
+            if group and getattr(previous, 'member_spec_id', None) in others:
+                continue
+            latest = row, previous
+            break
+        if latest is not None or len(page) < page_size:
+            break
+        before = int(page[-1][1])
+    predecessor_id, sequence = '', 0
+    if latest is not None:
+        latest_row, previous = latest
+        event, sequence = _json_document(latest_row[2]), int(latest_row[1])
+        plan = getattr(previous.intent, 'plan', None)
+        if (previous.intent.side.value != 'SELL' or plan is None
+                or group and getattr(previous, 'member_spec_id', None) != spec.spec_id
+                or sequence > risk.execution_event_high_watermark):
+            raise RuntimeError('LEADER_REENTRY_PREVIOUS_FILL_UNCONFIRMED')
+        predecessor_id = plan.plan_id
+        head = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, predecessor_id) or {}
+        if selected is not None:
+            head = _retained_plan_position_view(cursor, p, selected, head)
+        if ((head.get('run_id'), head.get('symbol'), head.get('policy_ref'), head.get('quantity'),
+                head.get('unreconciled_sell_quantity', 0), head.get('fill_cursor'))
+                != (run_id, value['symbol'], plan.policy_ref, 0, 0, sequence)
+                or group and head.get('spec_id') != spec.spec_id):
+            raise RuntimeError('LEADER_REENTRY_PREVIOUS_PLAN_NOT_FLAT')
+        orders, pages = _leader_plan_ledger(cursor, p, account, run_id, predecessor_id)
+        projection = {}
+        if group:
+            identities = tuple(orders)
+            for offset in range(0, len(identities), 400):
+                _, original_members = _retained_execution_member_projection(cursor, p, account,
+                    _selection=selection, intent_ids=identities[offset:offset+400])
+                projection.update(original_members)
+        bought = sold = 0
+        required_keys = set()
+        for identity, document in orders.items():
+            order = project_execution_record(_record_from_document(document), projection)
+            if (order.state not in TERMINAL_ORDER_STATES
+                    or order.filled_quantity != order.detailed_filled_quantity
+                    or order.filled_quantity != order.broker_reported_filled_quantity
+                    or group and getattr(order, 'member_spec_id', None) != spec.spec_id
+                    or any(leg.state not in TERMINAL_ORDER_STATES
+                           or leg.detailed_filled_quantity != leg.broker_reported_filled_quantity
+                           for leg in execution_broker_legs(order))):
+                raise RuntimeError('LEADER_REENTRY_PREVIOUS_ORDER_UNCONFIRMED')
+            for _, item in pages[identity]:
+                if item['event_type'] == 'FILL':
+                    if order.intent.side.value == 'BUY': bought += item['quantity']
+                    else: sold += item['quantity']
+            if order.intent.policy_version == 'leader_execution_adapter/v1':
+                source = _plan_document(cursor, p, 'execution_leader_decisions', account,
+                    order.intent.intent_id if ownership.get('_native_member_evidence') is True
+                    else order.intent.decision_id) or {}
+                decision = dict(source.get('decision') or {})
+                identity = decision.pop('decision_id', None)
+                if identity != order.intent.decision_id or identity != _content_id('decision', decision):
+                    raise RuntimeError('LEADER_REENTRY_PREVIOUS_DECISION_CHANGED')
+                required_keys.update(decision['state_after']['emitted_candidate_keys'])
+        boundary = max(_time(event['occurred_at']), _time(event['received_at']))
+        if (not bought or bought != sold or not state.cooldown_until
+                or _time(state.cooldown_until) != boundary or _time(context.available_at) <= boundary
+                or not required_keys <= set(state.emitted_candidate_keys)):
+            raise RuntimeError('LEADER_REENTRY_NEW_SETUP_OR_HISTORY_UNCONFIRMED')
+    elif state.emitted_candidate_keys or state.cooldown_until:
+        raise RuntimeError('LEADER_REENTRY_PREVIOUS_FILL_UNCONFIRMED')
+    setup = leader_setup_key(context)
+    key = _id('leader-setup-claim/v1', [spec.spec_id, run_id, setup])
+    claim = dict(version='leader-setup-claim/v1', spec_id=spec.spec_id, run_id=run_id,
+        setup_key=setup, intent_id=value['intent_id'], predecessor_plan_id=predecessor_id,
+        predecessor_fill_sequence=sequence)
+    collection = 'execution_leader_setup_claims'
+    existing = _plan_document(cursor, p, collection, account, key)
+    if existing is not None and existing != claim:
+        raise RuntimeError('LEADER_REENTRY_SETUP_ALREADY_CLAIMED')
+    if existing is None:
+        cursor.execute(f'INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) '
+            f'VALUES({p},{p},{p},{p},{p}) ON CONFLICT(collection,owner,document_key) DO NOTHING',
+            (collection, account, key, now.timestamp(), _event_document(claim)))
+        if _plan_document(cursor, p, collection, account, key) != claim:
+            raise RuntimeError('LEADER_REENTRY_SETUP_ALREADY_CLAIMED')
+
+
+def _require_leader_position_action(cursor, p, value, spec, config, pin, raw, state, now, *, member_evidence=False,
+                                  selected_management=None):
     """Single-use staged action and cumulative entry budget, in the owning transaction."""
     from dataclasses import asdict
-    from kiwoom_monitor.application.leader_breakout import leader_position_action_ref, leader_next_position_step, _id
+    from kiwoom_monitor.application.leader_breakout import (
+        leader_position_action_ref, leader_next_position_step, leader_position_step_key, _id)
     from kiwoom_monitor.application.mock_automation_execution import MOCK_AUTOMATION_PLAN_ACTION_GATE_VERSION
     from kiwoom_monitor.domain.strategy_contract import LeaderBreakoutStagedExecutionContract
     from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
@@ -1283,9 +2139,9 @@ def _require_leader_position_action(cursor, p, value, spec, config, pin, raw, st
     prior_id = pin['entry_intent_id']
     if index:
         step = terms.position_steps[index-1]
-        key = _id('leader-position-step/v1', [terms.fingerprint, index-1, asdict(step)])
+        key = leader_position_step_key(config, index-1, step, context=pin['context'])
         prior = _plan_document(cursor, p, 'execution_leader_position_actions', account,
-            _id('leader-plan-step-claim/v1', [plan['plan_id'], key])) or {}
+            _id('leader-plan-step-claim/v1', [plan['plan_id'], key]), selected_management=selected_management) or {}
         if (prior.get('plan_id'), prior.get('policy_ref'), prior.get('step_key'), prior.get('index')) != (
                 plan['plan_id'], pin['proof_id'], key, index-1):
             raise RuntimeError('LEADER_PREVIOUS_POSITION_ACTION_MISSING')
@@ -1304,7 +2160,9 @@ def _require_leader_position_action(cursor, p, value, spec, config, pin, raw, st
                    for leg in execution_broker_legs(previous))):
         raise RuntimeError('LEADER_PREVIOUS_POSITION_ACTION_UNCONFIRMED')
     if index:
-        prior_source = _plan_document(cursor, p, 'execution_leader_decisions', account, previous.intent.intent_id if getattr(previous, 'member_spec_id', None) is not None else previous.intent.decision_id) or {}
+        prior_source = _plan_document(cursor, p, 'execution_leader_decisions', account,
+            previous.intent.intent_id if member_evidence else previous.intent.decision_id,
+            selected_management=selected_management) or {}
         prior_raw = (prior_source.get('snapshot') or {}).get('feature_values', [{}])[0].get('value', {})
         if ((prior_raw.get('position_step') or {}).get('step_key') != key
                 or prior.get('decision_id') != previous.intent.decision_id
@@ -1322,7 +2180,7 @@ def _require_leader_position_action(cursor, p, value, spec, config, pin, raw, st
         run_id=value['run_id'], spec_id=spec.spec_id, index=index, step_key=metadata['step_key'],
         intent_id=value['intent_id'], decision_id=value['decision_id'], position_action_ref=action_ref,
         action=selected[1].action, quantity=value['quantity'])
-    existing = _plan_document(cursor, p, collection, account, key)
+    existing = _plan_document(cursor, p, collection, account, key, selected_management=selected_management)
     if existing is not None and existing != claim:
         raise RuntimeError('LEADER_POSITION_ACTION_ALREADY_CLAIMED')
     if head.get('revision') != plan['expected_revision'] + (existing is not None):
@@ -1351,6 +2209,41 @@ def _leader_plan_ledger(cursor, p, account, run_id, plan_id):
         if event is not None:
             pages[identity].append((sequence, _json_document(event)))
     return orders, pages
+
+
+def _leader_native_risk_high_watermark(ownership, risk, events):
+    """Project an immutable source stop cut onto its exact installed native events."""
+    management = (ownership or {}).get('_native_selected_management_context')
+    if (management is None or risk.snapshot_id not in
+            _selected_management_close_terms(ownership)['source_risk_snapshot_ids']):
+        return risk.execution_event_high_watermark
+    view = management['_policy_view']
+    originals = {event['event_id']: event for event in view['source_events']}
+    coordinates = view['installation']['event_coordinates']
+    mapped = {item['event_id']: item for item in coordinates}
+    if (not originals or len(originals) != len(view['source_events'])
+            or len(mapped) != len(coordinates) or set(mapped) != set(originals)
+            or any(type(item.get(name)) is not int or item[name] <= 0
+                for item in coordinates for name in ('source_accepted_sequence', 'target_accepted_sequence'))
+            or any(item['source_accepted_sequence'] != originals[identity]['accepted_sequence']
+                for identity, item in mapped.items())):
+        raise RuntimeError('LEADER_SELECTED_SOURCE_EVENT_COORDINATES_CHANGED')
+    ordered = sorted(coordinates, key=lambda item: item['source_accepted_sequence'])
+    if (len({item['source_accepted_sequence'] for item in coordinates}) != len(coordinates)
+            or any(left['target_accepted_sequence'] >= right['target_accepted_sequence']
+                   for left, right in zip(ordered, ordered[1:]))):
+        raise RuntimeError('LEADER_SELECTED_SOURCE_EVENT_COORDINATES_CHANGED')
+    boundary = max((item['target_accepted_sequence'] for item in coordinates
+                    if item['source_accepted_sequence'] <= risk.execution_event_high_watermark), default=0)
+    for sequence, event in events:
+        original = originals.get(event['event_id'])
+        if original is not None:
+            source_event = {key: value for key, value in original.items() if key != 'accepted_sequence'}
+            if mapped[event['event_id']]['target_accepted_sequence'] != sequence or event != source_event:
+                raise RuntimeError('LEADER_SELECTED_SOURCE_NATIVE_EVENT_CHANGED')
+        elif sequence <= boundary:
+            raise RuntimeError('LEADER_SELECTED_SOURCE_NATIVE_EVENT_CHANGED')
+    return boundary
 
 
 def _require_mock_replacement_claim(cursor, ownership, value, p, *, new_intent_claim, now_provider=None):
@@ -1437,13 +2330,15 @@ def _require_mock_replacement_claim(cursor, ownership, value, p, *, new_intent_c
             raise RuntimeError('MOCK_REPLACEMENT_ALREADY_CLAIMED')
 
 
-def _require_staged_leader_protection_facts(cursor, p, value, pin, trigger, original_risk, risk, workflow):
+def _require_staged_leader_protection_facts(cursor, p, value, pin, trigger, original_risk, risk, workflow, *, ownership=None):
     """Actual fills from every accepted lot/reduction, with the original stop cut."""
     from kiwoom_monitor.application.leader_order_management import leader_position_order_confirmation_time
     from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, execution_broker_legs
     from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES
     plan, account = value['plan'], value['account_ref']
     orders, pages = _leader_plan_ledger(cursor, p, account, value['run_id'], plan['plan_id'])
+    original_cursor = _leader_native_risk_high_watermark(ownership, original_risk,
+        [row for events in pages.values() for row in events])
     root = orders.get(pin['entry_intent_id']) or {}
     if (root.get('side') != 'BUY' or root.get('state') not in {'FILLED', 'CANCELLED'}
             or not root.get('detailed_filled_quantity') or not root.get('mock_plan_approval')):
@@ -1478,7 +2373,7 @@ def _require_staged_leader_protection_facts(cursor, p, value, pin, trigger, orig
         quantity += sign * event['quantity']
         if quantity < 0:
             raise RuntimeError('STAGED_LEADER_PROTECTION_NEGATIVE_POSITION')
-        if sequence <= original_risk.execution_event_high_watermark:
+        if sequence <= original_cursor:
             original_quantity = quantity
         last_fill = sequence
     head = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, plan['plan_id']) or {}
@@ -1515,9 +2410,11 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
         raise RuntimeError('PLANNED_LEADER_PROTECTION_CLAIM_INVALID')
     account, run_id = value['account_ref'], value['run_id']
     plan = OrderPlanRef(**value['plan'])
+    management = ownership.get('_native_selected_management_context')
+    selected_terms = _selected_management_close_terms(ownership)
 
     def document(collection, key, owner=account):
-        result = _plan_document(cursor, p, collection, owner, key)
+        result = _plan_document(cursor, p, collection, owner, key, selected_management=management)
         if result is None:
             raise RuntimeError('PLANNED_LEADER_PROTECTION_PROOF_MISSING')
         return result
@@ -1552,12 +2449,13 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
     lock = ' FOR UPDATE' if p == '%s' else ''
     if isinstance(config.execution_contract, LeaderBreakoutStagedExecutionContract):
         root_state, confirmed_at, head, original_quantity = _require_staged_leader_protection_facts(
-            cursor, p, value, pin, trigger, original_risk, risk, workflow)
+            cursor, p, value, pin, trigger, original_risk, risk, workflow, ownership=ownership)
     else:
         lock = ' FOR UPDATE' if p == '%s' else ''
         cursor.execute(f'SELECT document_json FROM central_execution_intents WHERE intent_id={p}' + lock, (plan.plan_id,))
         row = cursor.fetchone()
         root = _json_document(row[0]) if row else {}
+        root = _selected_management_original_claim_view(cursor, p, root, ownership)
         root_plan = root.get('plan') or {}
         root_state = root.get('state')
         if ((root.get('environment'), root.get('account_ref'), root.get('run_id'), root.get('symbol'), root.get('side'),
@@ -1573,6 +2471,7 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
         cursor.execute(f'SELECT accepted_sequence,document_json FROM central_execution_events WHERE intent_id={p} '
                        'ORDER BY accepted_sequence', (plan.plan_id,))
         root_events = [(sequence, _json_document(raw)) for sequence, raw in cursor.fetchall()]
+        original_cursor = _leader_native_risk_high_watermark(ownership, original_risk, root_events)
         current_management = spec.unfilled_execution_policy.accepted_order_management is not None
         if current_management:
             root_record = _record_from_document(root)
@@ -1636,10 +2535,9 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
                 current_quantity += event['quantity']
                 fill_ids.append(event['broker_execution_id'])
                 fill_cursor = sequence
-                if sequence <= original_risk.execution_event_high_watermark:
+                if sequence <= original_cursor:
                     original_quantity += event['quantity']
         head = document(PLAN_POSITION_COLLECTION, plan.plan_id)
-        original_cursor = original_risk.execution_event_high_watermark
         if current_management:
             terminal_confirmed = (0 < fill_cursor < terminal_sequence <= risk.execution_event_high_watermark
                                   and event.get('state') == root_state and event.get('event_type') == 'BROKER_RECONCILED')
@@ -1670,9 +2568,12 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
                 or head['quantity'] != current_quantity):
             raise RuntimeError('PLANNED_LEADER_PROTECTION_DETAILED_FILLS_UNCONFIRMED')
     validate_planned_leader_stop(trigger, spec=spec, leader_config=config, position_proof=pin,
-                                original_risk=original_risk, original_fill_quantity=original_quantity)
+        original_risk=original_risk, original_fill_quantity=original_quantity,
+        selected_management_context=(None if original_risk.snapshot_id in selected_terms.get('source_risk_snapshot_ids', ())
+                                     else selected_terms.get('selected_management_context')))
     now = kst_now() if now_provider is None else now_provider()
-    active_trigger = mock_automation_protection_trigger(spec, risk, execution_run_id=run_id, now=now)
+    active_trigger = mock_automation_protection_trigger(spec, risk, execution_run_id=run_id, now=now,
+        selected_management_context=selected_terms.get('selected_management_context'))
     if active_trigger is not None and active_trigger['disposition'] != 'EXIT_REQUIRED':
         raise RuntimeError('PLANNED_LEADER_PROTECTION_RISK_CHANGED')
     fixed = prepare_planned_leader_protection_exit(
@@ -1680,6 +2581,7 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
         observation=workflow['snapshot']['observation'], risk=risk, plan_position=head, leader_config=config,
         position_proof=pin, confirmed_root_state=root_state, confirmed_root_at=confirmed_at, now=now,
         reservation_claimed=submission_claim,
+        selected_management_context=selected_terms.get('selected_management_context'),
     )
     decision = fixed['decision']
     if (fixed != workflow or (value['decision_id'], value['symbol'], value['quantity'], value['limit_price'])
@@ -1687,10 +2589,21 @@ def _require_planned_leader_protection_claim(cursor, p, value, ownership, *, sto
         raise RuntimeError('PLANNED_LEADER_PROTECTION_FIXED_CUT_CHANGED')
     plan_key = "document_json->'plan'->>'plan_id'" if p == '%s' else "json_extract(document_json,'$.plan.plan_id')"
     policy = "document_json->>'policy_version'" if p == '%s' else "json_extract(document_json,'$.policy_version')"
+    active_scope = "state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED')"
+    active_params = ()
+    selection = ownership.get('_native_account_selection')
+    if selection is not None:
+        peers = tuple(member for member in selection['member_spec_ids'] if member != spec.spec_id)
+        if peers:
+            member_key = ("document_json->>'mock_account_member_spec_id'" if p == '%s'
+                          else "json_extract(document_json,'$.mock_account_member_spec_id')")
+            active_scope += (f" AND NOT (run_id={p} AND state IN ('ACCEPTED','PARTIALLY_FILLED') "
+                             f"AND COALESCE({member_key},'') IN ({','.join([p] * len(peers))}))")
+            active_params = (run_id, *peers)
     cursor.execute(f"SELECT 1 FROM central_execution_intents WHERE environment='mock' AND account_ref={p} "
-                   f"AND intent_id<>{p} AND (state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED') "
+                   f"AND intent_id<>{p} AND (({active_scope}) "
                    f"OR (run_id={p} AND {plan_key}={p} AND {policy}={p})) LIMIT 1" + lock,
-                   (account, value['intent_id'], run_id, plan.plan_id, PROTECTION_EXIT_VERSION))
+                   (account, value['intent_id'], *active_params, run_id, plan.plan_id, PROTECTION_EXIT_VERSION))
     if cursor.fetchone() is not None:
         raise RuntimeError('PLANNED_LEADER_PROTECTION_FIRST_EXIT_UNAVAILABLE')
 
@@ -1947,6 +2860,7 @@ def _require_mock_unfilled_management_origin(cursor, ownership, value, p, *, now
 
 def _require_planned_leader_cancel(cursor, ownership, value, event, p, *, stored, now_provider):
     """Borrow the existing cancel event transaction for one planned partial BUY."""
+    stored = _selected_management_original_claim_view(cursor, p, stored, ownership)
     from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
     from kiwoom_monitor.application.mock_automation_risk import (
         PlannedLeaderCancelClaim,
@@ -1970,9 +2884,11 @@ def _require_planned_leader_cancel(cursor, ownership, value, event, p, *, stored
             or (stored.get("plan") or {}).get("policy_ref") != claim.plan.policy_ref):
         raise RuntimeError("PLANNED_LEADER_CANCEL_ROOT_CHANGED")
     account = value["account_ref"]
+    management = ownership.get('_native_selected_management_context')
+    selected_terms = _selected_management_close_terms(ownership)
 
     def document(collection, key, owner=account):
-        row = _plan_document(cursor, p, collection, owner, key)
+        row = _plan_document(cursor, p, collection, owner, key, selected_management=management)
         if row is None:
             raise RuntimeError("PLANNED_LEADER_CANCEL_PROOF_MISSING")
         return row
@@ -2009,22 +2925,26 @@ def _require_planned_leader_cancel(cursor, ownership, value, event, p, *, stored
         "ORDER BY accepted_sequence",
         (stored["intent_id"],),
     )
+    events = [(sequence, _json_document(event_doc)) for sequence, event_doc in cursor.fetchall()]
+    original_cursor = _leader_native_risk_high_watermark(ownership, original_risk, events)
     original_quantity = 0
-    for sequence, event_doc in cursor.fetchall():
-        proof = _json_document(event_doc)
+    for sequence, proof in events:
         if proof["event_type"] == "CANCEL_STARTED":
             raise RuntimeError("PLANNED_LEADER_CANCEL_ALREADY_CLAIMED")
-        if (sequence <= original_risk.execution_event_high_watermark and proof["event_type"] == "FILL"
+        if (sequence <= original_cursor and proof["event_type"] == "FILL"
                 and proof["broker_execution_id"]):
             original_quantity += proof["quantity"]
     validate_planned_leader_stop(
         trigger, spec=spec, leader_config=config, position_proof=pin, original_risk=original_risk,
         original_fill_quantity=original_quantity,
+        selected_management_context=(None if original_risk.snapshot_id in selected_terms.get('source_risk_snapshot_ids', ())
+                                     else selected_terms.get('selected_management_context')),
     )
     quantity = validate_planned_leader_current_cut(
         claim.plan, spec=spec, run_id=value["run_id"], symbol=value["symbol"], risk=risk,
         plan_position=document(PLAN_POSITION_COLLECTION, claim.plan.plan_id),
         now=kst_now() if now_provider is None else now_provider(),
+        selected_management_context=selected_terms.get('selected_management_context'),
     )
     if quantity != stored["detailed_filled_quantity"]:
         raise RuntimeError("PLANNED_LEADER_CANCEL_QUANTITY_CHANGED")
@@ -2033,6 +2953,7 @@ def _require_planned_leader_cancel(cursor, ownership, value, event, p, *, stored
 
 def _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, *, stored, now_provider):
     """Cancel the verified remainder of the original BUY after its admitted wait expires."""
+    stored = _selected_management_original_claim_view(cursor, p, stored, ownership)
     from kiwoom_monitor.application.leader_breakout import _id
     from kiwoom_monitor.application.mock_automation_execution import (
         MockAutomationGateStatus, _validate_decision_identity, mock_automation_decision_gate_from_dict,
@@ -2060,9 +2981,11 @@ def _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, *,
             or (stored.get("plan") or {}).get("policy_ref") != claim.plan.policy_ref):
         raise RuntimeError("PLANNED_LEADER_EXPIRY_ROOT_CHANGED")
     account, run_id = value["account_ref"], value["run_id"]
+    management = ownership.get('_native_selected_management_context')
+    selected_context = management['context'] if management is not None else None
 
     def document(collection, key):
-        row = _plan_document(cursor, p, collection, account, key)
+        row = _plan_document(cursor, p, collection, account, key, selected_management=management)
         if row is None:
             raise RuntimeError("PLANNED_LEADER_EXPIRY_PROOF_MISSING")
         return row
@@ -2070,7 +2993,8 @@ def _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, *,
     spec = mock_automation_spec_from_dict(document("execution_mock_automation_specs", ownership["active_spec_id"]))
     gate = mock_automation_decision_gate_from_dict(document("execution_mock_automation_approved_gates", claim.plan.plan_id))
     root = _record_from_document(stored)
-    source = document("execution_leader_decisions", root.intent.intent_id if getattr(root, "member_spec_id", None) is not None else root.intent.decision_id)
+    source = document("execution_leader_decisions", root.intent.intent_id
+                      if ownership.get('_native_member_evidence') else root.intent.decision_id)
     pin = document("execution_leader_position_context", claim.plan.plan_id)
     decision = StrategyDecision(**source["decision"])
     _validate_decision_identity(decision)
@@ -2096,9 +3020,10 @@ def _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, *,
     orders = [order for order in claim.recovery.orders if order.state not in TERMINAL_ORDER_STATES]
     age = spec.unfilled_execution_policy.max_snapshot_age_seconds
     holdings = {value["symbol"]: quantity} if quantity else {}
+    from kiwoom_monitor.application.mock_automation_risk import mock_automation_expected_binding_revision
     if ((risk.snapshot_id, risk.reconciliation_revision) != (claim.risk_snapshot_id, claim.risk_reconciliation_revision)
             or (risk.account_ref, risk.execution_run_id, risk.binding_revision, risk.data_path)
-            != (account, run_id, spec.binding_revision, spec.data_path)
+            != (account, run_id, mock_automation_expected_binding_revision(spec, selected_context), spec.data_path)
             or risk.account_revision != mock_automation_risk_account_revision(claim.recovery)
             or (broker_account.account_ref, broker_account.as_of) != (account, risk.account_as_of)
             or {symbol: held for symbol, held in broker_account.positions.items() if held} != holdings
@@ -2113,6 +3038,7 @@ def _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, *,
     if quantity:
         validate_planned_leader_current_cut(
             claim.plan, spec=spec, run_id=run_id, symbol=value["symbol"], risk=risk, plan_position=head, now=now,
+            selected_management_context=selected_context,
         )
     # Risk may be incomplete for a flat first BUY with no fills. This exception
     # can cancel just this mapped order and cannot approve a new order.
@@ -2124,7 +3050,8 @@ def _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, *,
             or not 0 <= (now - order.as_of).total_seconds() <= age):
         raise RuntimeError("PLANNED_LEADER_EXPIRY_BROKER_ORDER_CHANGED")
     active = _account_active_execution_rows(cursor, "mock", account, 2, p)
-    if len(active) != 1 or _json_document(active[0][0]) != stored:
+    if len(active) != 1 or _selected_management_original_claim_view(cursor, p,
+            _json_document(active[0][0]), ownership) != stored:
         raise RuntimeError("PLANNED_LEADER_EXPIRY_ACCOUNT_ORDER_CHANGED")
     event_type = "document_json->>'event_type'" if p == "%s" else "json_extract(document_json,'$.event_type')"
     cursor.execute(f"SELECT accepted_sequence,document_json FROM central_execution_events WHERE intent_id={p} "
@@ -2145,6 +3072,7 @@ def _require_planned_leader_expiry_cancel(cursor, ownership, value, event, p, *,
 
 
 def _require_close_deadline_cancel(cursor, ownership, value, event, p, *, stored, now_provider):
+    stored = _selected_management_original_claim_view(cursor, p, stored, ownership)
     from kiwoom_monitor.application.close_mock_execution import CloseEntryDeadlineCancelClaim, validate_close_entry_deadline
     from kiwoom_monitor.application.mock_automation_risk import mock_automation_risk_snapshot_from_dict
     from kiwoom_monitor.infrastructure.persistence.execution_repository import _record_from_document, plan_position_from_document
@@ -2156,7 +3084,7 @@ def _require_close_deadline_cancel(cursor, ownership, value, event, p, *, stored
         raise RuntimeError("CLOSE_DEADLINE_CANCEL_ROOT_CHANGED")
     account = value["account_ref"]
     spec, package, proof, candidate = _minute_native_documents(cursor, p, account, ownership["active_spec_id"],
-                                                             claim.plan.plan_id)
+        claim.plan.plan_id, selected_management=ownership.get('_native_selected_management_context'))
     risk_doc = _plan_document(cursor, p, "execution_mock_automation_current_risk", account, account)
     head_doc = _plan_document(cursor, p, PLAN_POSITION_COLLECTION, account, claim.plan.plan_id)
     if risk_doc is None or head_doc is None:
@@ -2171,7 +3099,10 @@ def _require_close_deadline_cancel(cursor, ownership, value, event, p, *, stored
         fill_events=[_json_document(row[0]) for row in _execution_event_rows(cursor, stored["intent_id"], p)],
         recovery=claim.recovery, risk=risk, now=kst_now() if now_provider is None else now_provider(),
         protection_notice=claim.protection_notice,
-        stop_risk=_close_native_stop_risk(cursor, p, account, spec, claim.protection_notice, stored['intent_id'], checkpoint_key=ownership.get('_native_checkpoint_key', 'current')))
+        stop_risk=_close_native_stop_risk(cursor, p, account, spec, claim.protection_notice, stored['intent_id'],
+            checkpoint_key=ownership.get('_native_checkpoint_key', 'current'),
+            selected_management=ownership.get('_native_selected_management_context')),
+        **_selected_management_close_terms(ownership))
     return {**event, "close_entry_cancel_claim": claim.to_dict()}
 
 
@@ -2321,6 +3252,155 @@ def _mock_automation_lineage_query(
     return " UNION ALL ".join(statements), tuple(parameters)
 
 
+def _retained_projection_document(cursor, p, collection, account, key, cache):
+    identity = (collection, key)
+    if identity not in cache:
+        cursor.execute(f'SELECT document_json FROM central_documents WHERE collection={p} AND owner={p} AND document_key={p}',
+                       (collection, account, key))
+        rows = cursor.fetchall()
+        cache[identity] = _json_document(rows[0][0]) if rows else None
+    return cache[identity]
+
+
+def _retained_projection_admission(cursor, p, account, reference, documents):
+    from kiwoom_monitor.application.mock_automation_admission import (
+        MOCK_AUTOMATION_ADMISSION_VERSION, mock_automation_admission_from_dict, execution_run_id_for_spec,
+    )
+    key = ('validated_retained_admission', reference.admission_id)
+    if key not in documents:
+        original = _retained_projection_document(cursor, p, 'execution_mock_automation_admissions', account,
+                                                 reference.admission_id, documents)
+        by_spec = _retained_projection_document(cursor, p, 'execution_mock_automation_admission_by_spec', account,
+                                                reference.spec_id, documents)
+        if original is None or by_spec != original:
+            raise RuntimeError('MOCK_RETAINED_ORIGINAL_ADMISSION_MISSING')
+        admission = mock_automation_admission_from_dict(original)
+        if ((admission.version, admission.account_selection_id) != (MOCK_AUTOMATION_ADMISSION_VERSION, None)
+                or (admission.admission_id, admission.spec_id, admission.account_ref, admission.execution_run_id)
+                != (reference.admission_id, reference.spec_id, account, reference.execution_run_id)
+                or admission.execution_run_id != execution_run_id_for_spec(admission.spec_id)):
+            raise RuntimeError('MOCK_RETAINED_ORIGINAL_ADMISSION_CHANGED')
+        documents[key] = admission
+    return documents[key]
+
+
+def _retained_member_for_document(cursor, p, value, selection, *, _documents=None, _gate=None,
+                                  include_native_member=False):
+    """Prove a legacy planned row's original admission, never infer from its run."""
+    from dataclasses import asdict
+    from kiwoom_monitor.domain.execution_activation import MockAutomationAccountSelectionV2
+    from kiwoom_monitor.application.mock_automation_execution import (
+        mock_automation_decision_gate_from_dict, mock_automation_intent_id, MockAutomationGateStatus,
+    )
+    if (not isinstance(selection, MockAutomationAccountSelectionV2)
+            or value.get('mock_account_member_spec_id') is not None and not include_native_member
+            or not value.get('plan') or not value.get('mock_plan_approval')):
+        return None
+    cache = {} if _documents is None else _documents
+    account = selection.account_scope.account_ref
+    gate_doc = (_gate if _gate is not None else _retained_projection_document(cursor, p,
+        'execution_mock_automation_approved_gates', account, value['intent_id'], cache))
+    if gate_doc is None:
+        return None
+    gate = mock_automation_decision_gate_from_dict(gate_doc)
+    reference = selection.retained_admission_ref(gate.spec_id)
+    if reference is None or reference.original_selection_id is not None:
+        return None
+    admission = _retained_projection_admission(cursor, p, account, reference, cache)
+    if (gate.admission_id != admission.admission_id or gate.strategy_ref != admission.strategy_ref
+            or value.get('mock_account_member_spec_id') not in (None, reference.spec_id)
+            or gate.status is not MockAutomationGateStatus.APPROVED_FOR_SINGLE_SUBMISSION
+            or gate.plan is None or asdict(gate.plan) != value['plan']
+            or gate.gate_id != value['mock_plan_approval']
+            or (gate.account_ref, gate.execution_run_id, gate.intent_id, gate.strategy_decision_id,
+                gate.symbol, gate.quantity, gate.limit_price, gate.decided_at) !=
+               (value['account_ref'], value['run_id'], value['intent_id'], value['decision_id'],
+                value['symbol'], value['quantity'], value['limit_price'], datetime.fromisoformat(value['created_at']))
+            or value['environment'] != 'mock' or value['account_ref'] != account
+            or value['run_id'] != reference.execution_run_id
+            or value['intent_id'] != mock_automation_intent_id(reference.spec_id, value['decision_id'])
+            or value['side'] != {'ENTER': 'BUY', 'ADD': 'BUY', 'REDUCE': 'SELL', 'EXIT': 'SELL'}.get(gate.action)):
+        raise RuntimeError('MOCK_RETAINED_ORIGINAL_APPROVAL_CHANGED')
+    return reference.spec_id
+
+
+def _retained_execution_member_projection(cursor, p, account_ref, *, selection_id=None,
+                                           expected_control_revision=None, intent_ids=None, _selection=None):
+    from kiwoom_monitor.application.mock_automation_admission import mock_automation_control_from_dict
+    from kiwoom_monitor.domain.execution_activation import (
+        MockAutomationAccountSelectionV2, mock_automation_account_selection_from_dict,
+    )
+    if _selection is not None:
+        # Only native callers supply membership already read/verified in this transaction.
+        selected = mock_automation_account_selection_from_dict(_selection)
+        if not isinstance(selected, MockAutomationAccountSelectionV2):
+            return None, {}
+        return selected, _retained_projection_rows(cursor, p, account_ref, selected,
+            selected.retained_admission_refs[0].execution_run_id, intent_ids, {})
+    control_doc = _scoped_mock_automation_control(cursor, account_ref, p)
+    if control_doc is None:
+        if selection_id is not None:
+            raise RuntimeError('MOCK_RETAINED_CONTROL_MISSING')
+        return None, {}
+    control = mock_automation_control_from_dict(control_doc)
+    if expected_control_revision is not None and control.control_revision != expected_control_revision:
+        raise RuntimeError('MOCK_RETAINED_CONTROL_CHANGED')
+    documents = {}
+    if selection_id is not None:
+        if expected_control_revision is None:
+            raise ValueError('prospective member projection requires the original control revision')
+        raw = _retained_projection_document(cursor, p, 'execution_mock_automation_account_selections',
+                                             account_ref, selection_id, documents)
+        if raw is None:
+            raise RuntimeError('MOCK_RETAINED_SELECTION_MISSING')
+        selected = mock_automation_account_selection_from_dict(raw)
+    else:
+        selected = control.account_selection
+    if not isinstance(selected, MockAutomationAccountSelectionV2):
+        if selection_id is not None:
+            raise ValueError('prospective member projection requires an explicit v2 selection')
+        return None, {}
+    if (selected.account_scope.account_ref != account_ref or selected.primary_spec_id != control.active_spec_id
+            or any(ref.execution_run_id != control.execution_run_id for ref in selected.retained_admission_refs)
+            or _retained_projection_document(cursor, p, 'execution_mock_automation_account_selections', account_ref,
+                                               selected.selection_id, documents) != selected.to_dict()):
+        raise RuntimeError('MOCK_RETAINED_SELECTION_CHANGED')
+    return selected, _retained_projection_rows(cursor, p, account_ref, selected,
+        control.execution_run_id, intent_ids, documents)
+
+
+def _retained_projection_rows(cursor, p, account_ref, selected, run_id, intent_ids, documents):
+    references = tuple(ref for ref in selected.retained_admission_refs if ref.original_selection_id is None)
+    for reference in references:
+        _retained_projection_admission(cursor, p, account_ref, reference, documents)
+    if not references or intent_ids == ():
+        return {}
+    # One joined read covers all requested immutable original approvals, including terminal FILL roots.
+    ids = tuple(dict.fromkeys(intent_ids)) if intent_ids is not None else None
+    if ids is not None and len(ids) > 400:
+        raise ValueError('retained projection intent page exceeds its existing account budget')
+    admission_key = "g.document_json->>'admission_id'" if p == '%s' else "json_extract(g.document_json,'$.admission_id')"
+    sql = ('SELECT i.document_json,g.document_json FROM central_execution_intents i JOIN central_documents g '
+           f'ON g.collection={p} AND g.owner=i.account_ref AND g.document_key=i.intent_id '
+           f'WHERE i.environment={p} AND i.account_ref={p} AND i.run_id={p} AND {admission_key} IN ('
+           + ','.join(p for _ in references) + ')')
+    args = ('execution_mock_automation_approved_gates', 'mock', account_ref, run_id,
+            *(ref.admission_id for ref in references))
+    if ids is not None:
+        sql += ' AND i.intent_id IN (' + ','.join(p for _ in ids) + ')'
+        args += ids
+    cursor.execute(sql, args)
+    rows = cursor.fetchall()
+    mapping = {}
+    for raw_intent, raw_gate in rows:
+        value = _json_document(raw_intent)
+        member = _retained_member_for_document(cursor, p, value, selected, _documents=documents,
+                                               _gate=_json_document(raw_gate), include_native_member=True)
+        if member is not None:
+            mapping[value['intent_id']] = member
+    return mapping
+
+
 def _scoped_mock_automation_control(cursor, account_ref, placeholder):
     cursor.execute(
         "SELECT document_json FROM central_documents WHERE collection=" + placeholder
@@ -2380,6 +3460,15 @@ def _account_execution_event_rows(cursor, environment, account_ref, after_sequen
 class SQLiteExecutionStoreMixin:
     _supports_scoped_active_intents = True
 
+    def load_retained_execution_member_projection(self, account_ref, *, selection_id=None,
+            expected_control_revision=None, intent_ids=None, _reader=None):
+        kwargs = dict(selection_id=selection_id, expected_control_revision=expected_control_revision, intent_ids=intent_ids)
+        with self._lock:
+            if _reader is not None:
+                return _retained_execution_member_projection(_reader, '?', account_ref, **kwargs)
+            with self._connection() as connection:
+                return _retained_execution_member_projection(connection.cursor(), '?', account_ref, **kwargs)
+
     def load_account_active_execution_intents(
         self, environment: str, account_ref: str, limit: int, *, _reader: Any = None,
     ) -> list[dict[str, Any]]:
@@ -2408,9 +3497,14 @@ class SQLiteExecutionStoreMixin:
                     rows = connection.execute(sql, parameters).fetchall()
         return {str(role): _json_document(document) for role, document in rows}
 
-    def release_execution_runtime(self, owner_key: str, owner_token: str) -> bool:
+    def release_execution_runtime(self, owner_key: str, owner_token: str, *,
+            selected_management_context=None, selected_management_owner=None) -> bool:
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if selected_management_context is not None:
+                from .selected_order_bootstrap import selected_management_release_owner_key
+                owner_key = selected_management_release_owner_key(connection.cursor(), '?',
+                    selected_management_context, owner_token)
             cursor = connection.execute(
                 "DELETE FROM central_execution_runtime_leases WHERE owner_key=? AND owner_token=?",
                 (owner_key, owner_token),
@@ -2453,7 +3547,8 @@ class SQLiteExecutionStoreMixin:
             stored = _require_execution_ownership(connection.cursor(), ownership, intent, "?",
                                          now_provider=getattr(self, '_execution_wall_now', None),
                                          submission_claim=event.get("event_type") == "SUBMISSION_STARTED",
-                                         amendment_claim=event.get('event_type') == 'AMENDMENT_STARTED', control_facts=control_facts)
+                                         amendment_claim=event.get('event_type') == 'AMENDMENT_STARTED', control_facts=control_facts,
+                                         event_kind=event.get('event_type'))
             if stored is not None and 'plan' in intent:
                 from kiwoom_monitor.infrastructure.persistence.execution_repository import retain_native_plan_claim
                 intent = retain_native_plan_claim(stored,intent)
@@ -2462,7 +3557,7 @@ class SQLiteExecutionStoreMixin:
             if "plan" in intent and not _validate_plan_event(stored, intent, event):
                 return False
             if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":
-                approval, _, _ = _require_plan_approval(connection.cursor(), "?", intent, ownership,
+                approval, _, _, _, _ = _require_plan_approval(connection.cursor(), "?", intent, _native_execution_scope(ownership, control_facts),
                     getattr(self, "_execution_wall_now", None), account_limits=_account_control_limits(control_facts))
                 if stored is None or stored.get("mock_plan_approval") != approval:
                     raise RuntimeError("PLANNED_EXECUTION_APPROVAL_CHANGED")
@@ -2614,7 +3709,9 @@ class SQLiteExecutionStoreMixin:
             if int(current.get("control_revision", 0)) != expected_revision:
                 return False
             _require_account_control_change(connection.cursor(), "?", value, current, account_ref)
-            _require_planned_resume_control(connection.cursor(), "?", value, current, resume_owner_token, now_provider)
+            _require_account_resume_control(connection.cursor(), "?", value, current, resume_owner_token, now_provider)
+            if value.get('account_selection') is None:
+                _require_planned_resume_control(connection.cursor(), "?", value, current, resume_owner_token, now_provider)
             connection.execute(
                 "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
                 "VALUES(?,?,?,?,?) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "
@@ -2623,11 +3720,44 @@ class SQLiteExecutionStoreMixin:
             )
         return True
 
+    def replace_mock_automation_control(self, value: dict[str, Any], *, expected_revision: int,
+            expected_selection_id: str, owner_token: str) -> bool:
+        account = str(value.get('account_ref') or '')
+        if not account or value.get('control_revision') != expected_revision + 1 or not owner_token:
+            raise ValueError('invalid mock account replacement revision or owner')
+        with self._lock, self._connection() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            cursor = connection.cursor()
+            now_provider = getattr(self, '_execution_wall_now', None) or kst_now
+            run_id = value['execution_run_id']
+            _require_execution_ownership(cursor, {'owner_key': f'mock:{account}',
+                'owner_token': f'{run_id}:{owner_token}', 'run_id': run_id},
+                {'environment': 'mock', 'account_ref': account}, '?', now_provider=now_provider)
+            current = _plan_document(cursor, '?', 'execution_mock_automation_control', account, account) or {}
+            if (current.get('control_revision') != expected_revision
+                    or (current.get('account_selection') or {}).get('selection_id') != expected_selection_id):
+                return False
+            _require_account_replacement_control(cursor, '?', value, current, owner_token, now_provider)
+            cursor.execute('UPDATE central_documents SET updated_at=?,document_json=? '
+                'WHERE collection=? AND owner=? AND document_key=?',
+                (datetime.fromisoformat(value['changed_at']).timestamp(), _event_document(value),
+                 'execution_mock_automation_control', account, account))
+        return True
+
     def acquire_execution_runtime(
-        self, owner_key: str, owner_token: str, now: str, lease_expires_at: str,
+        self, owner_key: str, owner_token: str, now: str, lease_expires_at: str, *,
+        selected_management_context=None, selected_management_owner=None,
     ) -> bool:
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            try:
+                owner_key, selected = _execution_runtime_lease_scope(connection.cursor(), '?', owner_key, owner_token,
+                    datetime.fromisoformat(now), selected_management_context=selected_management_context,
+                    selected_management_owner=selected_management_owner)
+            except RuntimeError as error:
+                if str(error) in {'SELECTED_MANAGEMENT_CONTEXT_REQUIRED', 'EXECUTION_CANONICAL_OWNERSHIP_CONFLICT'}:
+                    return False  # Preserve the existing contested-acquire contract.
+                raise
             cursor = connection.execute(
                 "INSERT INTO central_execution_runtime_leases(owner_key,owner_token,lease_expires_at,updated_at) "
                 "VALUES(?,?,?,?) ON CONFLICT(owner_key) DO UPDATE SET owner_token=excluded.owner_token,"
@@ -2636,9 +3766,21 @@ class SQLiteExecutionStoreMixin:
                 "julianday(central_execution_runtime_leases.lease_expires_at)<=julianday(excluded.updated_at)",
                 (owner_key, owner_token, lease_expires_at, now),
             )
+            if selected is not None and not selected_management_owner():
+                raise RuntimeError('SELECTED_MANAGEMENT_OWNER_CHANGED')
         return cursor.rowcount == 1
 
 class PostgresExecutionStoreMixin:
+    def load_retained_execution_member_projection(self, account_ref, *, selection_id=None,
+            expected_control_revision=None, intent_ids=None, _reader=None):
+        kwargs = dict(selection_id=selection_id, expected_control_revision=expected_control_revision, intent_ids=intent_ids)
+        if _reader is not None:
+            return _retained_execution_member_projection(_reader, '%s', account_ref, **kwargs)
+        from .postgres_access import DBWriterContext, open_observed_connection
+        scope = DBWriterContext(writer_family='read.execution', writer_kind='retained_projection',
+            operation='load_retained_execution_member_projection', access_mode='read')
+        with open_observed_connection(self._connect, scope) as connection, connection.cursor() as cursor:
+            return _retained_execution_member_projection(cursor, '%s', account_ref, **kwargs)
     _supports_scoped_active_intents = True
 
     @contextmanager
@@ -2689,7 +3831,8 @@ class PostgresExecutionStoreMixin:
                 rows = cursor.fetchall()
         return {str(role): _json_document(document) for role, document in rows}
 
-    def release_execution_runtime(self, owner_key: str, owner_token: str) -> bool:
+    def release_execution_runtime(self, owner_key: str, owner_token: str, *,
+            selected_management_context=None, selected_management_owner=None) -> bool:
         from .postgres_access import DBWriterContext, open_observed_connection
 
         writer = DBWriterContext(
@@ -2697,6 +3840,19 @@ class PostgresExecutionStoreMixin:
             operation="release_execution_runtime", rows_attempted=1,
         )
         with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+            if selected_management_context is not None:
+                from kiwoom_monitor.domain.selected_order_evidence import (
+                    SelectedOrderManagementContext, selected_order_management_context_from_dict)
+                from .selected_order_bootstrap import selected_management_release_owner_key
+                context = (selected_management_context if isinstance(selected_management_context, SelectedOrderManagementContext)
+                           else selected_order_management_context_from_dict(selected_management_context))
+                # The coordinate is a lock hint only. Validate its immutable
+                # preparation after taking the same lock as acquire/prepare.
+                cursor.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',
+                               ('execution-runtime-owner:mock:' + context.canonical_account_ref,))
+                owner_key = selected_management_release_owner_key(cursor, '%s', selected_management_context, owner_token)
+            else:
+                cursor.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', ('execution-runtime-owner:' + owner_key,))
             cursor.execute(
                 "DELETE FROM central_execution_runtime_leases WHERE owner_key=%s AND owner_token=%s",
                 (owner_key, owner_token),
@@ -2749,7 +3905,8 @@ class PostgresExecutionStoreMixin:
             stored = _require_execution_ownership(cursor, ownership, intent, "%s",
                                          now_provider=getattr(self, '_execution_wall_now', None),
                                          submission_claim=event.get("event_type") == "SUBMISSION_STARTED",
-                                         amendment_claim=event.get('event_type') == 'AMENDMENT_STARTED', control_facts=control_facts)
+                                         amendment_claim=event.get('event_type') == 'AMENDMENT_STARTED', control_facts=control_facts,
+                                         event_kind=event.get('event_type'))
             if stored is not None and 'plan' in intent:
                 from kiwoom_monitor.infrastructure.persistence.execution_repository import retain_native_plan_claim
                 intent = retain_native_plan_claim(stored,intent)
@@ -2758,7 +3915,7 @@ class PostgresExecutionStoreMixin:
             if "plan" in intent and not _validate_plan_event(stored, intent, event):
                 return False
             if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":
-                approval, _, _ = _require_plan_approval(cursor, "%s", intent, ownership,
+                approval, _, _, _, _ = _require_plan_approval(cursor, "%s", intent, _native_execution_scope(ownership, control_facts),
                     getattr(self, "_execution_wall_now", None), account_limits=_account_control_limits(control_facts))
                 if stored is None or stored.get("mock_plan_approval") != approval:
                     raise RuntimeError("PLANNED_EXECUTION_APPROVAL_CHANGED")
@@ -2962,7 +4119,9 @@ class PostgresExecutionStoreMixin:
             if int(current.get("control_revision", 0)) != expected_revision:
                 return False
             _require_account_control_change(cursor, "%s", value, current, account_ref)
-            _require_planned_resume_control(cursor, "%s", value, current, resume_owner_token, now_provider)
+            _require_account_resume_control(cursor, "%s", value, current, resume_owner_token, now_provider)
+            if value.get('account_selection') is None:
+                _require_planned_resume_control(cursor, "%s", value, current, resume_owner_token, now_provider)
             cursor.execute(
                 "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
                 "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "
@@ -2975,8 +4134,36 @@ class PostgresExecutionStoreMixin:
             )
         return True
 
+    def replace_mock_automation_control(self, value: dict[str, Any], *, expected_revision: int,
+            expected_selection_id: str, owner_token: str) -> bool:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        account = str(value.get('account_ref') or '')
+        if not account or value.get('control_revision') != expected_revision + 1 or not owner_token:
+            raise ValueError('invalid mock account replacement revision or owner')
+        writer = DBWriterContext(writer_family='mock_automation.control', writer_kind='mock_automation_control',
+            operation='replace_mock_automation_control')
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+            now_provider = getattr(self, '_execution_wall_now', None) or kst_now
+            run_id = value['execution_run_id']
+            _require_execution_ownership(cursor, {'owner_key': f'mock:{account}',
+                'owner_token': f'{run_id}:{owner_token}', 'run_id': run_id},
+                {'environment': 'mock', 'account_ref': account}, '%s', now_provider=now_provider)
+            cursor.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', (f'mock-automation-control:{account}',))
+            current = _plan_document(cursor, '%s', 'execution_mock_automation_control', account, account) or {}
+            if (current.get('control_revision') != expected_revision
+                    or (current.get('account_selection') or {}).get('selection_id') != expected_selection_id):
+                return False
+            _require_account_replacement_control(cursor, '%s', value, current, owner_token, now_provider)
+            cursor.execute('UPDATE central_documents SET updated_at=%s,document_json=%s '
+                'WHERE collection=%s AND owner=%s AND document_key=%s',
+                (datetime.fromisoformat(value['changed_at']).timestamp(), json.dumps(value, ensure_ascii=False),
+                 'execution_mock_automation_control', account, account))
+        return True
+
     def acquire_execution_runtime(
         self, owner_key: str, owner_token: str, now: str, lease_expires_at: str, *, _connection: Any = None,
+        selected_management_context=None, selected_management_owner=None,
     ) -> bool:
         from .postgres_access import DBWriterContext, observe_existing_transaction, open_observed_connection
 
@@ -2987,6 +4174,14 @@ class PostgresExecutionStoreMixin:
         transaction = (open_observed_connection(self._connect, writer) if _connection is None
                        else observe_existing_transaction(_connection, writer, require_idle=True))
         with transaction as connection, connection.cursor() as cursor:
+            try:
+                owner_key, selected = _execution_runtime_lease_scope(cursor, '%s', owner_key, owner_token,
+                    datetime.fromisoformat(now), selected_management_context=selected_management_context,
+                    selected_management_owner=selected_management_owner)
+            except RuntimeError as error:
+                if str(error) in {'SELECTED_MANAGEMENT_CONTEXT_REQUIRED', 'EXECUTION_CANONICAL_OWNERSHIP_CONFLICT'}:
+                    return False
+                raise
             cursor.execute(
                 "INSERT INTO central_execution_runtime_leases(owner_key,owner_token,lease_expires_at,updated_at) "
                 "VALUES(%s,%s,%s,%s) ON CONFLICT(owner_key) DO UPDATE SET owner_token=EXCLUDED.owner_token,"
@@ -2995,4 +4190,6 @@ class PostgresExecutionStoreMixin:
                 "central_execution_runtime_leases.lease_expires_at<=EXCLUDED.updated_at",
                 (owner_key, owner_token, lease_expires_at, now),
             )
+            if selected is not None and not selected_management_owner():
+                raise RuntimeError('SELECTED_MANAGEMENT_OWNER_CHANGED')
             return cursor.rowcount == 1

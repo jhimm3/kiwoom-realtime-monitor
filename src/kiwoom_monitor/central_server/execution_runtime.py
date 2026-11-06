@@ -576,6 +576,35 @@ class ManualMockOrderGateway:
     async def manage_close_order(self, expected, *, spec_id, control_revision, prepare_management):
         return await self._command(lambda: self._manage_close_order(expected, spec_id, control_revision, prepare_management))
 
+    def _verified_order_management_cut(self, record, cut, spec_id, control_revision):
+        from kiwoom_monitor.application.minute_order_management import verified_current_order_peers
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import project_execution_record
+        observation, risk = cut['observation'], cut['risk']
+        context = getattr(self._repository, 'selected_management_context', None)
+        if context is not None:
+            control = self._repository.current_automation_control(record.intent.account_ref)
+            if control is None or control['control_revision'] != control_revision or context.spec_id != spec_id:
+                raise ValueError('CURRENT_ORDER_PEER_CONTROL_CHANGED')
+            peers = verified_current_order_peers(record, cut['recovery'], risk, observation.open_orders, control,
+                selected_management_context=context, selected_management_policy=self._repository.selected_management_policy)
+            return {**cut, 'verified_peer_orders': peers, 'member_record': record}
+        projection = cut.get('member_projection', {})
+        original = record
+        record = project_execution_record(record, projection)
+        control = None
+        if getattr(record, 'member_spec_id', None) is not None:
+            control = self._repository.current_automation_control(record.intent.account_ref)
+            if (control is None or control['control_revision'] != control_revision
+                    or record.member_spec_id != spec_id):
+                raise ValueError('CURRENT_ORDER_PEER_CONTROL_CHANGED')
+            if (projection and cut.get('member_projection_selection_id')
+                    != (control.get('account_selection') or {}).get('selection_id')):
+                raise ValueError('CURRENT_ORDER_PEER_CONTROL_CHANGED')
+        peers = verified_current_order_peers(record, cut['recovery'], risk, observation.open_orders, control)
+        if original.intent.intent_id in projection:
+            peers = {**peers, 'legacy_evidence_scope': True}
+        return {**cut, 'verified_peer_orders': peers, 'member_record': record}
+
     async def _manage_close_order(self, expected, spec_id, control_revision, prepare_management):
         async with self._command_lock:
             account = await self._account_refresh()
@@ -585,9 +614,10 @@ class ManualMockOrderGateway:
                 risk = cut.get('risk') if cut is not None else None
                 if (observation is None or risk is None or observation.account != account
                         or observation.risk_snapshot != risk or risk.account_as_of != account.as_of
-                        or observation.unmapped_broker_order_ids or observation.open_orders != (record,)):
+                        or observation.unmapped_broker_order_ids):
                     raise ValueError('CLOSE current-order requires a refreshed owner cut')
-                claim = prepare_management(record, cut)
+                verified_cut = self._verified_order_management_cut(record, cut, spec_id, control_revision)
+                claim = prepare_management(verified_cut['member_record'], verified_cut)
                 if not observation.reconciliation_complete or not observation.open_orders_complete:
                     if (claim is None or claim.assessment['action'] != 'CANCEL'
                             or set(observation.reasons) != {'unconfirmed_or_cancel_pending_order'}
@@ -660,9 +690,10 @@ class ManualMockOrderGateway:
                     if (account is None or observation is None or risk is None
                             or observation.risk_snapshot != risk or observation.account != account
                             or risk.account_as_of != account.as_of or not observation.open_orders_complete
-                            or observation.unmapped_broker_order_ids or observation.open_orders != (record,)):
+                            or observation.unmapped_broker_order_ids):
                         raise ValueError('planned cancellation requires a refreshed owner cut')
-                    return prepare_plan_cancel(record, cut)
+                    verified_cut = self._verified_order_management_cut(record, cut, spec_id, control_revision)
+                    return prepare_plan_cancel(verified_cut['member_record'], verified_cut)
             if plan is not None:
                 def build_claim(record):
                     observation = cut.get("observation") if cut is not None else None
@@ -670,8 +701,9 @@ class ManualMockOrderGateway:
                     if (account is None or observation is None or risk is None or observation.risk_snapshot != risk
                             or observation.account != account or risk.account_as_of != account.as_of
                             or not observation.reconciliation_complete or not observation.open_orders_complete
-                            or observation.unmapped_broker_order_ids or observation.open_orders != (record,)):
+                            or observation.unmapped_broker_order_ids):
                         raise ValueError("planned cancellation requires a refreshed owner cut")
+                    self._verified_order_management_cut(record, cut, spec_id, control_revision)
                     if planned_stop_cancel_request is not None:
                         return planned_stop_cancel_request.claim_from(risk)
                     from kiwoom_monitor.application.mock_automation_risk import PlannedLeaderExpiredEntryCancelClaim

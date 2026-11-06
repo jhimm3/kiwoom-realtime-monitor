@@ -174,8 +174,11 @@ def is_section12_evidence_manifest(payload: Mapping[str, Any]) -> bool:
     if not isinstance(mode, str) or mode not in SECTION12_EVIDENCE_EXPERIMENT_FAMILIES:
         return False
     fields = {"family", "mode", "code_hash", "parameters", "dataset_sha256", "source_kind"}
-    if mode == "daily_decline_experiment" and spec.get("source_kind") == "frozen_native_daily_observations":
+    if mode == "daily_decline_experiment" and spec.get("source_kind") in {
+            "frozen_native_daily_observations", "frozen_research_evidence"}:
         fields |= {"frozen_manifest_sha256", "frozen_dataset_id", "revision_ids_hash"}
+    elif mode == 'micro_experiment' and spec.get('source_kind') == 'frozen_research_evidence':
+        pass
     elif spec.get("source_kind") != "synthetic":
         return False
     return set(spec) == fields and spec["family"] == SECTION12_EVIDENCE_EXPERIMENT_FAMILIES[mode]

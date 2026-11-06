@@ -199,6 +199,51 @@ def _verify_account_scope_alias_postgres(cursor: Any, value: dict[str, Any]) -> 
         raise ValueError("account scope alias requires the recorded verified binding")
 
 
+def _execution_runtime_scope_keys(cursor, p, owner_key):
+    """Resolve collision coordinates only; an alias is never order authority."""
+    environment, separator, account = owner_key.partition(':')
+    if environment != 'mock' or not separator or not account:
+        return dict(requested_owner_key=owner_key, canonical_owner_key=owner_key,
+                    related_owner_keys=(owner_key,), origin_requires_management=False)
+    cursor.execute('SELECT canonical_account_ref FROM central_account_scope_aliases '
+        f'WHERE origin_account_ref={p} AND environment={p}', (account, environment))
+    alias = cursor.fetchone()
+    target = "document_json->>'target_account_ref'" if p == '%s' else "json_extract(document_json,'$.target_account_ref')"
+    cursor.execute(f'SELECT document_json FROM central_documents WHERE collection={p} AND owner={p}',
+        ('execution_selected_order_management_installations', account))
+    installations = [value[0] if isinstance(value[0], dict) else json.loads(value[0]) for value in cursor.fetchall()]
+    candidates = {row['target_account_ref'] for row in installations}
+    if alias is not None: candidates.add(alias[0])
+    if len(candidates) > 1:
+        raise RuntimeError('EXECUTION_CANONICAL_SCOPE_CONFLICT')
+    canonical = next(iter(candidates), account)
+    cursor.execute('SELECT origin_account_ref FROM central_account_scope_aliases '
+        f'WHERE canonical_account_ref={p} AND environment={p}', (canonical, environment))
+    origins = {row[0] for row in cursor.fetchall()}
+    cursor.execute(f'SELECT owner FROM central_documents WHERE collection={p} AND {target}={p}',
+        ('execution_selected_order_management_installations', canonical))
+    origins.update(row[0] for row in cursor.fetchall())
+    origins.update((account, canonical))
+    return dict(requested_owner_key=owner_key, canonical_owner_key='mock:' + canonical,
+        related_owner_keys=tuple(sorted('mock:' + origin for origin in origins)),
+        origin_requires_management=bool(installations) or account != canonical)
+
+
+def _verify_alias_execution_scope(cursor, p, value, now):
+    """Publishing a read alias cannot join an active original lease to a target."""
+    origin, canonical = 'mock:' + value['origin_account_ref'], 'mock:' + value['canonical_account_ref']
+    if value['environment'] != 'mock':
+        return
+    scope = _execution_runtime_scope_keys(cursor, p, origin)
+    if scope['canonical_owner_key'] not in (origin, canonical):
+        raise RuntimeError('ACCOUNT_ALIAS_SELECTED_TARGET_CHANGED')
+    cursor.execute('SELECT lease_expires_at FROM central_execution_runtime_leases '
+        f'WHERE owner_key={p}' + (' FOR UPDATE' if p == '%s' else ''), (origin,))
+    row = cursor.fetchone()
+    if row is not None and as_kst(row[0] if isinstance(row[0], datetime) else datetime.fromisoformat(row[0])) > as_kst(now):
+        raise RuntimeError('ACCOUNT_ALIAS_EXECUTION_OWNER_ACTIVE')
+
+
 def _stable_id(prefix: str, value: dict[str, Any]) -> str:
     encoded = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -298,6 +343,7 @@ class SQLiteAccountIdentityStoreMixin:
                     raise ValueError("account scope alias is immutable")
                 return stored
             _verify_account_scope_alias_sqlite(connection, document)
+            _verify_alias_execution_scope(connection.cursor(), '?', document, self._now_provider())
             connection.execute(
                 "INSERT INTO central_account_scope_aliases("
                 "origin_account_ref,canonical_account_ref,broker,environment,credential_profile_id,"
@@ -441,6 +487,10 @@ class PostgresAccountIdentityStoreMixin:
         lock_key = f"account-alias:{document['origin_account_ref']}"
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (lock_key,))
+            if document['environment'] == 'mock':
+                for account in sorted({document['origin_account_ref'], document['canonical_account_ref']}):
+                    cursor.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',
+                                   ('execution-runtime-owner:mock:' + account,))
             cursor.execute(
                 "SELECT canonical_account_ref,broker,environment,credential_profile_id,"
                 "binding_revision,verified_at,verification_method FROM central_account_scope_aliases "
@@ -453,6 +503,7 @@ class PostgresAccountIdentityStoreMixin:
                     raise ValueError("account scope alias is immutable")
                 return stored
             _verify_account_scope_alias_postgres(cursor, document)
+            _verify_alias_execution_scope(cursor, '%s', document, self._now_provider())
             cursor.execute(
                 "INSERT INTO central_account_scope_aliases("
                 "origin_account_ref,canonical_account_ref,broker,environment,credential_profile_id,"

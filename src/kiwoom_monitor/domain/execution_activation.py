@@ -501,9 +501,12 @@ class MockAutomationAccountSelection:
     member_spec_ids: tuple[str, ...]
     limits: MockAutomationAccountLimits
     version: str = 'mock_automation_account_selection/v1'
+    execution_order_spec_ids: tuple[str, ...] | None = None
 
     def __post_init__(self):
-        if self.version != 'mock_automation_account_selection/v1':
+        if self.version != 'mock_automation_account_selection/v1' and not (
+                self.version == 'mock_automation_account_selection/v2'
+                and isinstance(self, MockAutomationAccountSelectionV2)):
             raise ValueError('unsupported mock account selection version')
         if not isinstance(self.account_scope, AccountScope) or self.account_scope.environment is not AccountEnvironment.MOCK:
             raise ValueError('account selection requires a verified mock scope')
@@ -528,23 +531,106 @@ class MockAutomationAccountSelection:
             raise ValueError('account selection contains duplicate members')
         if not isinstance(self.limits, MockAutomationAccountLimits):
             raise ValueError('account selection requires explicit typed account limits')
+        if self.execution_order_spec_ids is not None and (
+                type(self.execution_order_spec_ids) is not tuple
+                or len(self.execution_order_spec_ids) != len(self.member_spec_ids)
+                or set(self.execution_order_spec_ids) != set(self.member_spec_ids)):
+            raise ValueError('account execution order must explicitly name every member once')
 
     @property
     def primary_spec_id(self):
         return self.member_spec_ids[0]
+
+    def allows_entry(self, spec_id: str) -> bool:
+        return spec_id in self.member_spec_ids
+
+    def matches_admission(self, *, spec_id: str, admission_id: str,
+                          original_selection_id: str | None, execution_run_id: str) -> bool:
+        """Match references only; the caller still verifies the native document and run."""
+        return (spec_id in self.member_spec_ids and bool(admission_id) and bool(execution_run_id)
+                and original_selection_id == self.selection_id)
 
     @property
     def selection_id(self):
         return _content_id('mock_automation_account_selection', self._identity_document())
 
     def _identity_document(self):
-        return dict(version=self.version, account_scope=self.account_scope.to_dict(),
+        document = dict(version=self.version, account_scope=self.account_scope.to_dict(),
             credential_profile_id=self.credential_profile_id, binding_revision=self.binding_revision,
             binding_verified_at=self.binding_verified_at.isoformat(), frozen_at=self.frozen_at.isoformat(),
             member_spec_ids=list(self.member_spec_ids), limits=self.limits.to_dict())
+        if self.execution_order_spec_ids is not None:
+            document['execution_order_spec_ids'] = list(self.execution_order_spec_ids)
+        return document
 
     def to_dict(self):
         return dict(selection_id=self.selection_id, **self._identity_document())
+
+
+@dataclass(frozen=True)
+class MockAutomationRetainedAdmissionRef:
+    spec_id: str
+    admission_id: str
+    original_selection_id: str | None
+    execution_run_id: str
+
+    def __post_init__(self):
+        for name, prefix in (('spec_id', 'mock_automation_spec_'),
+                             ('admission_id', 'mock_automation_admission_'),
+                             ('execution_run_id', 'mock_auto_run_')):
+            value = getattr(self, name)
+            if type(value) is not str or not value.startswith(prefix):
+                raise ValueError('invalid retained admission reference: ' + name)
+            _require_sha256(value[len(prefix):], name)
+        if self.original_selection_id is not None:
+            prefix = 'mock_automation_account_selection_'
+            if type(self.original_selection_id) is not str or not self.original_selection_id.startswith(prefix):
+                raise ValueError('invalid retained admission original selection')
+            _require_sha256(self.original_selection_id[len(prefix):], 'original_selection_id')
+
+    def to_dict(self):
+        return asdict(self)
+
+
+@dataclass(frozen=True, kw_only=True)
+class MockAutomationAccountSelectionV2(MockAutomationAccountSelection):
+    entry_spec_ids: tuple[str, ...]
+    retained_admission_refs: tuple[MockAutomationRetainedAdmissionRef, ...]
+    version: str = 'mock_automation_account_selection/v2'
+
+    def __post_init__(self):
+        super().__post_init__()
+        if (self.execution_order_spec_ids is None or type(self.entry_spec_ids) is not tuple
+                or len(set(self.entry_spec_ids)) != len(self.entry_spec_ids)
+                or not set(self.entry_spec_ids) <= set(self.member_spec_ids)
+                or type(self.retained_admission_refs) is not tuple or not self.retained_admission_refs
+                or any(not isinstance(value, MockAutomationRetainedAdmissionRef) for value in self.retained_admission_refs)):
+            raise ValueError('replacement requires explicit entries, order and retained admissions')
+        identities = tuple(value.spec_id for value in self.retained_admission_refs)
+        if (len(set(identities)) != len(identities) or self.primary_spec_id not in identities
+                or set(self.member_spec_ids) != set(identities) | set(self.entry_spec_ids)
+                or len({value.execution_run_id for value in self.retained_admission_refs}) != 1):
+            raise ValueError('replacement retained membership or original run conflicts')
+
+    def allows_entry(self, spec_id: str) -> bool:
+        return spec_id in self.entry_spec_ids
+
+    def retained_admission_ref(self, spec_id: str) -> MockAutomationRetainedAdmissionRef | None:
+        return next((value for value in self.retained_admission_refs if value.spec_id == spec_id), None)
+
+    def matches_admission(self, *, spec_id: str, admission_id: str,
+                          original_selection_id: str | None, execution_run_id: str) -> bool:
+        retained = self.retained_admission_ref(spec_id)
+        if retained is not None:
+            return (admission_id, original_selection_id, execution_run_id) == (
+                retained.admission_id, retained.original_selection_id, retained.execution_run_id)
+        return (spec_id in self.entry_spec_ids and bool(admission_id)
+                and original_selection_id == self.selection_id
+                and execution_run_id == self.retained_admission_refs[0].execution_run_id)
+
+    def _identity_document(self):
+        return {**super()._identity_document(), 'entry_spec_ids': list(self.entry_spec_ids),
+                'retained_admission_refs': [value.to_dict() for value in self.retained_admission_refs]}
 
 
 def mock_automation_account_selection_from_dict(value):
@@ -559,7 +645,19 @@ def mock_automation_account_selection_from_dict(value):
     if type(raw['member_spec_ids']) is not list:
         raise ValueError('account selection members must be a JSON array')
     raw['member_spec_ids'] = tuple(raw['member_spec_ids'])
-    result = MockAutomationAccountSelection(**raw)
+    if 'execution_order_spec_ids' in raw:
+        if type(raw['execution_order_spec_ids']) is not list:
+            raise ValueError('account execution order must be a JSON array')
+        raw['execution_order_spec_ids'] = tuple(raw['execution_order_spec_ids'])
+    constructor = MockAutomationAccountSelection
+    if raw.get('version') == 'mock_automation_account_selection/v2':
+        if type(raw.get('entry_spec_ids')) is not list or type(raw.get('retained_admission_refs')) is not list:
+            raise ValueError('replacement entry and retained references must be JSON arrays')
+        raw['entry_spec_ids'] = tuple(raw['entry_spec_ids'])
+        raw['retained_admission_refs'] = tuple(MockAutomationRetainedAdmissionRef(**row)
+                                                for row in raw['retained_admission_refs'])
+        constructor = MockAutomationAccountSelectionV2
+    result = constructor(**raw)
     if identity != result.selection_id or result.to_dict() != dict(value):
         raise ValueError('mock account selection canonical content conflict')
     return result

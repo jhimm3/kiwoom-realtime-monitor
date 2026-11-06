@@ -201,6 +201,9 @@ class CandidateMonitorDialog(QDialog):
         self._operational_client = operational_client
         self._settings_worker: CandidateSettingsWorker | None = None
         self._operational_settings_loaded = False
+        self._operational_values: dict[str, Any] = {}
+        self._shadow_spec_configs: dict[str, Any] | None = None
+        self._shadow_target_id = ""
         self._strategy_config = document_leader_breakout_policy().to_dict()
         self._legacy_candidate_settings = None
         self._leader_policy_text = json.dumps(self._strategy_config, ensure_ascii=False, indent=2)
@@ -257,6 +260,23 @@ class CandidateMonitorDialog(QDialog):
         self._save_settings.clicked.connect(self._save_operational_settings)
         self._settings_group = QGroupBox("주도주 구조 돌파")
         settings_form = QFormLayout(self._settings_group)
+        self._shadow_target = QComboBox()
+        self._shadow_target.addItem("기존 단일 정책", "")
+        self._shadow_target.currentIndexChanged.connect(self._select_shadow_target)
+        self._shadow_spec_id = QLineEdit()
+        self._shadow_spec_id.setPlaceholderText("연결할 운용 명세 식별자를 입력하세요")
+        self._shadow_connect = QPushButton("현재 정책을 명세에 연결·저장")
+        self._shadow_connect.clicked.connect(self._connect_shadow_spec)
+        self._shadow_remove = QPushButton("선택한 명세 연결 삭제")
+        self._shadow_remove.clicked.connect(self._remove_shadow_spec)
+        target_row = QHBoxLayout()
+        target_row.addWidget(self._shadow_target, 1)
+        target_row.addWidget(self._shadow_remove)
+        settings_form.addRow("정책 대상", target_row)
+        connect_row = QHBoxLayout()
+        connect_row.addWidget(self._shadow_spec_id, 1)
+        connect_row.addWidget(self._shadow_connect)
+        settings_form.addRow("명세 연결", connect_row)
         settings_form.addRow("판단 정책", self._strategy_selector)
         settings_form.addRow(self._server_policy_status)
         settings_form.addRow("작동", self._candidate_enabled)
@@ -505,6 +525,65 @@ class CandidateMonitorDialog(QDialog):
         worker.start()
 
     def _apply_operational_settings(self, values: dict[str, Any]) -> None:
+        self._operational_values = deepcopy(values)
+        configs = values.get("shadow_candidate_configs")
+        self._shadow_spec_configs = deepcopy(configs) if isinstance(configs, dict) else None
+        self._shadow_target.blockSignals(True)
+        self._shadow_target.clear()
+        self._shadow_target.addItem("기존 단일 정책" + (" · 명세별 운용에 사용 안 함"
+                                    if self._shadow_spec_configs is not None else ""), "")
+        for identity, config in (self._shadow_spec_configs or {}).items():
+            label = "주도주 돌파" if "policy_id" in config else "기존 비교"
+            if config.get("version") == MINUTE_SHADOW_VERSION:
+                label = _minute_shadow_label(config.get("strategy", {}).get("policy", {}).get("variant"))
+            self._shadow_target.addItem(label + " · 명세 " + identity[-12:], identity)
+            self._shadow_target.setItemData(self._shadow_target.count() - 1, identity, Qt.ItemDataRole.ToolTipRole)
+        index = self._shadow_target.findData(self._shadow_target_id)
+        self._shadow_target.setCurrentIndex(max(0, index))
+        self._shadow_target.blockSignals(False)
+        self._select_shadow_target(preserve_enabled=False)
+
+    def _select_shadow_target(self, _index=None, *, preserve_enabled=True) -> None:
+        globally_enabled = self._candidate_enabled.isChecked()
+        self._shadow_target_id = str(self._shadow_target.currentData() or "")
+        values = deepcopy(self._operational_values)
+        if self._shadow_target_id:
+            values["shadow_candidate_config"] = deepcopy((self._shadow_spec_configs or {})[self._shadow_target_id])
+            config = values["shadow_candidate_config"]
+            if config.get("version") != MINUTE_SHADOW_VERSION and "policy_id" not in config:
+                self._strategy_selector.blockSignals(True)
+                self._strategy_selector.setCurrentIndex(1)
+                self._strategy_selector.blockSignals(False)
+        self._apply_candidate_policy(values)
+        self._shadow_remove.setEnabled(bool(self._shadow_target_id))
+        if self._shadow_spec_configs is not None:
+            self._candidate_enabled.setChecked(globally_enabled if preserve_enabled else bool(values.get("shadow_candidate_enabled")))
+            self._candidate_enabled.setText("명세별 후보 관찰 전체 켜기")
+            target = "선택한 명세" if self._shadow_target_id else "기존 단일 정책 · 현재 명세별 운용에 사용 안 함"
+            self._server_policy_status.setText(self._server_policy_status.text()
+                + f"\n명세별 정책 {len(self._shadow_spec_configs)}개 · {target} · 연결 없는 명세의 신규 후보는 꺼집니다.")
+
+    def _connect_shadow_spec(self) -> None:
+        identity = self._shadow_spec_id.text().strip()
+        if not identity:
+            self._settings_status.setText("연결할 운용 명세 식별자를 입력하세요.")
+            return
+        self._save_operational_settings(target_spec_id=identity)
+
+    def _remove_shadow_spec(self) -> None:
+        identity = self._shadow_target.currentData()
+        if not identity or identity not in (self._shadow_spec_configs or {}):
+            return
+        configs = deepcopy(self._shadow_spec_configs)
+        del configs[identity]
+        changes = {"shadow_candidate_configs": configs,
+                   "shadow_candidate_enabled": self._candidate_enabled.isChecked()}
+        revision = getattr(self, "_operational_revision", None)
+        if type(revision) is int:
+            changes["expected_revision"] = revision
+        self._start_settings_request(changes)
+
+    def _apply_candidate_policy(self, values: dict[str, Any]) -> None:
         self._operational_settings_loaded = True
         self._operational_revision = values.get("revision")
         config = values.get("shadow_candidate_config")
@@ -554,6 +633,7 @@ class CandidateMonitorDialog(QDialog):
             self._settings_status.setText('00종합 초안 편집 중 · 서버의 기존 미정 설정은 저장 후 전환됩니다. '+self._settings_status.text())
 
     def _select_candidate_policy(self, _index: int) -> None:
+        globally_enabled = self._candidate_enabled.isChecked()
         if self._strategy_config.get("version") == MINUTE_SHADOW_VERSION:
             self._minute_shadow_text = self._leader_policy_editor.toPlainText()
             self._minute_shadow_enabled = self._candidate_enabled.isChecked()
@@ -569,13 +649,20 @@ class CandidateMonitorDialog(QDialog):
         else:
             self._render_candidate_settings({"shadow_candidate_enabled": False,
                 "shadow_candidate_config": document_leader_breakout_policy().to_dict()})
+        if self._shadow_spec_configs is not None:
+            self._candidate_enabled.setChecked(globally_enabled)
+            self._candidate_enabled.setText("명세별 후보 관찰 전체 켜기")
 
     def _reset_leader_policy(self) -> None:
+        globally_enabled = self._candidate_enabled.isChecked()
         self._leader_policy_text = json.dumps(document_leader_breakout_policy().to_dict(), ensure_ascii=False, indent=2)
         if self._strategy_selector.currentIndex() == 0:
             self._render_candidate_settings({"shadow_candidate_config": document_leader_breakout_policy().to_dict()})
         else:
             self._strategy_selector.setCurrentIndex(0)
+        if self._shadow_spec_configs is not None:
+            self._candidate_enabled.setChecked(globally_enabled)
+            self._candidate_enabled.setText("명세별 후보 관찰 전체 켜기")
 
     def _render_candidate_settings(self, values: dict[str, Any]) -> None:
         config = values.get("shadow_candidate_config")
@@ -657,7 +744,7 @@ class CandidateMonitorDialog(QDialog):
         self._update_source_check_button()
         self._update_position_source_buttons()
 
-    def _save_operational_settings(self) -> None:
+    def _save_operational_settings(self, *, target_spec_id: str | None = None) -> None:
         minute_mode = self._strategy_config.get("version") == MINUTE_SHADOW_VERSION
         if minute_mode or "policy_id" in self._strategy_config:
             try:
@@ -674,7 +761,7 @@ class CandidateMonitorDialog(QDialog):
             revision = getattr(self, "_operational_revision", None)
             if isinstance(revision, int):
                 changes["expected_revision"] = revision
-            self._start_settings_request(changes)
+            self._submit_shadow_settings(changes, target_spec_id=target_spec_id)
             return
         config = dict(self._strategy_config)
         rank_enabled = self._rank_persistence.isChecked()
@@ -704,6 +791,17 @@ class CandidateMonitorDialog(QDialog):
         revision = getattr(self, "_operational_revision", None)
         if isinstance(revision, int):
             changes["expected_revision"] = revision
+        self._submit_shadow_settings(changes, target_spec_id=target_spec_id)
+
+    def _submit_shadow_settings(self, changes: dict[str, Any], *, target_spec_id: str | None) -> None:
+        identity = self._shadow_target.currentData() if target_spec_id is None else target_spec_id
+        if identity:
+            configs = deepcopy(self._shadow_spec_configs or {})
+            configs[identity] = changes["shadow_candidate_config"]
+            changes = {key: value for key, value in changes.items()
+                       if key in {"shadow_candidate_enabled", "expected_revision"}}
+            changes["shadow_candidate_configs"] = configs
+            self._shadow_target_id = identity
         self._start_settings_request(changes)
 
     def stop(self) -> None:

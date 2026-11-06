@@ -149,6 +149,17 @@ class JournalFillReconciliationTests(unittest.TestCase):
         self.assertEqual("CONFLICT", result.groups[0].status)
         self.assertEqual(3, sum(fill.quantity for fill in result.fills))
 
+    def test_duplicate_physical_fill_with_conflicting_member_is_not_assigned_twice(self) -> None:
+        scope = _scope()
+        first = {**_detail(scope, source="source-1"), "member_spec_id": "member-a"}
+        conflict = {**_detail(scope, source="source-2", run="run-2"), "member_spec_id": "member-b"}
+
+        result = reconcile_trade_fills((_summary(scope),), (first, conflict), scope)
+
+        self.assertEqual("CONFLICT", result.groups[0].status)
+        self.assertEqual(3, sum(fill.quantity for fill in result.fills))
+        self.assertEqual("member-a", result.groups[0].detailed_fills[0].member_spec_id)
+
     def test_different_account_evidence_is_rejected(self) -> None:
         scope = _scope()
         other = _scope()

@@ -3251,6 +3251,86 @@
         "tests/unit/test_mock_automation_account_execution.py",
         "tests/integration/test_mock_automation_account_execution_postgres.py"
       ]
+    },
+    {
+      "id": "S12-05-public-account-members-and-journal-20261106",
+      "reason": "Approved S12-05 original1/2/6/10: connect explicitly ordered READY members, one account runner, current peer recovery, public UI/settings and exact journal ownership. Retain standalone wire and all native account/order safety constraints.",
+      "connection": "The existing account resume CAS owns PostgreSQL identity advisory locking and the account-event watermark read before verifying every selected member against one current complete Risk/recovery cut. The SQLite journal migration adds only nullable native member attribution; historical records remain null. The existing Qt dialog explicitly collects account anchor, independent execution order and shared limits without invented values.",
+      "validation": "Related unit/native PostgreSQL tests cover every-member recovery, current binding/owner, partial and mixed cuts, native CAS races, typed per-member review receipts, one runner/task/listener/drain, verified peer reservations and UNKNOWN before claim/submission. Journal API/projection/reopen/query/UI tests preserve physical fill identity, raw times, plan and hash, reject reattribution and retain historical null metadata. The two native resume statements execute within the existing transaction, never per0B. These exact three inventory increases are reviewed; runtime acceptance is recorded separately in the S12-05 component evidence.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_account_resume_control|cursor.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_schema.py|_add_execution_projection_member|connection.execute": 1,
+        "dynamic|src/kiwoom_monitor/presentation/mock_automation_dialog.py|MockAutomationDialog._prepare_account_selection|dialog.exec": 1
+      },
+      "evidence": [
+        "tests/unit/test_mock_automation_account_resume.py",
+        "tests/integration/test_mock_automation_account_resume_postgres.py",
+        "tests/unit/test_mock_automation_account_runner.py",
+        "tests/unit/test_journal_execution_projection.py",
+        "tests/unit/test_mock_automation_dialog.py"
+      ]
+    },
+    {
+      "id": "S12-05-reentry-retained-replacement-identity-20261106",
+      "reason": "Original S12-05 representatives2/10/11: explicit independent-setup reentry, same-owner retained-plan replacement, and read-only source/target account evidence comparison. Original order, FILL, policy, admission and permission boundaries remain separate.",
+      "connection": "Reentry uses one latest own accepted FILL and the existing bounded previous-plan ledger, then one immutable setup claim in the existing queued transaction. Replacement uses the existing runtime owner and native identity lock plus one control update after complete same-cut member proof. Retained standalone views verify original immutable admissions and joined intent/gate documents; original rows are not rewritten. Identity comparison reads exact native binding, drained source, original order, detailed events and source cursor within one read-only cut.",
+      "validation": "SQLite and isolated PostgreSQL actual leader/CLOSE tests cover staged fills, confirmed flat/new independent setup, late old fills before submission, shared reservations, replacement CAS response loss, old plan management, rollback and reopened ownership. Read-only comparison tests cover mismatched identity, changed epoch, UNKNOWN amendment and missing detailed fills with order_authority/runtime_imported false. Projection is cached by immutable intent ownership in the existing monitor and does not add DB work to each real0B. Exact new SQL sites below are transaction/read-boundary costs, not measured runtime speedups. Final current-source execution is recorded separately.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_documents.py|_selected_order_identity_context|reader.execute": 5,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.replace_mock_automation_control|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.replace_mock_automation_control|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|SQLiteExecutionStoreMixin.replace_mock_automation_control|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_leader_reentry_claim|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_retained_projection_document|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_retained_projection_rows|cursor.execute": 1
+      },
+      "evidence": [
+        "tests/unit/test_mock_automation_parallel_strategies.py",
+        "tests/integration/test_mock_automation_parallel_strategies_postgres.py",
+        "tests/unit/test_mock_automation_account_replacement.py",
+        "tests/integration/test_mock_automation_account_replacement_postgres.py",
+        "tests/unit/test_mock_automation_retained_projection.py",
+        "tests/unit/test_selected_order_recovery.py"
+      ]
+    },
+    {
+      "id": "S12-05-selected-plan-current-native-management-20261106",
+      "reason": "Original S12-05 representatives8/11: native current input revision, complete source plan preservation, exact dated reconciliation, one canonical management lease, current settings and explicit management-only acceptance. Existing source/authority and raw-data boundaries remain unchanged.",
+      "connection": "Source signer and whole-plan installation run only on explicit preservation/recovery, borrowing the existing store transaction. Canonical alias/lease checks serialize one current owner. Current acceptance independently verifies source facts, native Risk/recovery, physical fills, control and target settings. Actual command checks borrow the same transaction and lock the existing settings row on PostgreSQL; facts/ACK/heartbeat do not gain that command query. The current status getter reads requested fences without starting an owner or changing a receipt.",
+      "validation": "Per-key exact frequency, transaction ownership and source/runtime distinction are recorded in final-static-review-current-settings-proposal.json. Closed component evidence covers SQLite/PostgreSQL canonical ownership, stale tokens/epoch/STOP, in-flight ACK preservation, original partial and staged leader protection, pending ADD cancellation, source/target HWM and current settings. The lexical async commit callback is not a SQL commit. Signer v5 full-plan queries and v4 single-intent checks are alternate branches, not an unconditional per-event increase. Full current-source tests and final static execution evidence are recorded separately before stage acceptance; no runtime speedup or operational acceptance is inferred from these site limits.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_account_identity.py|PostgresAccountIdentityStoreMixin.register_account_scope_alias|cursor.execute": 4,
+        "db|src/kiwoom_monitor/central_server/database_account_identity.py|_execution_runtime_scope_keys|cursor.execute": 4,
+        "db|src/kiwoom_monitor/central_server/database_account_identity.py|_verify_alias_execution_scope|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.accept_selected_order_evidence|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|PostgresDocumentStoreMixin.install_selected_order_management|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.accept_selected_order_management|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.install_selected_order_management|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|SQLiteDocumentStoreMixin.prepare_selected_order_management|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|_accept_selected_order_evidence|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_documents.py|_selected_order_identity_context|reader.execute": 9,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|PostgresExecutionStoreMixin.release_execution_runtime|cursor.execute": 3,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_execution_runtime_lease_scope|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_execution_ownership|cursor.execute": 4,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_panic_current_minute_revisions|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_selected_target_management_pending|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/mock_automation_supervisor.py|MockAutomationSupervisor.accept_selected_order_management.accept|commit": 1,
+        "db|src/kiwoom_monitor/central_server/selected_order_bootstrap.py|_management_document|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/selected_order_bootstrap.py|_write_management_document|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/selected_order_bootstrap.py|accept_selected_order_management|cursor.execute": 3,
+        "db|src/kiwoom_monitor/central_server/selected_order_bootstrap.py|install_selected_order_management.current_read_runtime|cursor.execute": 3,
+        "db|src/kiwoom_monitor/central_server/selected_order_bootstrap.py|install_selected_order_management.document|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/selected_order_bootstrap.py|install_selected_order_management.store_document|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/selected_order_bootstrap.py|install_selected_order_management|cursor.execute": 5,
+        "db|src/kiwoom_monitor/central_server/selected_order_bootstrap.py|load_selected_management_fences|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/selected_order_bootstrap.py|prepare_selected_order_management|cursor.execute": 3
+      },
+      "evidence": [
+        "tmp/s12-05-group-integration/final-static-review-current-settings-proposal.json",
+        "tmp/s12-parallel-development/selected-leader-native-final-evidence.json",
+        "tmp/s12-selected-current-v5-final-01/handoff.json",
+        "tmp/s12-05-selective-install/v5-handoff.json"
+      ]
     }
   ]
 }

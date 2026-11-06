@@ -607,7 +607,7 @@ def _scenario_action(action):
 
 
 def replay_daily_decline(scenario: Mapping[str, object], policy: Mapping[str, object], *,
-                         checkpoint=lambda: None) -> dict:
+                         checkpoint=lambda: None, setup_result=None, include_state=False) -> dict:
     """Run the DD policy against explicitly recorded synthetic orders and FILL receipts."""
     checkpoint()
     if scenario.get("version") != "dd-synthetic-evidence/v1" or scenario.get("venue") != "KRX":
@@ -633,7 +633,10 @@ def replay_daily_decline(scenario: Mapping[str, object], policy: Mapping[str, ob
     setup_days, complete = _verified_days(calendar, venue, prior_days[0] if prior_days else signal_day,
                                           signal_day, cut, checkpoint)
     trading_days = [day for day in setup_days if day.sessions]
-    if (not complete or tuple(day.trading_date for day in trading_days) != (*prior_days, signal_day)
+    if setup_result is not None:
+        setup_days = [day for revisions in calendar.values() for day in revisions
+                      if setup_result.setup is not None and day.revision_id in setup_result.setup.evidence_ids]
+    elif (not complete or tuple(day.trading_date for day in trading_days) != (*prior_days, signal_day)
             or cut < trading_days[-1].sessions[-1].ends_at):
         setup_result = DailyDeclineSetupResult("UNKNOWN", "session_window_unverified")
     else:
@@ -723,6 +726,11 @@ def replay_daily_decline(scenario: Mapping[str, object], policy: Mapping[str, ob
         except (KeyError, TypeError) as error:
             raise ValueError("DD receipt requires its recorded evidence and accepted order reference") from error
         event.update(owned_quantity=state.owned_quantity, spent_won=state.spent_won, reserved_won=state.reserved_won)
+        for field in ('provenance', 'cost_provenance'):
+            if field in row:
+                if not isinstance(row[field], Mapping):
+                    raise ValueError('DD receipt provenance must be an object')
+                event[field] = dict(row[field])
         decisions.append(event)
     checkpoint()
 
@@ -736,4 +744,47 @@ def replay_daily_decline(scenario: Mapping[str, object], policy: Mapping[str, ob
         "fill_count": len(state.fills), "sell_proceeds_won": sell_proceeds,
         "realized_pnl_won": sell_proceeds - state.spent_won if closed else None,
     }
-    return {"version": "dd-research-result/v1", "setup": setup_document, "events": decisions, "summary": summary}
+    return {"version": "dd-research-result/v1", "setup": setup_document, "events": decisions, "summary": summary,
+            **({'state': json.loads(json.dumps(asdict(state), default=lambda value: value.isoformat()))}
+               if include_state else {})}
+
+
+def replay_frozen_daily_decline(observations, descriptor, policy, setup_result, *, checkpoint=lambda: None):
+    """Join admitted frozen daily setup with explicit research execution receipts."""
+    execution = descriptor['execution_evidence']
+    if (not isinstance(execution, Mapping) or execution.get('version') != 'dd-execution-evidence/v1'
+            or set(execution) - {'version', 'provenance', 'protection', 'protection_provenance', 'events'}
+            or not isinstance(execution.get('events'), (list, tuple))):
+        raise ValueError('invalid DD execution evidence')
+    provenance = execution.get('provenance')
+    if (not isinstance(provenance, Mapping)
+            or provenance.get('source_kind') not in {'synthetic', 'historical_reconstruction', 'historical_replay', 'hypothesis'}
+            or any(not isinstance(provenance.get(key), str) or not provenance[key].strip()
+                   for key in ('source_ref', 'source_version'))):
+        raise ValueError('DD execution evidence requires its declared research source and version')
+    scenario = {key: descriptor[key] for key in ('symbol', 'venue', 'signal_day', 'cut', 'basis', 'benchmark')}
+    scenario.update(version='dd-synthetic-evidence/v1', daily_revisions=observations, prior_days=[],
+        calendar=descriptor['strategy_references']['calendar'], events=execution['events'],
+        protection=execution.get('protection'), catalyst=descriptor.get('catalyst'))
+    result = replay_daily_decline(scenario, policy, checkpoint=checkpoint, setup_result=setup_result, include_state=True)
+    missing = []
+    def has_source(value):
+        return (isinstance(value, Mapping) and all(isinstance(value.get(key), str) and value[key].strip()
+                for key in ('source_ref', 'source_version')))
+    if not has_source(execution.get('protection_provenance')):
+        missing.append('raw_protection_source')
+    if execution.get('protection') is None:
+        missing.append('raw_price_protection')
+    for row in execution['events']:
+        if row.get('kind') == 'QUOTE' and not has_source(row.get('provenance')):
+            missing.append('raw_quote_source:' + row['evidence_id'])
+        if row.get('kind') == 'FILL' and not has_source(row.get('cost_provenance')):
+            missing.append('fill_cost_source:' + row['fill_id'])
+    return {**result, 'source_kind': 'frozen_research_evidence',
+        'execution_evidence': dict(execution),
+        'input_assessment': {'scope': 'declared_frozen_research', 'missing_inputs': missing,
+                             'native_confirmation': False}, 'order_authorized': False,
+        'evidence_provenance': {'execution': dict(provenance), 'raw_protection': execution.get('protection'),
+            'raw_protection_source': execution.get('protection_provenance'),
+            'fill_costs': {row['fill_id']: dict(row.get('cost_provenance', {}))
+                          for row in execution['events'] if row.get('kind') == 'FILL'}}}

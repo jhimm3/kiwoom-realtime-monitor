@@ -155,9 +155,28 @@ class PlannedLeaderExpiredEntryCancelClaim:
             raise ValueError("invalid expired planned entry cancellation claim") from error
 
 
+def mock_automation_expected_binding_revision(spec, selected_management_context=None):
+    """Keep source policy identity separate from its explicit current target binding.
+
+    This is a pure scope comparison. Native management acceptance and the live
+    owner/epoch fence remain required at the actual order boundary.
+    """
+    if selected_management_context is None:
+        return spec.binding_revision
+    from kiwoom_monitor.domain.selected_order_evidence import (
+        SelectedOrderManagementContext, selected_order_management_context_from_dict,
+    )
+    context = (selected_order_management_context_from_dict(dict(selected_management_context))
+               if isinstance(selected_management_context, Mapping) else selected_management_context)
+    if (not isinstance(context, SelectedOrderManagementContext)
+            or (context.account_ref, context.spec_id) != (spec.account_scope.account_ref, spec.spec_id)):
+        raise ValueError('selected management policy scope changed')
+    return context.binding_revision
+
+
 def validate_planned_leader_stop(
     trigger: PlannedLeaderStop, *, spec, leader_config, position_proof, original_risk,
-    original_fill_quantity: int,
+    original_fill_quantity: int, selected_management_context=None,
 ) -> None:
     """Reproduce the approved original 0B stop against the original Risk and FILL cut."""
     from kiwoom_monitor.application.leader_breakout import (
@@ -174,7 +193,7 @@ def validate_planned_leader_stop(
             or (trigger.risk_snapshot_id, trigger.risk_reconciliation_revision)
             != (original_risk.snapshot_id, original_risk.reconciliation_revision)
             or original_risk.account_ref != spec.account_scope.account_ref
-            or original_risk.binding_revision != spec.binding_revision
+            or original_risk.binding_revision != mock_automation_expected_binding_revision(spec, selected_management_context)
             or not original_risk.reconciliation_complete or original_risk.submission_unknown_count
             or original_risk.balance_mismatch_count
             or original_fill_quantity != trigger.stop_loss["quantity"]
@@ -201,7 +220,7 @@ def validate_planned_leader_stop(
 
 def validate_planned_leader_current_cut(
     plan: OrderPlanRef, *, spec, run_id: str, symbol: str, risk, plan_position: Mapping[str, Any],
-    now: datetime, price: Mapping[str, Any] | None = None,
+    now: datetime, price: Mapping[str, Any] | None = None, selected_management_context=None,
 ) -> int:
     """Validate the current quantity and optional fresh quote independently of the trigger."""
     quantity = plan_position["quantity"]
@@ -219,7 +238,8 @@ def validate_planned_leader_current_cut(
             or type(quantity) is not int or quantity <= 0 or plan_position.get("unreconciled_sell_quantity")
             or type(cursor) is not int or not 0 < cursor <= risk.execution_event_high_watermark
             or (risk.account_ref, risk.execution_run_id, risk.binding_revision)
-            != (spec.account_scope.account_ref, run_id, spec.binding_revision)
+            != (spec.account_scope.account_ref, run_id,
+                mock_automation_expected_binding_revision(spec, selected_management_context))
             or not risk.reconciliation_complete or risk.submission_unknown_count or risk.balance_mismatch_count
             or pending or dict(owned) != {symbol: quantity}
             or age is None or any(not 0 <= (now - at).total_seconds() <= age for at in (
@@ -286,6 +306,7 @@ def planned_leader_root_confirmation_time(root, events):
 def prepare_planned_leader_protection_exit(
     spec, *, run_id, control_revision, notice, plan, observation, risk, plan_position, leader_config,
     position_proof, confirmed_root_state, confirmed_root_at, now, reservation_claimed=False,
+    selected_management_context=None,
 ):
     """Freeze a candidate. The native owner must prove terminal BUY and both cuts before transport."""
     from .breakout_strategy import StrategyState
@@ -316,6 +337,7 @@ def prepare_planned_leader_protection_exit(
     quantity = validate_planned_leader_current_cut(
         replace(plan, expected_revision=plan.expected_revision + 1) if reservation_claimed else plan,
         spec=spec, run_id=run_id, symbol=symbol, risk=risk, plan_position=plan_position, now=now, price=price,
+        selected_management_context=selected_management_context,
     )
     age = spec.unfilled_execution_policy.max_snapshot_age_seconds
     if any(not 0 <= (now - at).total_seconds() <= age for at in (
@@ -505,7 +527,7 @@ def validate_mock_stop_loss_proof(proof, spec, risk=None, *, stop_loss_bps=None,
 
 
 def mock_automation_stop_loss_trigger(spec, risk, *, execution_run_id, now, price, account_positions, stop_loss_bps,
-                                      ipo_policy=None, ipo_candidate=None):
+                                      ipo_policy=None, ipo_candidate=None, selected_management_context=None):
     """Evaluate an admitted stop from ACKed fill basis and borrowed Collector RAM."""
     basis = dict(risk.entry_prices_for_spec(spec.spec_id))
     owned = dict(risk.owned_for_spec(spec.spec_id))
@@ -537,7 +559,7 @@ def mock_automation_stop_loss_trigger(spec, risk, *, execution_run_id, now, pric
     validate_mock_stop_loss_proof(proof, spec, risk, stop_loss_bps=stop_loss_bps,
                                   ipo_policy=ipo_policy, ipo_candidate=ipo_candidate)
     trigger = mock_automation_protection_trigger(spec, risk, execution_run_id=execution_run_id,
-        now=now, account_positions=account_positions)
+        now=now, account_positions=account_positions, selected_management_context=selected_management_context)
     if trigger is None:
         trigger = {'version':'mock-native-risk-protection/v1', 'account_ref':risk.account_ref,
             'execution_run_id':execution_run_id, 'binding_revision':risk.binding_revision,
@@ -589,7 +611,7 @@ def prepare_mock_protection_exit(spec, *, run_id, control_revision, notice, risk
     return json.loads(json.dumps({**workflow, 'workflow_id':content_id('protection_exit',workflow)}))
 
 
-def validate_mock_protection_exit(value, spec, run_id):
+def validate_mock_protection_exit(value, spec, run_id, *, selected_management_context=None):
     from kiwoom_monitor.application.breakout_strategy import StrategyDecision
     from kiwoom_monitor.application.mock_automation_session_clock import content_id
     if (not isinstance(value, Mapping) or set(value) != {'snapshot','decision','workflow_id'}
@@ -604,7 +626,7 @@ def validate_mock_protection_exit(value, spec, run_id):
             or type(snapshot.get('request_revision')) is not int or snapshot['request_revision'] <= 0
             or not _protective_exit_trigger_valid(trigger, spec)
             or trigger.get('account_ref') != snapshot['account_ref'] or trigger.get('execution_run_id') != run_id
-            or trigger.get('binding_revision') != spec.binding_revision
+            or trigger.get('binding_revision') != mock_automation_expected_binding_revision(spec, selected_management_context)
             or raw.get('decision_id') != content_id('decision',body)
             or raw.get('snapshot_id') != content_id('protection_snapshot',snapshot)
             or raw.get('run_id') != run_id or raw.get('final_action') != 'EXIT' or raw.get('proposal') != 'EXIT'
@@ -655,7 +677,8 @@ def protection_limit_assessment(spec, risk, now, *, daily_loss_verified):
     return {"reasons": reasons, "disposition": disposition if reasons else None}
 
 
-def mock_automation_protection_trigger(spec, risk, *, execution_run_id, now, account_positions=None):
+def mock_automation_protection_trigger(spec, risk, *, execution_run_id, now, account_positions=None,
+                                      selected_management_context=None):
     """Classify ACKed native Risk using admitted limits, without order authority.
 
     Unknown execution/balance is reconciled first. A verified daily loss breach
@@ -663,7 +686,8 @@ def mock_automation_protection_trigger(spec, risk, *, execution_run_id, now, acc
     """
     if (now.tzinfo is None or risk.account_ref != spec.account_scope.account_ref
             or risk.execution_run_id != execution_run_id
-            or risk.binding_revision != spec.binding_revision or risk.data_path != spec.data_path):
+            or risk.binding_revision != mock_automation_expected_binding_revision(spec, selected_management_context)
+            or risk.data_path != spec.data_path):
         raise ValueError("mock_protection_native_risk_scope_mismatch")
     assessment = protection_limit_assessment(spec, risk, now,
         daily_loss_verified=risk.daily_net_pnl_source == VERIFIED_DAILY_PNL_SOURCE)
@@ -940,6 +964,7 @@ def build_mock_automation_risk_snapshot(
     balance_mismatch_count: int = 0,
     data_path: str = "nas",
     cost_query_complete: bool = True,
+    member_spec_ids=None,
 ) -> MockAutomationRiskSnapshot:
     """Project immutable risk evidence without estimating missing broker costs."""
     account = recovery.account
@@ -967,7 +992,7 @@ def build_mock_automation_risk_snapshot(
     submission_unknown = sum(record.state.value == "SUBMISSION_UNKNOWN" for record in active_intents)
     owned = _run_positions(exact_fills, execution_run_id)
     entry_prices = _run_entry_prices(exact_fills, execution_run_id)
-    member_facts = _member_risk_facts(exact_fills, active_intents, execution_run_id)
+    member_facts = _member_risk_facts(exact_fills, active_intents, execution_run_id, member_spec_ids)
     pending_sells: dict[str, int] = {}
     for record in active_intents:
         if record.intent.run_id == execution_run_id and record.intent.side.value == "SELL":
@@ -1144,12 +1169,13 @@ def _valid_member_spec_id(value):
             and all(c in '0123456789abcdef' for c in value[len(prefix):]))
 
 
-def _member_risk_facts(events, active_intents, run_id):
+def _member_risk_facts(events, active_intents, run_id, member_spec_ids=None):
     fills = [event for event in events if event.run_id == run_id]
     active = [record for record in active_intents if record.intent.run_id == run_id]
-    if not any(getattr(item, 'member_spec_id', None) is not None for item in (*fills, *active)):
+    if member_spec_ids is None and not any(getattr(item, 'member_spec_id', None) is not None for item in (*fills, *active)):
         return {}
-    complete = all(_valid_member_spec_id(getattr(item, 'member_spec_id', None)) for item in (*fills, *active))
+    complete = all(_valid_member_spec_id(getattr(item, 'member_spec_id', None))
+                   and (member_spec_ids is None or item.member_spec_id in member_spec_ids) for item in (*fills, *active))
     positions, pending, invalid = {}, {}, set()
     for event in sorted(fills, key=lambda item: item.accepted_sequence):
         member = getattr(event, 'member_spec_id', None)

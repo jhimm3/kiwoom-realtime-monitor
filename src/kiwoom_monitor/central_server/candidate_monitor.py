@@ -168,6 +168,50 @@ class CandidateMonitor:
             self._restore_or_bootstrap()
 
     @classmethod
+    def parse_config(cls, document, *, family_id=BREAKOUT_FAMILY_ID):
+        if not isinstance(document, dict):
+            raise ValueError("strategy config must be an object")
+        if document.get("version") == MINUTE_SHADOW_VERSION:
+            return MinuteShadowConfig.from_document(document)
+        if "policy_id" in document:
+            return LeaderBreakoutPolicy.from_dict(document)
+        return parse_strategy_config(family_id, document)
+
+    @classmethod
+    def normalize_configs(cls, configs):
+        if not isinstance(configs, dict):
+            raise ValueError("shadow_candidate_configs must be an object")
+        normalized = {}
+        for spec_id, document in configs.items():
+            if not isinstance(spec_id, str) or not spec_id.strip():
+                raise ValueError("shadow_candidate_configs requires nonempty spec IDs")
+            normalized[spec_id] = cls.parse_config(document).to_dict()
+        return normalized
+
+    @classmethod
+    def from_settings(cls, store, settings, *, previous=None, **kwargs):
+        """One lifecycle and one computation for each distinct explicit policy."""
+        if "shadow_candidate_configs" not in settings:
+            return cls.from_json(store, json.dumps(settings["shadow_candidate_config"]), **kwargs)
+        configs = cls.normalize_configs(settings["shadow_candidate_configs"])
+        unique, members = {}, {}
+        prior = previous._monitors if isinstance(previous, CandidateMonitorGroup) else (previous,)
+        for monitor in prior:
+            if not isinstance(monitor, CandidateMonitor) or monitor._store is not store:
+                continue
+            if monitor._leader_policy is None and (
+                    monitor._session_profile != kwargs.get("session_profile", KRX_REGULAR_RESEARCH_PROFILE)
+                    or monitor._universe_max_age_seconds != int(kwargs["universe_max_age_seconds"])):
+                continue
+            unique[json.dumps(monitor._config.to_dict(), sort_keys=True, allow_nan=False)] = monitor
+        for spec_id, document in configs.items():
+            key = json.dumps(document, sort_keys=True, allow_nan=False)
+            if key not in unique:
+                unique[key] = cls.from_json(store, json.dumps(document), **kwargs)
+            members[spec_id] = unique[key]
+        return CandidateMonitorGroup(members, **kwargs)
+
+    @classmethod
     def from_json(
         cls, store: Any, config_json: str, *, poll_seconds: float,
         universe_max_age_seconds: int,
@@ -179,14 +223,7 @@ class CandidateMonitor:
     ) -> "CandidateMonitor":
         try:
             document = json.loads(config_json)
-            if not isinstance(document, dict):
-                raise ValueError("strategy config must be an object")
-            if document.get("version") == MINUTE_SHADOW_VERSION:
-                config = MinuteShadowConfig.from_document(document)
-            elif "policy_id" in document:
-                config = LeaderBreakoutPolicy.from_dict(document)
-            else:
-                config = parse_strategy_config(family_id, document)
+            config = cls.parse_config(document, family_id=family_id)
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError(f"invalid shadow candidate strategy config: {error}") from error
         return cls(
@@ -902,6 +939,122 @@ class CandidateMonitor:
         with db_call_source(f"candidate_monitor.{reason}"):
             self._store.save_shadow_monitor_state(self.monitor_id, document)
         self._checkpoint_pending = False
+
+
+class CandidateMonitorGroup:
+    """Explicit spec aliases share existing monitors, native pages and one task."""
+
+    def __init__(self, members, *, poll_seconds, now_provider=None,
+                 workload_paused=None, capture_scope=None, **_kwargs):
+        self._members = dict(members)
+        self._monitors = tuple({monitor.monitor_id: monitor for monitor in members.values()}.values())
+        self._poll_seconds = max(0.5, float(poll_seconds))
+        self._now = (lambda: as_kst(now_provider())) if now_provider else kst_now
+        self._workload_paused = workload_paused or (lambda _workload: False)
+        self._capture_scope = capture_scope
+        self._task = None
+        self.monitor_id = _id("shadow-candidate-group", {
+            spec_id: monitor.monitor_id for spec_id, monitor in self._members.items()})
+
+    @property
+    def required_inputs(self):
+        return tuple(dict.fromkeys(item for monitor in self._monitors for item in monitor.required_inputs))
+
+    @property
+    def quality(self):
+        members = {spec_id: monitor.quality for spec_id, monitor in self._members.items()}
+        statuses = {value.get("status") for value in members.values()}
+        status = ("DISABLED" if not members else next((value for value in
+                  ("ERROR", "STALE", "BLOCKED", "WARMUP") if value in statuses), "ACTIVE"))
+        return {"status": status, "monitor_id": self.monitor_id, "members": members,
+                "distinct_policies": len(self._monitors)}
+
+    def operational_status(self, *, now=None):
+        at = as_kst(now or self._now())
+        members = {spec_id: monitor.operational_status(now=at) for spec_id, monitor in self._members.items()}
+        degraded = any(value.get("universe", {}).get("state") in {"missing", "stale"}
+                       or value["last_evaluation"].get("status") in {"STALE", "ERROR"}
+                       for value in members.values())
+        return {"scope": "explicit_strategy_shadows", "checked_at": at.isoformat(),
+                "members": members, "current_all_inputs_fresh": None,
+                "last_evaluation": {"status": "ERROR" if degraded else self.quality["status"]}}
+
+    def set_minute_commit_provider(self, provider):
+        for monitor in self._monitors:
+            monitor.set_minute_commit_provider(provider)
+
+    def project_leader_candidate_status(self, event):
+        monitor = next((item for item in self._monitors
+                        if item._leader_policy is not None and item.monitor_id == event.get("run_id")), None)
+        return monitor.project_leader_candidate_status(event) if monitor is not None else None
+
+    def project_minute_candidate_status(self, event):
+        monitor = next((item for item in self._monitors
+                        if item._minute_shadow is not None and item.monitor_id == event.get("run_id")), None)
+        return monitor.project_minute_candidate_status(event) if monitor is not None else "SUPERSEDED"
+
+    def observe_trade(self, payload, received_at, *, source, approved):
+        for monitor in self._monitors:
+            monitor.observe_trade(payload, received_at, source=source, approved=approved)
+
+    async def start(self):
+        for monitor in self._monitors:
+            if monitor._leader_policy is not None:
+                monitor._leader_accepting = True
+        if self._monitors and (self._task is None or self._task.done()):
+            self._task = asyncio.create_task(self._run(), name="shadow-candidate-monitor")
+
+    async def close(self):
+        for monitor in self._monitors:
+            if monitor._leader_policy is not None:
+                monitor._leader_accepting = False
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        errors = []
+        for monitor in self._monitors:
+            if monitor._leader_policy is not None:
+                try:
+                    await drain_thread_call(monitor.run_once)
+                except Exception as error:
+                    errors.append(error)
+        if errors:
+            raise errors[0]
+
+    async def _run(self):
+        with (self._capture_scope(self, "shadow", "candidate_monitor")
+              if self._capture_scope is not None else nullcontext()):
+            while True:
+                if not self._workload_paused("candidate_monitor"):
+                    await drain_thread_call(self.run_once)
+                await asyncio.sleep(self._poll_seconds)
+
+    def run_once(self, *, limit=1000):
+        processed = 0
+        minute = [monitor for monitor in self._monitors if monitor._leader_policy is None]
+        for offset in range(0, len(minute), 32):
+            batch = minute[offset:offset + 32]
+            try:
+                result = run_shadow_monitors_once(batch, limit=limit)
+                processed += sum(result["processed"].values())
+                errors = result["errors"]
+            except Exception as error:
+                errors = {monitor.monitor_id: str(error) for monitor in batch}
+            for monitor in batch:
+                if monitor.monitor_id in errors:
+                    monitor._quality.update(status="ERROR", reason=errors[monitor.monitor_id],
+                                            last_error_at=self._now().isoformat())
+        for monitor in self._monitors:
+            if monitor._leader_policy is not None:
+                try:
+                    processed += monitor.run_once(limit=limit)
+                except Exception as error:
+                    monitor._quality.update(status="ERROR", reason=str(error), last_error_at=self._now().isoformat())
+        return processed
 
 
 def run_shadow_monitors_once(monitors, *, limit: int = 1000) -> dict[str, Any]:

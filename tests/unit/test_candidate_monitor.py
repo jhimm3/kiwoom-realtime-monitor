@@ -6455,3 +6455,155 @@ class DocumentReferenceRangeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpecScopedShadowTests(unittest.IsolatedAsyncioTestCase):
+    def group(self, store, policies):
+        return CandidateMonitor.from_settings(store, {"shadow_candidate_configs": policies},
+            poll_seconds=60, universe_max_age_seconds=300)
+
+    async def test_aliases_share_one_policy_evaluation_and_one_task_with_shared_native_page(self):
+        from kiwoom_monitor.central_server.candidate_monitor import CandidateMonitorGroup
+        store = SharedPageStore(RegisteredFamilyShadowTests().observations())
+        config = _config().to_dict()
+        other = replace(_config(), lookback_bars=3).to_dict()
+        group = self.group(store, {"first": config, "alias": deepcopy(config), "other": other})
+        self.assertIsInstance(group, CandidateMonitorGroup)
+        self.assertIs(group._members["first"], group._members["alias"])
+        self.assertEqual(2, len(group._monitors))
+        self.assertEqual(10, group.run_once())
+        self.assertEqual(1, len(store.page_calls))
+        baseline = SharedPageStore(RegisteredFamilyShadowTests().observations())
+        for policy in (_config(), replace(_config(), lookback_bars=3)):
+            CandidateMonitor(baseline, policy, poll_seconds=60, universe_max_age_seconds=300).run_once()
+        self.assertEqual(baseline.decisions, store.decisions)
+        self.assertEqual(baseline.candidates, store.candidates)
+        await group.start()
+        self.assertIsNotNone(group._task)
+        self.assertTrue(all(monitor._task is None for monitor in group._monitors))
+        await group.close()
+        self.assertIsNone(group._task)
+        self.assertTrue(all(monitor._task is None for monitor in group._monitors))
+
+    async def test_zero_db_0b_aliases_publish_once_and_close_drains_pending(self):
+        from tests.unit.test_leader_breakout import AT, policy, trade
+        store = SharedPageStore()
+        group = self.group(store, {"leader": policy().to_dict(), "alias": policy().to_dict()})
+        await group.start()
+        with patch.object(store, "save_shadow_evaluation", side_effect=AssertionError("0B callback writes")), \
+             patch.object(store, "load_observation_revision_page", side_effect=AssertionError("0B callback reads")):
+            group.observe_trade(trade(990), AT, source="shared-input", approved=True)
+            group.observe_trade(trade(1010, at=AT+timedelta(seconds=1)), AT+timedelta(seconds=1),
+                                source="shared-input", approved=True)
+        self.assertEqual([], store.candidates)
+        await group.close()
+        self.assertEqual(1, len(store.candidates))
+        self.assertEqual(2, len(store.decisions))
+        self.assertEqual([], store.page_calls)
+        self.assertEqual("INVALIDATED", group.project_leader_candidate_status(store.candidates[0]))
+
+    async def test_member_policy_selection_never_falls_back_to_singleton_or_another_member(self):
+        from types import SimpleNamespace
+        from kiwoom_monitor.domain.strategy_contract import shadow_candidate_config_for_spec
+        from kiwoom_monitor.application.minute_order_management import minute_current_shadow_matches
+        from kiwoom_monitor.application.leader_breakout import leader_current_entry_matches
+        from tests.unit.test_leader_breakout import AT, execution_config
+        config = execution_config()
+        settings = {"shadow_candidate_enabled": True, "shadow_candidate_config": config.policy.to_dict(),
+                    "shadow_candidate_configs": {"leader": config.policy.to_dict()}}
+        proof = {"spec_id": "leader", "context": asdict(config.contexts[0])}
+        self.assertTrue(leader_current_entry_matches(config, proof, settings, AT))
+        self.assertFalse(leader_current_entry_matches(config, None, settings, AT))
+        self.assertFalse(leader_current_entry_matches(config, {**proof, "spec_id": "missing"}, settings, AT))
+        self.assertFalse(leader_current_entry_matches(config, proof, {**settings, "shadow_candidate_enabled": False}, AT))
+        self.assertIsNone(shadow_candidate_config_for_spec(settings))
+        self.assertFalse(minute_current_shadow_matches(SimpleNamespace(spec_id="missing"), {}, settings))
+        self.assertFalse(minute_current_shadow_matches(SimpleNamespace(spec_id="leader"), {}, settings))
+        self.assertFalse(leader_current_entry_matches(config, proof,
+            {**settings, "shadow_candidate_configs": {"leader": _config().to_dict()}}, AT))
+        self.assertIsNone(shadow_candidate_config_for_spec({**settings, "shadow_candidate_configs": {}}, "leader"))
+        singleton = {key: value for key, value in settings.items() if key != "shadow_candidate_configs"}
+        self.assertTrue(leader_current_entry_matches(config, proof, singleton, AT))
+        self.assertIs(shadow_candidate_config_for_spec(singleton, "any"), singleton["shadow_candidate_config"])
+        legacy = CandidateMonitor.from_settings(SharedPageStore(),
+            {"shadow_candidate_config": _config().to_dict()}, poll_seconds=60, universe_max_age_seconds=300)
+        self.assertIsInstance(legacy, CandidateMonitor)
+        for value in (None, {"": _config().to_dict()}, {"bad": []}, {"bad": {"policy_id": "unknown"}}):
+            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+                self.group(SharedPageStore(), value)
+
+    async def test_member_removal_preserves_unchanged_policy_cross_and_other_legacy_inputs(self):
+        from tests.unit.test_leader_breakout import AT, policy, trade
+        store = SharedPageStore()
+        group = self.group(store, {"leader": policy().to_dict(), "alias": policy().to_dict(),
+                                   "minute": _config().to_dict()})
+        await group.start()
+        group.observe_trade(trade(990), AT, source="shared-input", approved=True)
+        group.observe_trade(trade(1010, at=AT+timedelta(seconds=1)), AT+timedelta(seconds=1),
+                            source="shared-input", approved=True)
+        group.run_once()
+        event = store.candidates[0]
+        self.assertEqual("ACTIVE", group.project_leader_candidate_status(event))
+        replacement = CandidateMonitor.from_settings(store,
+            {"shadow_candidate_configs": {"leader": policy().to_dict()}}, previous=group,
+            poll_seconds=60, universe_max_age_seconds=300)
+        self.assertIs(group._members["leader"], replacement._members["leader"])
+        self.assertEqual("ACTIVE", replacement.project_leader_candidate_status(event))
+        await group.close()
+        await replacement.start()
+        self.assertEqual("ACTIVE", replacement.project_leader_candidate_status(event))
+        replacement.observe_trade(trade(1020, at=AT+timedelta(seconds=2)), AT+timedelta(seconds=2),
+                            source="shared-input", approved=True)
+        await replacement.close()
+        self.assertEqual(1, len(store.candidates))
+        self.assertEqual({"leader"}, set(replacement._members))
+        changed_inputs = CandidateMonitor.from_settings(store,
+            {"shadow_candidate_configs": {"minute": _config().to_dict()}}, previous=group,
+            poll_seconds=60, universe_max_age_seconds=30)
+        self.assertIsNot(group._members["minute"], changed_inputs._members["minute"])
+
+    async def test_failed_minute_read_does_not_discard_other_family_pending_0b(self):
+        from tests.unit.test_leader_breakout import AT, policy, trade
+        store = SharedPageStore()
+        group = self.group(store, {"leader": policy().to_dict(), "minute": _config().to_dict()})
+        await group.start()
+        group.observe_trade(trade(990), AT, source="shared-input", approved=True)
+        group.observe_trade(trade(1010, at=AT+timedelta(seconds=1)), AT+timedelta(seconds=1),
+                            source="shared-input", approved=True)
+        with patch.object(store, "load_observation_revision_page", side_effect=OSError("minute read failed")):
+            group.run_once()
+        self.assertEqual(1, len(store.candidates))
+        self.assertEqual("ACTIVE", group.project_leader_candidate_status(store.candidates[0]))
+        self.assertEqual("ERROR", group.quality["members"]["minute"]["status"])
+        self.assertEqual("ERROR", group.operational_status()["last_evaluation"]["status"])
+        await group.close()
+
+    async def test_group_close_drains_owned_shared_page_before_releasing_task(self):
+        store = SharedPageStore(RegisteredFamilyShadowTests().observations())
+        group = self.group(store, {"first": _config().to_dict(),
+                                   "other": replace(_config(), lookback_bars=3).to_dict()})
+        entered, release = threading.Event(), threading.Event()
+        original = store.load_observation_revision_page
+        def read(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("shared source was not released")
+            return original(*args, **kwargs)
+        closing = None
+        with patch.object(store, "load_observation_revision_page", side_effect=read):
+            try:
+                await group.start()
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                closing = asyncio.create_task(group.close())
+                await asyncio.sleep(0.02)
+                self.assertFalse(closing.done())
+                release.set()
+                await asyncio.wait_for(closing, 2)
+            finally:
+                release.set()
+                if closing is not None:
+                    await asyncio.gather(closing, return_exceptions=True)
+                await group.close()
+        self.assertIsNone(group._task)
+        self.assertEqual([5, 5], [monitor._cursor for monitor in group._monitors])
+        self.assertEqual([5, 5], [store.checkpoints[monitor.monitor_id]["cursor"] for monitor in group._monitors])

@@ -261,32 +261,38 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                                "hot_cohort_condition_substring"}
             })
         try:
-            shadow_document = operational.get("shadow_candidate_config")
-            if not isinstance(shadow_document, dict):
-                raise ValueError("shadow candidate strategy config must be an object")
-            if (not active.shadow_candidate_config_json.strip()
-                    and shadow_document == default_shadow_breakout_config().to_dict()):
-                # Retire the previously implicit 5-bar/3%/5%/10-minute profile.
-                # Preserve the original stored document for historical comparison.
-                shadow_document = document_leader_breakout_policy().to_dict()
-                logger.info("implicit legacy shadow profile replaced by unconfigured 0B leader policy")
-            if (not active.shadow_candidate_config_json.strip()
-                    and shadow_document == json.loads(json.dumps(LeaderBreakoutPolicy().to_dict()))):
-                # Only the entirely unconfigured implicit draft changes in memory.
-                # Original stored and explicitly configured comparison policies stay intact.
-                shadow_document = document_leader_breakout_policy().to_dict()
-            if shadow_document.get("version") != MINUTE_SHADOW_VERSION:
-                config = (LeaderBreakoutPolicy.from_dict(shadow_document) if "policy_id" in shadow_document
-                          else BreakoutStrategyConfig(**shadow_document))
-                operational["shadow_candidate_config"] = config.to_dict()
-            elif operational["shadow_candidate_enabled"]:
-                from kiwoom_monitor.application.section12_minute_research import MinuteShadowConfig
+            if "shadow_candidate_configs" in operational:
+                from .candidate_monitor import CandidateMonitor
+                operational["shadow_candidate_configs"] = CandidateMonitor.normalize_configs(
+                    operational["shadow_candidate_configs"])
+            else:
+                shadow_document = operational.get("shadow_candidate_config")
+                if not isinstance(shadow_document, dict):
+                    raise ValueError("shadow candidate strategy config must be an object")
+                if (not active.shadow_candidate_config_json.strip()
+                        and shadow_document == default_shadow_breakout_config().to_dict()):
+                    # Retire the previously implicit 5-bar/3%/5%/10-minute profile.
+                    # Preserve the original stored document for historical comparison.
+                    shadow_document = document_leader_breakout_policy().to_dict()
+                    logger.info("implicit legacy shadow profile replaced by unconfigured 0B leader policy")
+                if (not active.shadow_candidate_config_json.strip()
+                        and shadow_document == json.loads(json.dumps(LeaderBreakoutPolicy().to_dict()))):
+                    # Only the entirely unconfigured implicit draft changes in memory.
+                    # Original stored and explicitly configured comparison policies stay intact.
+                    shadow_document = document_leader_breakout_policy().to_dict()
+                if shadow_document.get("version") != MINUTE_SHADOW_VERSION:
+                    config = (LeaderBreakoutPolicy.from_dict(shadow_document) if "policy_id" in shadow_document
+                              else BreakoutStrategyConfig(**shadow_document))
+                    operational["shadow_candidate_config"] = config.to_dict()
+                elif operational["shadow_candidate_enabled"]:
+                    from kiwoom_monitor.application.section12_minute_research import MinuteShadowConfig
 
-                operational["shadow_candidate_config"] = MinuteShadowConfig.from_document(shadow_document).to_dict()
+                    operational["shadow_candidate_config"] = MinuteShadowConfig.from_document(shadow_document).to_dict()
         except (TypeError, ValueError):
             logger.warning("invalid saved shadow candidate settings disabled", exc_info=True)
             operational["shadow_candidate_enabled"] = False
-            if not isinstance(shadow_document, dict) or shadow_document.get("version") != MINUTE_SHADOW_VERSION:
+            if "shadow_candidate_configs" not in operational and (not isinstance(shadow_document, dict)
+                    or shadow_document.get("version") != MINUTE_SHADOW_VERSION):
                 operational["shadow_candidate_config"] = document_leader_breakout_policy().to_dict()
         if active.mock_account_monitor_enabled and not active.kiwoom_mock_configured:
             raise ValueError("모의계좌 모니터에는 별도 모의투자 앱 키와 시크릿 키가 필요합니다.")
@@ -517,8 +523,8 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                                           **diagnostic_inputs.get("morning_brief", {}))
         if bool(operational["shadow_candidate_enabled"]):
             from .candidate_monitor import CandidateMonitor
-            candidate_monitor = CandidateMonitor.from_json(
-                store, json.dumps(operational["shadow_candidate_config"]),
+            candidate_monitor = CandidateMonitor.from_settings(
+                store, operational,
                 now_provider=server_now,
                 poll_seconds=float(operational["shadow_candidate_poll_seconds"]),
                 universe_max_age_seconds=int(operational["shadow_candidate_universe_max_age_seconds"]),
@@ -578,11 +584,16 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             news_job_runner.set_ai_service(ai_service)
         if mock_owner is not None:
             from .mock_automation_supervisor import MockAutomationSupervisor
+            from kiwoom_monitor.domain.strategy_contract import shadow_candidate_config_for_spec
+            def leader_context_source(spec_id=None):
+                return {"policy": shadow_candidate_config_for_spec(operational_state.settings, spec_id),
+                    "enabled": operational_state.settings.get('shadow_candidate_enabled') is True,
+                    "revision": operational_state.applied_revision}
             mock_automation_supervisor = MockAutomationSupervisor(store, mock_owner,
                 now_provider=server_now,
-                leader_context_source=lambda: {"policy": operational_state.settings.get("shadow_candidate_config"),
-                    "enabled": operational_state.settings.get('shadow_candidate_enabled') is True,
-                    "revision": operational_state.applied_revision},
+                leader_context_source=leader_context_source,
+                expected_implementation_hash=(selected_research_artifact.expected_implementation_hash
+                    if selected_research_artifact is not None else lambda _profile: None),
                 price_source=collector.automation_price_observation if collector is not None else None)
             if collector is not None:
                 collector.set_automation_price_listener(mock_automation_supervisor.observe_automation_price)
@@ -1138,6 +1149,11 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
 
         from .mock_automation_routes import create_mock_automation_router
         app.include_router(create_mock_automation_router(mock_automation_supervisor, authorize))
+
+        from .selected_order_recovery_routes import create_selected_order_recovery_router
+        from .selected_order_broker_evidence import read_kiwoom_selected_order_evidence
+        app.include_router(create_selected_order_recovery_router(store, mock_owner, authorize,
+            broker_evidence_provider=read_kiwoom_selected_order_evidence, supervisor=mock_automation_supervisor))
 
         from .market_dataset_read_routes import create_market_dataset_read_router
         app.include_router(create_market_dataset_read_router(store, authorize_read, top20_service))

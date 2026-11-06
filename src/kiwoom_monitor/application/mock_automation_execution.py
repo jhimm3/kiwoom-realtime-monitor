@@ -22,6 +22,7 @@ from kiwoom_monitor.application.mock_automation_admission import (
     MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION,
 )
 from kiwoom_monitor.application.mock_automation_recovery import (
+    MockAutomationAccountRecoveryDecision,
     MockAutomationRecoveryDecision,
     MockAutomationRecoveryStatus,
     mock_account_recovery_fingerprint,
@@ -464,12 +465,108 @@ def mock_automation_order_policy_version(family_id: str | None, session_profile:
     return f"{MOCK_AUTOMATION_DECISION_GATE_VERSION}:{session_profile}"
 
 
+def _member_recovery_matches(spec, admission, recovery_decision, control):
+    selection = control.account_selection if control is not None else None
+    return (isinstance(recovery_decision, MockAutomationAccountRecoveryDecision)
+            and selection is not None and spec.spec_id in selection.member_spec_ids
+            and selection.matches_admission(spec_id=spec.spec_id, admission_id=admission.admission_id,
+                original_selection_id=getattr(admission, 'account_selection_id', None),
+                execution_run_id=admission.execution_run_id)
+            and recovery_decision.account_selection_id == selection.selection_id
+            and recovery_decision.member_spec_ids == selection.member_spec_ids)
+
+
+def _in_flight_for_spec(records, spec, admission, recovered, control):
+    if not _member_recovery_matches(spec, admission, recovered, control):
+        return len(records)
+    # Unknown ownership and records from another run still block this member.
+    # Only actual native records of verified peers can be excluded.
+    return sum(not (getattr(record, 'member_spec_id', None) in recovered.member_spec_ids
+                    and record.member_spec_id != spec.spec_id
+                    and record.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}
+                    and not (record.amendment is not None and record.amendment.reconciliation_pending)
+                    and record.intent.run_id == admission.execution_run_id
+                    and record.intent.account_ref == admission.account_ref)
+               for record in records)
+
+
+def _selected_management_matches(context, spec, admission):
+    from kiwoom_monitor.domain.selected_order_evidence import SelectedOrderManagementContext
+    return (isinstance(context, SelectedOrderManagementContext)
+            and (context.account_ref, context.execution_run_id, context.spec_id, context.admission_id,
+                 context.source_admission_version, context.source_account_selection_id)
+            == (spec.account_scope.account_ref, admission.execution_run_id, spec.spec_id, admission.admission_id,
+                admission.version, getattr(admission, 'account_selection_id', None))
+            and (admission.account_ref, admission.spec_id, admission.strategy_ref, admission.candidate_package_hash,
+                 admission.final_batch_id, admission.final_run_id, admission.final_result_hash)
+            == (context.account_ref, spec.spec_id, spec.strategy_ref, spec.candidate_package_hash,
+                spec.final_batch_id, spec.final_run_id, spec.final_result_hash))
+
+
+def _selected_management_gate_policy(repository, spec, admission, lease, plan=None):
+    """Read source policy data and the new target lease, never a past READY permission."""
+    context = getattr(repository, 'selected_management_context', None)
+    if context is None:
+        return None, None
+    if not _selected_management_matches(context, spec, admission):
+        raise ValueError('selected management source admission or operating spec changed')
+    from kiwoom_monitor.application.mock_automation_candidate import candidate_package_from_dict
+    from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
+    view = repository.selected_management_policy
+    def document(collection, owner, key):
+        matches = [item['document'] for item in view['documents']
+                   if (item['collection'], item['owner'], item['key']) == (collection, owner, key)]
+        if len(matches) != 1:
+            raise ValueError('selected management policy document is unavailable or ambiguous')
+        return matches[0]
+    if (document('execution_mock_automation_specs', context.account_ref, context.spec_id) != spec.to_dict()
+            or document('execution_mock_automation_admission_by_spec', context.account_ref, context.spec_id) != admission.to_dict()
+            or view['current_lease_receipt'] != lease.to_dict()):
+        raise ValueError('selected management source policy or current target lease changed')
+    package = candidate_package_from_dict(document('execution_mock_automation_candidate_packages',
+        spec.strategy_ref, spec.candidate_package_hash))
+    family = package.candidate_spec.get('family')
+    if ((package.strategy_ref, package.package_hash, package.source_final_batch_id,
+         package.source_final_run_id, package.source_final_result_hash)
+            != (spec.strategy_ref, spec.candidate_package_hash, spec.final_batch_id, spec.final_run_id, spec.final_result_hash)):
+        raise ValueError('selected management candidate lineage changed')
+    if not _selected_management_family_matches(spec, family):
+        raise ValueError('selected management candidate lacks its explicit native execution contract')
+    if family != LEADER_BREAKOUT_FAMILY_ID and package.candidate_spec.get('version') != CLOSE_FINAL_CANDIDATE_VERSION:
+        raise ValueError('selected management minute candidate version changed')
+    contract = (package.candidate_spec.get('parameters') or {}).get('execution_contract') or {}
+    if (family == LEADER_BREAKOUT_FAMILY_ID and contract.get('version') in {
+            'leader_breakout_execution/v2', 'leader_breakout_execution/v3'}
+            and (spec.unfilled_execution_policy is None or spec.unfilled_execution_policy.accepted_order_management is None)):
+        raise ValueError('selected staged leader requires its explicit current-order contract')
+    head = view['source_plan_position']
+    if plan is not None and (plan.plan_id, plan.policy_ref) != (head['plan_id'], head['policy_ref']):
+        raise ValueError('selected management decision crossed its original plan')
+    return context, family
+
+
+def _selected_management_family_matches(spec, family):
+    from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, PANIC_NATIVE_PLAN_MODE
+    return (family == LEADER_BREAKOUT_FAMILY_ID and spec.execution_plan_mode == LEADER_NATIVE_PLAN_MODE
+            or family in {'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'}
+                and spec.execution_plan_mode == CLOSE_NATIVE_PLAN_MODE and spec.close_execution_policy is not None
+            or family == 'panic_rebound/v1' and spec.execution_plan_mode == PANIC_NATIVE_PLAN_MODE
+                and spec.panic_execution_policy is not None)
+
+
 def _decision_safety_context(spec, admission, recovery_decision, decision, recovery, metrics, *,
                              strategy_ref, latest_stop, control, in_flight_order_count, profile,
-                             effective_now, is_exit, allow_manage_only=False):
+                             effective_now, is_exit, allow_manage_only=False,
+                             selected_management_context=None, policy_family=None):
     """Shared existing safety rules; action/parent-child checks stay with each caller."""
     decided_at = datetime.fromisoformat(decision.decided_at)
     reasons: list[str] = []
+    member_recovery = _member_recovery_matches(spec, admission, recovery_decision, control)
+    selected = (_selected_management_matches(selected_management_context, spec, admission)
+                and _selected_management_family_matches(spec, policy_family))
+    if (admission.version == MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION
+            or control is not None and control.account_selection is not None) and not member_recovery and not selected:
+        reasons.append('ACCOUNT_MEMBER_RECOVERY_CHANGED')
     if strategy_ref != spec.strategy_ref:
         reasons.append("STRATEGY_REF_MISMATCH")
     if decision.run_id != admission.execution_run_id:
@@ -488,9 +585,9 @@ def _decision_safety_context(spec, admission, recovery_decision, decision, recov
         effective_now - metrics.observed_at
     ).total_seconds() > spec.maximum_data_gap_seconds:
         reasons.append("LIVE_OBSERVATION_STALE")
-    if profile is None:
+    if profile is None and not (selected and policy_family is not None and is_exit):
         reasons.append("FORWARD_PROFILE_MISSING")
-    elif not is_exit:
+    elif profile is not None and not is_exit:
         if effective_now < profile.evaluation_start:
             reasons.append("EVALUATION_NOT_STARTED")
         elif effective_now > profile.evaluation_end:
@@ -512,6 +609,17 @@ def _decision_safety_context(spec, admission, recovery_decision, decision, recov
     if (control is not None and getattr(control, "entry_resume_required", False)
             and decision.final_action in {"ENTER", "ADD", "REENTER"}):
         reasons.append("CREDENTIAL_CHANGE_REQUIRES_EXPLICIT_ENTRY_RESUME")
+    if selected_management_context is not None:
+        if (not selected or policy_family is None or control is None or not control.entry_resume_required
+                or control.desired_state is not MockAutomationDesiredState.RUNNING
+                or control.account_ref != selected_management_context.account_ref):
+            reasons.append('SELECTED_MANAGEMENT_CONTEXT_CHANGED')
+        if decision.final_action not in {'EXIT', 'REDUCE'}:
+            reasons.append('SELECTED_MANAGEMENT_ENTRY_DISABLED')
+    if (control is not None and control.account_selection is not None
+            and not control.account_selection.allows_entry(spec.spec_id)
+            and decision.final_action in {'ENTER', 'ADD', 'REENTER'}):
+        reasons.append('ACCOUNT_MEMBER_ENTRY_DISABLED')
     if not metrics.recovery_complete:
         reasons.append("BROKER_RECOVERY_INCOMPLETE")
     if metrics.reconciliation_pending:
@@ -566,7 +674,9 @@ def _decision_safety_context(spec, admission, recovery_decision, decision, recov
         for order in recovery.orders
     ):
         reasons.append("BROKER_ORDER_SNAPSHOT_STALE")
-    if any(order.state not in TERMINAL_ORDER_STATES for order in recovery.orders):
+    peer_orders = set(recovery_decision.other_member_open_order_ids) if member_recovery else set()
+    if any(order.state not in TERMINAL_ORDER_STATES and order.broker_order_id not in peer_orders
+           for order in recovery.orders):
         reasons.append("BROKER_OPEN_ORDER_PRESENT")
     if in_flight_order_count:
         reasons.append("EXECUTION_ORDER_IN_FLIGHT")
@@ -576,6 +686,13 @@ def _decision_safety_context(spec, admission, recovery_decision, decision, recov
         for symbol, quantity in recovery.account.positions.items()
         if int(quantity) > 0
     }
+    if member_recovery:
+        positions = dict(metrics.owned_position_quantities)
+        if member_recovery and positions != dict(recovery_decision.own_position_quantities):
+            reasons.append('ACCOUNT_MEMBER_POSITION_CHANGED')
+    elif selected:
+        positions = {symbol: min(quantity, positions.get(symbol, 0))
+                     for symbol, quantity in metrics.owned_position_quantities if quantity > 0}
     if spec.maximum_concurrent_positions is not None and (
         len(positions) > spec.maximum_concurrent_positions
     ):
@@ -583,11 +700,11 @@ def _decision_safety_context(spec, admission, recovery_decision, decision, recov
     return reasons, positions
 
 
-def _is_native_leader_position_action(spec, profile, decision, plan, position_action_ref=None):
+def _is_native_leader_position_action(spec, profile, decision, plan, position_action_ref=None, *, policy_family=None):
     # This is account preflight only. The native writer independently reproduces
     # the frozen step and its current observation before accepting any new lot.
     return (isinstance(plan, OrderPlanRef) and spec.execution_plan_mode == LEADER_NATIVE_PLAN_MODE
-            and profile is not None and profile.family_version == LEADER_BREAKOUT_FAMILY_ID
+            and (profile.family_version if profile is not None else policy_family) == LEADER_BREAKOUT_FAMILY_ID
             and position_action_ref is not None
             and decision.final_action in {'ADD', 'REDUCE'})
 
@@ -611,12 +728,16 @@ def assess_mock_automation_decision(
     risk_reconciliation_revision: int = 0,
     plan: OrderPlanRef | None = None,
     position_action_ref: str | None = None,
+    selected_management_context=None,
+    policy_family: str | None = None,
 ) -> MockAutomationDecisionGate:
     _validate_decision_identity(decision)
     _validate_lineage(spec, admission, lease_receipt, recovery_decision, recovery)
     decided_at = datetime.fromisoformat(decision.decided_at)
     effective_now = server_now or metrics.observed_at
-    plan_action = _is_native_leader_position_action(spec, profile, decision, plan, position_action_ref)
+    selected = _selected_management_matches(selected_management_context, spec, admission)
+    plan_action = _is_native_leader_position_action(spec, profile, decision, plan, position_action_ref,
+        policy_family=policy_family if selected else None)
     if position_action_ref is not None and not plan_action:
         raise ValueError('explicit position action requires the native leader plan')
     _require_aware(effective_now, "server_now")
@@ -627,7 +748,10 @@ def assess_mock_automation_decision(
         in_flight_order_count=in_flight_order_count, profile=profile, effective_now=effective_now,
         is_exit=decision.final_action == "EXIT" or plan_action and decision.final_action == 'REDUCE',
         allow_manage_only=plan_action,
+        selected_management_context=selected_management_context, policy_family=policy_family,
     )
+    if selected_management_context is not None and not isinstance(plan, OrderPlanRef):
+        reasons.append('SELECTED_MANAGEMENT_PLAN_REQUIRED')
     if decision.final_action == "ENTER" or plan_action and decision.final_action == 'ADD':
         if positions and decision.final_action == 'ENTER':
             reasons.append("ENTRY_REQUIRES_FLAT_ACCOUNT")
@@ -745,19 +869,23 @@ def dispatch_mock_automation_decision(
     spec, profile, admission, lease, recovered, latest_stop, control = _load_context(
         repository, account_ref, spec_id,
     )
+    selected_context, policy_family = _selected_management_gate_policy(repository, spec, admission, lease, plan)
     if runtime.account_ref != account_ref or runtime.run_id != admission.execution_run_id:
         raise ValueError("mock automation runtime does not match its admission")
     runtime.set_new_orders_enabled(False)
     with runtime.automation_decision_guard():
         server_now = runtime.server_now()
         control = repository.load_mock_automation_control(account_ref)
-        repository.save_mock_automation_spec(spec)  # Revalidate binding for every new Decision.
+        if selected_context is None:
+            repository.save_mock_automation_spec(spec)  # Ordinary decisions revalidate their original binding.
         _validate_decision_identity(decision)
         if strategy_ref != spec.strategy_ref:
             raise ValueError("strategy_ref does not match the admitted operating spec")
         if decision.run_id != admission.execution_run_id:
             raise ValueError("strategy Decision does not belong to the admitted execution run")
-        if decision.final_action not in {"ENTER", "EXIT"} and not _is_native_leader_position_action(spec, profile, decision, plan, position_action_ref):
+        if ((selected_context is not None and decision.final_action not in {'EXIT', 'REDUCE'})
+                or decision.final_action not in {"ENTER", "EXIT"} and not _is_native_leader_position_action(
+                    spec, profile, decision, plan, position_action_ref, policy_family=policy_family)):
             gate = assess_mock_automation_decision(
                 spec, admission, lease, recovered, decision, recovery, metrics,
                 strategy_ref=strategy_ref, latest_stop=latest_stop, control=control,
@@ -766,10 +894,12 @@ def dispatch_mock_automation_decision(
                 risk_reconciliation_revision=risk_reconciliation_revision,
                 plan=plan,
                 position_action_ref=position_action_ref,
+                selected_management_context=selected_context, policy_family=policy_family,
             )
             repository.save_mock_automation_decision_gate(gate)
             return gate, None, None
-        expected_intent = _intent_for_decision(spec, admission, decision, family_id=profile.family_version if profile is not None else None)
+        expected_intent = _intent_for_decision(spec, admission, decision,
+            family_id=profile.family_version if profile is not None else policy_family)
         if plan is not None:
             expected_intent = PlannedOrderIntent(**asdict(expected_intent), plan=plan)
         if protection_exit_id is not None:
@@ -787,6 +917,8 @@ def dispatch_mock_automation_decision(
             if (gate is None or gate.admission_id != admission.admission_id or gate.plan != plan
                     or gate.position_action_ref != position_action_ref):
                 raise RuntimeError("existing automation intent has no approved decision gate")
+            if selected_context is not None and gate.lease_receipt_id != lease.receipt_id:
+                raise RuntimeError('selected management cannot reuse a source submission approval')
             receipt = repository.load_mock_automation_dispatch_receipt(
                 account_ref, existing.intent.intent_id,
             )
@@ -801,16 +933,20 @@ def dispatch_mock_automation_decision(
 
         gate = (repository.load_mock_automation_approved_gate(account_ref, expected_intent.intent_id)
                 if plan is not None else None)
+        if gate is not None and selected_context is not None and gate.lease_receipt_id != lease.receipt_id:
+            raise RuntimeError('selected management cannot reuse a source submission approval')
         if gate is None:
             gate = assess_mock_automation_decision(
                 spec, admission, lease, recovered, decision, recovery, metrics,
                 strategy_ref=strategy_ref, latest_stop=latest_stop, control=control,
-                in_flight_order_count=len(runtime.load_active_intents()),
+                in_flight_order_count=_in_flight_for_spec(runtime.load_active_intents(),
+                    spec, admission, recovered, control),
                 profile=profile, server_now=server_now,
                 risk_snapshot_id=risk_snapshot_id,
                 risk_reconciliation_revision=risk_reconciliation_revision,
                 plan=plan,
                 position_action_ref=position_action_ref,
+                selected_management_context=selected_context, policy_family=policy_family,
             )
             repository.save_mock_automation_decision_gate(gate)
         elif (gate.plan != plan or gate.admission_id != admission.admission_id
@@ -871,6 +1007,7 @@ def assess_mock_automation_decision_from_risk(
     spec, profile, admission, lease, recovered, latest_stop, control, metrics, now, in_flight = _native_gate_context(
         repository, runtime, recovery, risk, account_ref, spec_id,
     )
+    selected_context, policy_family = _selected_management_gate_policy(repository, spec, admission, lease, plan)
     return assess_mock_automation_decision(
         spec, admission, lease, recovered, decision, recovery, metrics,
         strategy_ref=strategy_ref, latest_stop=latest_stop, control=control,
@@ -878,6 +1015,7 @@ def assess_mock_automation_decision_from_risk(
         risk_snapshot_id=risk.snapshot_id, risk_reconciliation_revision=risk.reconciliation_revision,
         plan=plan,
         position_action_ref=position_action_ref,
+        selected_management_context=selected_context, policy_family=policy_family,
     )
 
 
@@ -893,16 +1031,17 @@ def _native_gate_context(repository, runtime, recovery, risk, account_ref, spec_
         if runtime.account_ref != account_ref or runtime.run_id != admission.execution_run_id:
             raise ValueError('mock automation runtime does not match its admission')
         reader_args = {} if reader is None else {'_reader': reader}
-        repository.revalidate_stored_mock_automation_spec(spec, profile, **reader_args)
+        if getattr(repository, 'selected_management_context', None) is None:
+            repository.revalidate_stored_mock_automation_spec(spec, profile, **reader_args)
         scoped_reader = getattr(type(runtime), 'active_intent_reader_for', None)
         load_active = (scoped_reader(runtime, repository)
                        if reader is not None and callable(scoped_reader) else None)
         if load_active is not None:
             now = runtime.server_now()
-            in_flight = len(load_active(_reader=reader))
+            in_flight = _in_flight_for_spec(load_active(_reader=reader), spec, admission, recovered, control)
     if load_active is None:
         now = runtime.server_now()
-        in_flight = len(runtime.load_active_intents())
+        in_flight = _in_flight_for_spec(runtime.load_active_intents(), spec, admission, recovered, control)
     return spec, profile, admission, lease, recovered, stop, control, metrics, now, in_flight
 
 
@@ -1300,6 +1439,14 @@ def _validated_risk_metrics_and_admission(repository, runtime, recovery, risk, a
     admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id, **reader_args)
     if admission is None:
         raise ValueError("mock automation admission is missing")
+    selected_context = getattr(repository, 'selected_management_context', None)
+    if selected_context is not None:
+        from kiwoom_monitor.domain.selected_order_evidence import SelectedOrderManagementContext
+        if (not isinstance(selected_context, SelectedOrderManagementContext)
+                or (selected_context.account_ref, selected_context.execution_run_id, selected_context.spec_id,
+                    selected_context.admission_id, selected_context.binding_revision)
+                != (account_ref, runtime.run_id, spec_id, admission.admission_id, risk.binding_revision)):
+            raise ValueError('selected management risk or target epoch changed')
     recovered = repository.load_latest_mock_automation_recovery(
         account_ref, admission.admission_id, **reader_args,
     )
@@ -1325,10 +1472,12 @@ def _validated_risk_metrics_and_admission(repository, runtime, recovery, risk, a
         balance_mismatch_count=risk.balance_mismatch_count,
         data_path=risk.data_path,
         reconciliation_pending=not risk.reconciliation_complete,
-        owned_position_quantities=(risk.owned_for_member(spec_id)
-            if admission.version == MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION else risk.owned_position_quantities),
+        owned_position_quantities=(risk.owned_for_spec(spec_id) if selected_context is not None else
+            risk.owned_for_member(spec_id) if isinstance(recovered, MockAutomationAccountRecoveryDecision)
+            else risk.owned_position_quantities),
         pending_sell_quantities=(risk.pending_sells_for_member(spec_id)
-            if admission.version == MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION else risk.pending_sell_quantities),
+            if isinstance(recovered, MockAutomationAccountRecoveryDecision)
+                or selected_context is not None and risk.member_attribution is not None else risk.pending_sell_quantities),
     )
     return metrics, admission
 
@@ -1417,6 +1566,7 @@ def resume_mock_automation(
     resumed_at: datetime,
     reason: str,
     planned_review_resume_id: str | None = None,
+    planned_review_resume_ids: Mapping[str, str] | None = None,
 ) -> MockAutomationControl:
     """Resume a stopped run only after a newer broker reconciliation was recorded."""
     _require_aware(resumed_at, "resumed_at")
@@ -1438,7 +1588,91 @@ def resume_mock_automation(
     if control is None:
         raise RuntimeError("mock automation control is missing")
     if control.account_selection is not None:
-        raise RuntimeError('mock account resume requires fresh recovery for every selected member')
+        from .mock_automation_admission import MockAutomationAccountResumeControl
+        from .mock_automation_recovery import MockAutomationAccountRecoveryDecision
+        if planned_review_resume_id is not None:
+            raise ValueError('account resume requires member-scoped planned review identities')
+        selection = control.account_selection
+        if (spec_id != selection.primary_spec_id or control.execution_run_id != runtime.run_id
+                or control.active_spec_id != spec_id):
+            raise RuntimeError('mock account resume does not belong to its declared account anchor')
+        if (control.desired_state is not MockAutomationDesiredState.STOPPED
+                and not (control.desired_state is MockAutomationDesiredState.RUNNING and control.entry_resume_required)):
+            raise RuntimeError('mock automation is not stopped')
+        if planned_review_resume_ids is not None and (
+                not isinstance(planned_review_resume_ids, Mapping)
+                or any(identity not in selection.member_spec_ids or type(receipt) is not str
+                       or not receipt.startswith('planned_protection_resume_')
+                       for identity, receipt in planned_review_resume_ids.items())):
+            raise ValueError('account resume contains an invalid member planned review identity')
+        reviews = dict(planned_review_resume_ids or {})
+        scope = getattr(repository, 'mock_automation_read_scope', None)
+        with runtime.automation_decision_guard():
+            with (scope() if callable(scope) else nullcontext()) as reader:
+                args = {} if reader is None else {'_reader': reader}
+                latest = repository.load_mock_automation_control(account_ref, **args)
+                stored_selection = repository.load_mock_automation_account_selection(
+                    account_ref, selection.selection_id, **args)
+                risk = repository.load_latest_mock_automation_risk(account_ref, **args)
+                if latest != control or stored_selection != selection:
+                    raise RuntimeError('mock account resume selection or control changed')
+                if (risk is None or (risk.account_ref, risk.execution_run_id, risk.binding_revision)
+                        != (account_ref, runtime.run_id, selection.binding_revision)
+                        or not risk.reconciliation_complete or risk.submission_unknown_count or risk.balance_mismatch_count
+                        or risk.broker_query_started_at < control.changed_at):
+                    raise RuntimeError('mock account resume requires the current complete broker Risk cut')
+                common_cut = None
+                for member_id in selection.member_spec_ids:
+                    member = repository.load_mock_automation_spec(account_ref, member_id, **args)
+                    admitted = repository.load_mock_automation_admission_for_spec(account_ref, member_id, **args)
+                    if member is None or admitted is None:
+                        raise RuntimeError('mock account resume requires every stored member admission')
+                    receipt = repository.load_mock_automation_lease_for_admission(account_ref, admitted.admission_id, **args)
+                    recovery = repository.load_latest_mock_automation_recovery(account_ref, admitted.admission_id, **args)
+                    retained = getattr(selection, 'retained_admission_ref', lambda _: None)(member_id)
+                    original_standalone = (admitted.version == 'mock_automation_admission/v1' and retained is not None
+                                           and retained.original_selection_id is None)
+                    if (admitted.version != MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION and not original_standalone
+                            or (admitted.account_ref, admitted.execution_run_id, admitted.spec_id)
+                            != (account_ref, runtime.run_id, member_id)
+                            or not selection.matches_admission(spec_id=member_id, admission_id=admitted.admission_id,
+                                original_selection_id=admitted.account_selection_id, execution_run_id=admitted.execution_run_id)
+                            or receipt is None or (receipt.admission_id, receipt.spec_id, receipt.account_ref, receipt.execution_run_id)
+                            != (admitted.admission_id, member_id, account_ref, runtime.run_id)
+                            or not isinstance(recovery, MockAutomationAccountRecoveryDecision)
+                            or (recovery.admission_id, recovery.lease_receipt_id, recovery.spec_id, recovery.account_ref,
+                                recovery.execution_run_id, recovery.account_selection_id, recovery.member_spec_ids)
+                            != (admitted.admission_id, receipt.receipt_id, member_id, account_ref, runtime.run_id,
+                                selection.selection_id, selection.member_spec_ids)
+                            or (recovery.risk_snapshot_id, recovery.risk_reconciliation_revision, recovery.account_as_of)
+                            != (risk.snapshot_id, risk.reconciliation_revision, risk.account_as_of)
+                            or recovery.observed_at < control.changed_at
+                            or recovery.status not in {MockAutomationRecoveryStatus.CLEARED_ORDERS_DISABLED,
+                                                       MockAutomationRecoveryStatus.MANAGE_ONLY_ORDERS_DISABLED}):
+                        raise RuntimeError('mock account resume requires fresh recovery for every selected member')
+                    cut = (recovery.recovery_fingerprint, recovery.observation_input_ref, recovery.observed_at)
+                    if common_cut is not None and cut != common_cut:
+                        raise RuntimeError('mock account member recoveries do not share one broker cut')
+                    common_cut = cut
+                    age = min(selection.limits.maximum_data_gap_seconds, member.maximum_data_gap_seconds)
+                    if (not recovery.observation_input_ref or member.data_path != risk.data_path
+                            or any(not 0 <= (resumed_at - at).total_seconds() <= age
+                                   for at in (risk.observed_at, risk.account_as_of))):
+                        raise RuntimeError('mock account resume broker cut is stale or incompatible')
+                    if selection.allows_entry(member_id):
+                        profile = repository.load_profile(member.strategy_ref, member.forward_profile_id, **args)
+                        repository.revalidate_stored_mock_automation_spec(member, profile, **args)
+            values = dict(version=control.version, account_ref=account_ref, desired_state=MockAutomationDesiredState.RUNNING,
+                control_revision=control.control_revision + 1, active_spec_id=selection.primary_spec_id,
+                execution_run_id=runtime.run_id, changed_at=resumed_at, reason=reason.strip(), account_selection=selection)
+            resumed = (MockAutomationAccountResumeControl(**values, planned_review_resumes=tuple(sorted(reviews.items())))
+                       if reviews else MockAutomationControl(**values))
+            if not repository.save_mock_automation_control(resumed, expected_revision=control.control_revision,
+                                                           resume_owner_token=runtime.owner_token):
+                raise RuntimeError('mock automation control changed before resume')
+        return resumed
+    if planned_review_resume_ids is not None:
+        raise ValueError('member planned review identities require an account selection')
     if (
         control.active_spec_id != spec.spec_id
         or control.execution_run_id != admission.execution_run_id
@@ -1476,6 +1710,62 @@ def resume_mock_automation(
     ):
         raise RuntimeError("mock automation control changed before resume")
     return resumed
+
+
+def commit_mock_automation_account_replacement(repository, runtime, *, account_ref: str,
+        selection_id: str, requested_at: datetime, expected_control_revision: int, reason: str):
+    """Publish one explicit membership CAS after the owner prepared every member."""
+    from kiwoom_monitor.domain.execution_activation import MockAutomationAccountSelectionV2
+    from .mock_automation_admission import MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION
+
+    _require_aware(requested_at, 'requested_at')
+    if not reason.strip():
+        raise ValueError('account replacement reason is required')
+    selection = repository.load_mock_automation_account_selection(account_ref, selection_id)
+    control = repository.load_mock_automation_control(account_ref)
+    if not isinstance(selection, MockAutomationAccountSelectionV2) or control is None:
+        raise ValueError('explicit stored account replacement is required')
+    if (runtime.account_ref != account_ref or runtime.run_id != control.execution_run_id
+            or selection.primary_spec_id != control.active_spec_id):
+        raise ValueError('account replacement must preserve its original runtime and anchor')
+    runtime.set_new_orders_enabled(False)
+    if control.account_selection == selection:
+        if control.control_revision not in {expected_control_revision, expected_control_revision + 1}:
+            raise RuntimeError('mock account control changed after replacement')
+        return control
+    if control.control_revision != expected_control_revision:
+        raise RuntimeError('mock account control changed before replacement')
+    with repository.mock_automation_read_scope() as reader:
+        args = {} if reader is None else {'_reader': reader}
+        risk = repository.load_latest_mock_automation_risk(account_ref, **args)
+        if risk is None:
+            raise RuntimeError('account replacement requires its current Risk cut')
+        cohort = None
+        for identity in selection.member_spec_ids:
+            admission = repository.load_mock_automation_admission_for_spec(account_ref, identity, **args)
+            recovered = (repository.load_latest_mock_automation_recovery(account_ref, admission.admission_id, **args)
+                         if admission is not None else None)
+            if (admission is None or not selection.matches_admission(spec_id=identity, admission_id=admission.admission_id,
+                    original_selection_id=admission.account_selection_id, execution_run_id=admission.execution_run_id)
+                    or not isinstance(recovered, MockAutomationAccountRecoveryDecision)
+                    or recovered.account_selection_id != selection_id or recovered.member_spec_ids != selection.member_spec_ids
+                    or recovered.execution_run_id != runtime.run_id
+                    or (recovered.risk_snapshot_id, recovered.risk_reconciliation_revision, recovered.account_as_of)
+                    != (risk.snapshot_id, risk.reconciliation_revision, risk.account_as_of)
+                    or recovered.status is MockAutomationRecoveryStatus.BLOCKED):
+                raise RuntimeError('account replacement requires fresh recovery for every selected member')
+            actual = (recovered.observation_input_ref, recovered.recovery_fingerprint, recovered.observed_at)
+            if not recovered.observation_input_ref or cohort is not None and cohort != actual:
+                raise RuntimeError('account replacement member recovery cut changed')
+            cohort = actual
+    replacement = replace(control, version=MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION,
+        account_selection=selection, control_revision=control.control_revision + 1,
+        changed_at=requested_at, reason=reason.strip())
+    if not repository.replace_mock_automation_control(replacement, expected_revision=control.control_revision,
+            expected_selection_id=(control.account_selection.selection_id if control.account_selection is not None else None),
+            owner_token=runtime.owner_token):
+        raise RuntimeError('mock account control changed during replacement')
+    return replacement
 
 
 def mock_automation_decision_gate_from_dict(value: Mapping[str, Any]) -> MockAutomationDecisionGate:
@@ -1550,7 +1840,8 @@ def _load_context(
     spec = repository.load_mock_automation_spec(account_ref, spec_id, **spec_args, **reader_args)
     if spec is None:
         raise ValueError("mock automation operating spec is not stored")
-    profile = repository.load_profile(spec.strategy_ref, spec.forward_profile_id, **reader_args)
+    profile = (repository.load_profile(spec.strategy_ref, spec.forward_profile_id, **reader_args)
+               if getattr(repository, 'selected_management_context', None) is None else None)
     if admission is None:
         admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id, **reader_args)
     if admission is None:
@@ -1571,6 +1862,7 @@ def _load_context(
         account_ref, admission.admission_id, **reader_args,
     )
     control = repository.load_mock_automation_control(account_ref, **reader_args)
+    _selected_management_gate_policy(repository, spec, admission, lease)
     return spec, profile, admission, lease, recovery, latest_stop, control
 
 

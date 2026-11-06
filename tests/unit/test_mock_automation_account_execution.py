@@ -8,6 +8,19 @@ import unittest
 from unittest.mock import patch
 
 
+def native_account_observation(owner, recovery, risk):
+    """Use current native records in the same single-threaded synthetic cut."""
+    from kiwoom_monitor.application.position_target import reconcile_position_account_observation
+    revision = owner.runtime.observation_revision
+    active, complete = owner.execution.account_active_intents(owner.runtime.account_ref)
+    observation = reconcile_position_account_observation(recovery, active, active,
+        input_ref='native-test-account-cut:' + risk.snapshot_id, observed_at=risk.observed_at,
+        ledger_complete=complete,
+        runtime_stable=revision == owner.runtime.observation_revision and not owner.runtime.observation_in_progress,
+        reconciled_records=active)
+    return replace(observation, risk_snapshot=risk)
+
+
 def grouped_inputs(case, store, *, capital=150_000):
     from tests.unit import test_mock_automation_specification as support
     from kiwoom_monitor.application.mock_automation_candidate import evaluate_candidate_eligibility
@@ -139,7 +152,8 @@ def group_planned_inputs(case, store, *, capital=150_000, limits=None):
     planned = []
     for number, spec in enumerate(data.specs):
         record_mock_automation_recovery_from_risk(data.repository, owner.runtime, recovery, risk,
-            account_ref=account.account_ref, spec_id=spec.spec_id)
+            account_ref=account.account_ref, spec_id=spec.spec_id,
+            observation=native_account_observation(owner, recovery, risk))
         decision = support._automation_decision(owner.run_id, 'ENTER', owner.clock[0]-timedelta(milliseconds=number))
         plan = OrderPlanRef('account-plan-'+str(number), 'explicit-synthetic-plan/v1', 0)
         gate = assess_mock_automation_decision_from_risk(data.repository, owner.runtime, decision, recovery, risk,
@@ -211,7 +225,8 @@ def verify_group_native_fill_isolation(case, store):
     data.repository.save_mock_automation_risk_snapshot(risk)
     for spec in data.specs:
         record_mock_automation_recovery_from_risk(data.repository, owner.runtime, recovery, risk,
-            account_ref=owner.runtime.account_ref, spec_id=spec.spec_id)
+            account_ref=owner.runtime.account_ref, spec_id=spec.spec_id,
+            observation=native_account_observation(owner, recovery, risk))
     def head(plan):
         return store.load_document('execution_mock_plan_positions', owner.runtime.account_ref, plan.plan_id)['document']
     plans = [replace(item[2].plan, expected_revision=head(item[2].plan)['revision']) for item in planned]
@@ -308,6 +323,178 @@ def verify_group_stop(case, store):
     case.assertFalse(owner.runtime._new_orders_enabled)
 
 
+def verify_group_native_peer_reservation(case, store, *, available_cash_won=140_000):
+    from tests.unit.test_mock_automation_account_recovery import verify_account_recovery_peer_order, record_members
+    from tests.unit.test_mock_automation_specification import _automation_decision
+    from kiwoom_monitor.application.mock_automation_risk import build_mock_automation_risk_snapshot
+    from kiwoom_monitor.application.position_target import reconcile_position_account_observation
+    from kiwoom_monitor.application.mock_automation_execution import (
+        assess_mock_automation_decision_from_risk, dispatch_mock_automation_decision_from_risk)
+    from kiwoom_monitor.domain.order_contract import OrderPlanRef, OrderState
+    data, cut, first = verify_account_recovery_peer_order(case, store)
+    owner = data.owner
+    owner.clock[0] += timedelta(milliseconds=1)
+    recovery = replace(cut['recovery'], account=replace(cut['recovery'].account,
+        available_cash_won=available_cash_won, as_of=owner.clock[0]))
+    active, complete = owner.execution.account_active_intents(owner.runtime.account_ref)
+    events = owner.execution.account_events('mock', owner.runtime.account_ref).events
+    risk = build_mock_automation_risk_snapshot(recovery, events, (), active,
+        execution_run_id=owner.run_id, binding_revision=data.selection.binding_revision,
+        reconciliation_revision=cut['risk'].reconciliation_revision + 1, observed_at=owner.clock[0],
+        broker_query_started_at=owner.clock[0], broker_query_completed_at=owner.clock[0])
+    data.repository.save_mock_automation_risk_snapshot(risk)
+    observation = reconcile_position_account_observation(recovery, active, active,
+        input_ref='native-peer-reservation-boundary', observed_at=owner.clock[0], ledger_complete=complete,
+        runtime_stable=True, reconciled_records=active)
+    observation = replace(observation, risk_snapshot=risk)
+    record_members(data, dict(recovery=recovery, risk=risk, observation=observation))
+    spec = data.specs[1]
+    decision = _automation_decision(owner.run_id, 'ENTER', owner.clock[0])
+    plan = OrderPlanRef('peer-reservation-plan', 'explicit-reservation-boundary/v1', 0)
+    gate = assess_mock_automation_decision_from_risk(data.repository, owner.runtime, decision, recovery, risk,
+        account_ref=owner.runtime.account_ref, spec_id=spec.spec_id, strategy_ref=spec.strategy_ref, plan=plan)
+    original = owner.execution.load(first.intent.intent_id)
+    case.assertEqual(70_000, recovery.account.reserved_open_buy_won)
+    case.assertEqual(70_000, decision.required_capital_won)
+    if available_cash_won == 140_000:
+        case.assertEqual('APPROVED_FOR_SINGLE_SUBMISSION', gate.status.value, gate.reasons)
+        _, second, _ = dispatch_mock_automation_decision_from_risk(data.repository, owner.runtime,
+            decision, recovery, risk, account_ref=owner.runtime.account_ref, spec_id=spec.spec_id,
+            strategy_ref=spec.strategy_ref, plan=plan)
+        case.assertIsNotNone(second)
+        case.assertEqual(OrderState.ACCEPTED, second.state)
+        case.assertEqual(2, len(owner.transport.calls))
+    else:
+        case.assertEqual('BLOCKED', gate.status.value)
+        case.assertIn('INSUFFICIENT_AVAILABLE_CASH', gate.reasons)
+        _, second, _ = dispatch_mock_automation_decision_from_risk(data.repository, owner.runtime,
+            decision, recovery, risk, account_ref=owner.runtime.account_ref, spec_id=spec.spec_id,
+            strategy_ref=spec.strategy_ref, plan=plan)
+        case.assertIsNone(second)
+        case.assertIsNone(store.load_document('execution_mock_plan_positions', owner.runtime.account_ref, plan.plan_id))
+        case.assertEqual(1, len(owner.transport.calls))
+    case.assertEqual(original, owner.execution.load(first.intent.intent_id))
+    case.assertFalse(owner.runtime._new_orders_enabled)
+
+
+def verify_group_native_unknown_boundary(case, store, *, already_queued=False):
+    from tests.unit import test_mock_automation_specification as support
+    from kiwoom_monitor.domain.order_contract import BrokerFill, BrokerOrderSnapshot, OrderState
+    from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import SubmissionUnknown
+    original = support.mock_specification_inputs
+    def explicit_member_limit(*args, **kwargs):
+        value = original(*args, **kwargs)
+        value.spec = replace(value.spec, maximum_submission_unknown_count=1)
+        return value
+    # The actual READY publisher freezes member=1 and account=0 before either
+    # approval. No persisted spec, gate, Risk or recovery identity is rewritten.
+    with patch.object(support, 'mock_specification_inputs', side_effect=explicit_member_limit):
+        data, owner, recovery, risk, planned = group_planned_inputs(case, store)
+    case.assertEqual(0, data.selection.limits.maximum_submission_unknown_count)
+    case.assertEqual([1, 1], [spec.maximum_submission_unknown_count for spec in data.specs])
+    case.assertEqual(0, risk.submission_unknown_count)
+    def submit(item):
+        member, gate, intent = item
+        return owner.runtime.submit_automation_intent(intent, recovery.account, spec_id=member.spec_id,
+            control_revision=gate.control_revision, plan_recovery=recovery)
+    native_submit = owner.runtime._lifecycle.submit
+    def send_queued(item):
+        member, gate, intent = item
+        owner.execution.bind_automation_control(spec_id=member.spec_id,
+            control_revision=gate.control_revision, plan_recovery=recovery)
+        try:
+            return native_submit(intent.intent_id, recovery.account,
+                after_submission_claim=owner.execution.clear_automation_control)
+        finally:
+            owner.execution.clear_automation_control()
+    if already_queued:
+        # Cut the normal lifecycle after its real QUEUED transactions and before
+        # either network call, then exercise the real native submission phase.
+        with patch.object(owner.runtime._lifecycle, 'submit',
+                          side_effect=lambda identity, *_args, **_kwargs: owner.execution.load(identity)):
+            for item in planned:
+                case.assertEqual(OrderState.QUEUED, submit(item).state)
+    with patch.object(owner.transport, 'submit', side_effect=SubmissionUnknown('synthetic response lost')) as transport:
+        first = send_queued(planned[0]) if already_queued else submit(planned[0])
+        case.assertEqual(OrderState.SUBMISSION_UNKNOWN, first.state)
+        case.assertEqual(1, transport.call_count)
+        member, gate, second = planned[1]
+        def retained():
+            return (owner.execution.load(second.intent_id), owner.execution.events(second.intent_id),
+                    store.load_document('execution_mock_plan_positions', owner.runtime.account_ref,
+                                        second.plan.plan_id))
+        before = retained()
+        first_head = store.load_document('execution_mock_plan_positions', owner.runtime.account_ref,
+                                        first.intent.plan.plan_id)
+        with case.assertRaisesRegex(RuntimeError, 'MOCK_ACCOUNT_SUBMISSION_UNKNOWN_LIMIT'):
+            send_queued(planned[1]) if already_queued else submit(planned[1])
+        case.assertEqual(before, retained())
+        case.assertEqual(first_head, store.load_document('execution_mock_plan_positions', owner.runtime.account_ref,
+                                                        first.intent.plan.plan_id))
+        case.assertFalse(any(event['event_type'] == 'SUBMISSION_STARTED'
+                             for event in owner.execution.events(second.intent_id)))
+        for _ in range(2):
+            case.assertEqual(first, submit(planned[0]))
+        case.assertEqual(1, transport.call_count)
+    case.assertEqual([], owner.transport.calls)
+    owner.clock[0] += timedelta(milliseconds=1)
+    owner.runtime.reconcile(first.intent.intent_id, BrokerOrderSnapshot('late-unknown-original',
+        owner.runtime.account_ref, first.intent.symbol, OrderState.FILLED, 1, 0, owner.clock[0],
+        (BrokerFill('late-detailed-original', 1, first.intent.limit_price, owner.clock[0]),)))
+    head = store.load_document('execution_mock_plan_positions', owner.runtime.account_ref,
+                               first.intent.plan.plan_id)['document']
+    case.assertEqual((1, [[1, first.intent.limit_price]]), (head['quantity'], head['capital_lots']))
+    case.assertEqual(OrderState.FILLED, submit(planned[0]).state)
+    case.assertEqual([], owner.transport.calls)
+    case.assertFalse(owner.runtime._new_orders_enabled)
+
+
+async def verify_group_peer_current_management(case, factory=None):
+    from tests.unit.test_mock_automation_parallel_strategies import first_parallel_buys, deliver_price
+    from kiwoom_monitor.application.minute_order_management import verified_current_order_peers
+    from kiwoom_monitor.domain.order_contract import OrderState
+    data, original = await first_parallel_buys(case, factory)
+    await data.bundle.monitor.refresh_recovery()
+    cut = data.bundle.monitor.latest_automation_execution_cut
+    records = cut['observation'].open_orders
+    own = next(row for row in records if row.member_spec_id == data.specs[0].spec_id)
+    peer = next(row for row in records if row.member_spec_id == data.specs[1].spec_id)
+    control = data.repository.load_mock_automation_control(data.runtime.account_ref)
+    for invalid in (replace(peer, state=OrderState.SUBMISSION_UNKNOWN),
+                    replace(peer, member_spec_id=None),
+                    replace(peer, intent=replace(peer.intent, run_id='foreign-run'))):
+        with case.subTest(state=invalid.state, member=invalid.member_spec_id), case.assertRaises(ValueError):
+            verified_current_order_peers(own, cut['recovery'], cut['risk'], (own, invalid), control)
+    await deliver_price(data, 1002)
+    case.assertEqual(2, sum(row[0] == 'AMEND' for row in data.book.mutations),
+                     ([episode.status for episode in data.episodes], data.book.mutations))
+    case.assertEqual(2, len(data.transport.calls))
+    for row in original:
+        current = data.execution.load(row.intent.intent_id)
+        case.assertEqual(row.intent.plan, current.intent.plan)
+        case.assertIsNotNone(current.amendment)
+        case.assertTrue(any(event['event_type'] == 'AMENDMENT_STARTED'
+                            for event in data.execution.events(row.intent.intent_id)))
+        claim = current.amendment.assessment
+        case.assertEqual(data.selection.selection_id, claim['verified_peer_orders']['account_selection_id'])
+        case.assertTrue(claim['verified_peer_orders']['other_member_open_order_ids'])
+    data.settings = {**data.settings, 'revision': 2, 'shadow_candidate_enabled': False}
+    data.live = {**data.live, 'enabled': False}
+    data.store.upsert_documents('server_operational_settings',
+        [dict(owner='global', key='current', document=data.settings)])
+    for _ in range(3):
+        await deliver_price(data, 1003)
+    case.assertTrue(any(row[0] == 'CANCEL' for row in data.book.mutations))
+    case.assertTrue(all(row['remaining'] == 0 for row in data.book.rows.values()))
+    case.assertEqual(2, len(data.transport.calls))
+    case.assertFalse(data.runtime._new_orders_enabled)
+
+
+class MockAccountPeerCurrentOrderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_actual_leader_and_close_pending_orders_amend_and_cancel_without_hiding_peer_coverage(self):
+        await verify_group_peer_current_management(self)
+
+
 class MockAccountExecutionTests(unittest.TestCase):
     def setUp(self):
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
@@ -318,6 +505,18 @@ class MockAccountExecutionTests(unittest.TestCase):
 
     def test_two_members_obtain_one_account_authority_and_retry_without_orders(self):
         verify_group_admission(self, self.store)
+
+    def test_actual_peer_unknown_rechecks_stricter_account_limit_before_second_plan_claim(self):
+        verify_group_native_unknown_boundary(self, self.store)
+
+    def test_actual_peer_unknown_rechecks_stricter_account_limit_before_queued_submission(self):
+        verify_group_native_unknown_boundary(self, self.store, already_queued=True)
+
+    def test_verified_physical_peer_reservation_is_charged_once_at_exact_cash_boundary(self):
+        verify_group_native_peer_reservation(self, self.store)
+
+    def test_verified_peer_reservation_one_won_short_still_blocks_new_entry(self):
+        verify_group_native_peer_reservation(self, self.store, available_cash_won=139_999)
 
     def test_current_source_is_rechecked_before_any_member_admission_or_lease(self):
         from kiwoom_monitor.application.mock_automation_admission import admit_mock_automation_account_selection

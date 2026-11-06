@@ -195,6 +195,11 @@ class JournalExecutionProjectionEvent:
     plan: OrderPlanRef | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class MemberJournalExecutionProjectionEvent(JournalExecutionProjectionEvent):
+    member_spec_id: str
+
+
 @dataclass(frozen=True)
 class JournalExecutionProjectionPage:
     projection_name: str
@@ -681,7 +686,11 @@ def _journal_execution_projection_event(
     content_hash = hashlib.sha256(json.dumps(
         content, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
-    return JournalExecutionProjectionEvent(
+    member = source.get("member_spec_id")
+    if "member_spec_id" in source and (type(member) is not str or not member.strip()):
+        raise ValueError("invalid execution projection member reference")
+    event_type_class = MemberJournalExecutionProjectionEvent if member is not None else JournalExecutionProjectionEvent
+    return event_type_class(
         source_event_id,
         int(source["accepted_sequence"]),
         event_type,
@@ -702,6 +711,7 @@ def _journal_execution_projection_event(
         fill_identity,
         content_hash,
         plan,
+        **({"member_spec_id": member} if member is not None else {}),
     )
 
 

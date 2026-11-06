@@ -1,6 +1,5 @@
 """Operational settings HTTP policy and saved/applied state; native services retain their work."""
 import asyncio
-import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TYPE_CHECKING
@@ -145,6 +144,7 @@ def create_operational_settings_routers(
         external_market_roll_confirmations: int | None = Field(default=None, ge=1, le=100, strict=True)
         shadow_candidate_enabled: bool | None = None
         shadow_candidate_config: dict[str, Any] | None = None
+        shadow_candidate_configs: dict[str, dict[str, Any]] | None = None
         shadow_candidate_poll_seconds: float | None = Field(default=None, ge=0.5, le=60)
         shadow_candidate_universe_max_age_seconds: int | None = Field(default=None, ge=1, le=3600)
 
@@ -189,11 +189,19 @@ def create_operational_settings_routers(
             if proposed["external_market_enabled"] and external_market_service is None:
                 raise HTTPException(status_code=422, detail="EXTERNAL_MARKET_SYMBOLS_REQUIRED")
             shadow_fields = {
-                "shadow_candidate_enabled", "shadow_candidate_config",
+                "shadow_candidate_enabled", "shadow_candidate_config", "shadow_candidate_configs",
                 "shadow_candidate_poll_seconds",
                 "shadow_candidate_universe_max_age_seconds",
             }
             shadow_config = proposed["shadow_candidate_config"]
+            if "shadow_candidate_configs" in changes:
+                from .candidate_monitor import CandidateMonitor
+
+                try:
+                    proposed["shadow_candidate_configs"] = CandidateMonitor.normalize_configs(
+                        proposed["shadow_candidate_configs"])
+                except (TypeError, ValueError) as error:
+                    raise HTTPException(status_code=422, detail=str(error)) from error
             if ("shadow_candidate_config" in changes and isinstance(shadow_config, dict)
                     and shadow_config.get("version") == MINUTE_SHADOW_VERSION):
                 from kiwoom_monitor.application.section12_minute_research import MinuteShadowConfig
@@ -206,16 +214,17 @@ def create_operational_settings_routers(
             external_changed = recovery_required or any(
                 name in changes and proposed[name] != operational[name] for name in external_fields)
             shadow_changed = recovery_required or any(
-                name in changes and proposed[name] != operational[name] for name in shadow_fields
+                name in changes and proposed[name] != operational.get(name) for name in shadow_fields
             )
             replacement = state.candidate_monitor
             if shadow_changed and bool(proposed["shadow_candidate_enabled"]):
                 try:
                     from .candidate_monitor import CandidateMonitor
                     replacement = await asyncio.to_thread(
-                        CandidateMonitor.from_json,
+                        CandidateMonitor.from_settings,
                         store,
-                        json.dumps(proposed["shadow_candidate_config"]),
+                        proposed,
+                        previous=state.candidate_monitor,
                         poll_seconds=float(proposed["shadow_candidate_poll_seconds"]),
                         universe_max_age_seconds=int(
                             proposed["shadow_candidate_universe_max_age_seconds"]

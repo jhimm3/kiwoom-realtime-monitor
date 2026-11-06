@@ -106,19 +106,33 @@ class _KiwoomAccountReader:
         self._now = now_provider or (lambda: datetime.now(KST))
 
     async def read(self) -> AccountRecovery:
-        unfilled_pages = await self._pages(
-            UNFILLED_API_ID, {"all_stk_tp": "0", "trde_tp": "0", "stex_tp": self._order_market},
-        )
-        unfilled_as_of = self._aware_now()
-        filled_pages = await self._pages(
-            FILLED_API_ID, {"qry_tp": "0", "sell_tp": "0", "stex_tp": self._order_market, "ord_no": ""},
-        )
-        filled_as_of = self._aware_now()
+        unfilled_pages, unfilled_as_of, filled_pages, filled_as_of = await self.read_order_pages()
         balance_pages = ()
         for market in self._balance_markets:
             balance_pages += await self._pages(BALANCE_API_ID, {"qry_tp": "1", "dmst_stex_tp": market})
         deposit_pages = await self._pages(DEPOSIT_API_ID, {"qry_tp": "3"})
         deposit_as_of = self._aware_now()
+
+        return self._recovery_from_pages(unfilled_pages, unfilled_as_of, filled_pages, filled_as_of,
+                                         balance_pages, deposit_pages, deposit_as_of)
+
+    async def read_order_pages(self, *, strict_continuation=False):
+        """Borrow the existing order paging/clock without unnecessary balance reads."""
+        options = {'strict_continuation': True} if strict_continuation else {}
+        unfilled_pages = await self._pages(
+            UNFILLED_API_ID, {"all_stk_tp": "0", "trde_tp": "0", "stex_tp": self._order_market},
+            **options,
+        )
+        unfilled_as_of = self._aware_now()
+        filled_pages = await self._pages(
+            FILLED_API_ID, {"qry_tp": "0", "sell_tp": "0", "stex_tp": self._order_market, "ord_no": ""},
+            **options,
+        )
+        filled_as_of = self._aware_now()
+        return unfilled_pages, unfilled_as_of, filled_pages, filled_as_of
+
+    def _recovery_from_pages(self, unfilled_pages, unfilled_as_of, filled_pages, filled_as_of,
+                              balance_pages, deposit_pages, deposit_as_of):
 
         if self._environment == "real":
             venues = {}
@@ -175,7 +189,7 @@ class _KiwoomAccountReader:
             "frgn_stex_code": "", "dmst_stex_tp": "%", "qry_sort_tp": "1",
         })
 
-    async def _pages(self, api_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    async def _pages(self, api_id: str, body: dict[str, Any], *, strict_continuation=False) -> tuple[dict[str, Any], ...]:
         pages: list[dict[str, Any]] = []
         cont_yn = "N"
         next_key = ""
@@ -186,7 +200,7 @@ class _KiwoomAccountReader:
             )
             if not isinstance(result.payload, dict):
                 raise ValueError(f"{api_id} response payload must be an object")
-            if self._environment == "real":
+            if self._environment == "real" or strict_continuation:
                 table = {UNFILLED_API_ID: "oso", FILLED_API_ID: "cntr",
                          BALANCE_API_ID: "acnt_evlt_remn_indv_tot"}.get(api_id)
                 if table is not None and not isinstance(result.payload.get(table), list):
@@ -196,7 +210,7 @@ class _KiwoomAccountReader:
                 return tuple(pages)
             if not str(result.next_key).strip():
                 raise ValueError(f"{api_id} continuation response is missing next_key")
-            if self._environment == "real" and str(result.next_key) in seen_keys:
+            if (self._environment == "real" or strict_continuation) and str(result.next_key) in seen_keys:
                 raise ValueError(f"{api_id} continuation cursor repeated")
             seen_keys.add(str(result.next_key))
             cont_yn, next_key = "Y", str(result.next_key)
@@ -214,6 +228,16 @@ class KiwoomMockAccountReader(_KiwoomAccountReader):
         if environment != "mock":
             raise ValueError("mock account reader requires mock credentials")
         super().__init__(broker, environment=environment, account_ref=account_ref, now_provider=now_provider)
+
+    async def read_dated_order_pages(self, api_id: str, day: date, *, symbol: str):
+        """Two documented dated account reads through the existing mock REST queue."""
+        if api_id not in {'kt00007', 'kt00009'} or type(day) is not date:
+            raise ValueError('dated order evidence requires kt00007/kt00009 and an explicit date')
+        body = dict(ord_dt=day.strftime('%Y%m%d'), stk_bond_tp='1', sell_tp='0',
+            stk_cd=normalize_stock_code(symbol), fr_ord_no='', dmst_stex_tp='KRX')
+        body.update(qry_tp='1' if api_id == 'kt00007' else '0')
+        if api_id == 'kt00009': body['mrkt_tp'] = '0'
+        return await self._pages(api_id, body, strict_continuation=True)
 
 
 class KiwoomRealAccountReader(_KiwoomAccountReader):

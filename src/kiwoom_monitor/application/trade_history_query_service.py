@@ -47,6 +47,11 @@ class TradeHistoryQueryResult:
     execution_plans: Mapping[TradeFill, OrderPlanRef] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, kw_only=True)
+class MemberTradeHistoryQueryResult(TradeHistoryQueryResult):
+    execution_members: Mapping[TradeFill, str]
+
+
 @dataclass(frozen=True)
 class TradeHistorySelection:
     stock_code: str
@@ -77,6 +82,11 @@ class ExecutionFillEvidence:
     decision_id: str
     fill: TradeFill
     plan: OrderPlanRef | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class MemberExecutionFillEvidence(ExecutionFillEvidence):
+    member_spec_id: str
 
 
 @dataclass(frozen=True)
@@ -192,15 +202,24 @@ class TradeHistoryQueryService:
             if any(start <= fill.filled_at < end for fill in episode.fills)
         )
         plans = {}
+        members = {}
         if fills and account_scope is not None and account_scope.environment is AccountEnvironment.MOCK:
-            details = self._repository.load_execution_fill_projections(account_scope, start, end)
-            if any("plan" in row for row in details):
-                visible = tuple(fill for fill in fills if start <= fill.filled_at < end)
+            visible = tuple(fill for episode in episodes for fill in episode.fills) or fills
+            context_start = min(start, min(fill.filled_at for fill in visible))
+            details = self._repository.load_execution_fill_projections(account_scope, context_start, end)
+            if any("plan" in row or "member_spec_id" in row for row in details):
                 for group in reconcile_trade_fills(visible, details, account_scope).groups:
                     if group.status == "EXACT":
                         plan, *other = (evidence.plan for evidence in group.detailed_fills)
                         if plan is not None and all(value == plan for value in other):
                             plans.update((fill, plan) for fill in group.summary_fills)
+                        member, *other_members = (
+                            getattr(evidence, "member_spec_id", None) for evidence in group.detailed_fills
+                        )
+                        if member is not None and all(value == member for value in other_members):
+                            members.update((fill, member) for fill in group.summary_fills)
+        if members:
+            return MemberTradeHistoryQueryResult(fills, costs, episodes, plans, execution_members=members)
         return TradeHistoryQueryResult(fills, costs, episodes, plans)
 
     def load_reconciled(
@@ -492,7 +511,11 @@ def _execution_fill_evidence(
         origin_scope=origin,
         canonical_scope=canonical,
     )
-    return ExecutionFillEvidence(
+    member = row.get("member_spec_id")
+    if "member_spec_id" in row and (type(member) is not str or not member.strip()):
+        raise ValueError("execution fill member reference is invalid")
+    evidence_type = MemberExecutionFillEvidence if member is not None else ExecutionFillEvidence
+    return evidence_type(
         source_event_id=str(row["source_event_id"]),
         broker_execution_id=str(row["broker_execution_id"]),
         intent_id=str(row.get("intent_id") or ""),
@@ -500,14 +523,17 @@ def _execution_fill_evidence(
         decision_id=str(row.get("decision_id") or ""),
         fill=fill,
         plan=OrderPlanRef(**row["plan"]) if "plan" in row else None,
+        **({"member_spec_id": member} if member is not None else {}),
     )
 
 
 def _evidence_content(evidence: ExecutionFillEvidence) -> tuple[object, ...]:
     fill = evidence.fill
-    return (
+    content = (
         fill.stock_code, fill.side, fill.filled_at, fill.quantity, fill.price, fill.market,
     )
+    member = getattr(evidence, "member_spec_id", None)
+    return content + ((member,) if member is not None else ())
 
 
 def _fill_totals(fills: tuple[TradeFill, ...]) -> tuple[int, int]:

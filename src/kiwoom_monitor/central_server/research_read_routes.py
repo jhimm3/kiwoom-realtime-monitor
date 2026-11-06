@@ -108,6 +108,32 @@ def create_research_read_router(
         )
         return {**result, "order_authorized": False}
 
+    @router.post('/api/v1/research/micro-inputs', dependencies=[Depends(authorize)])
+    async def research_micro_frozen_inputs(
+        request: Request, evidence_sha256: str = Query(pattern=r'^[0-9a-f]{64}$'),
+    ) -> dict[str, object]:
+        from kiwoom_monitor.application.micro_execution_evidence import (
+            MICRO_FROZEN_EVIDENCE_VERSION, replay_micro_execution,
+        )
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAX_REPORTED_RESEARCH_RESULT_BYTES:
+                raise HTTPException(status_code=413, detail='MICRO research evidence exceeds publication budget')
+            body.extend(chunk)
+        if hashlib.sha256(body).hexdigest() != evidence_sha256:
+            raise HTTPException(status_code=422, detail='MICRO research evidence SHA256 does not match')
+        try:
+            document = json.loads(body)
+            if (not isinstance(document, dict) or set(document) != {'scenario', 'policy'}
+                    or not isinstance(document['scenario'], dict)
+                    or document['scenario'].get('version') != MICRO_FROZEN_EVIDENCE_VERSION):
+                raise ValueError('invalid MICRO frozen research descriptor')
+            result = replay_micro_execution(document['scenario'], document['policy'])
+        except (UnicodeError, ValueError, TypeError, KeyError, RecursionError) as error:
+            raise HTTPException(status_code=422, detail='invalid MICRO frozen research descriptor') from error
+        return {**result, 'execution_scope': 'frozen_micro_execution_research',
+                'evidence_sha256': evidence_sha256, 'candidate': None, 'order_authorized': False}
+
     @router.post("/api/v1/research/daily-decline-setup", dependencies=[Depends(authorize)])
     async def research_daily_decline_setup(
         request: Request, evidence_sha256: str = Query(pattern=r"^[0-9a-f]{64}$"),

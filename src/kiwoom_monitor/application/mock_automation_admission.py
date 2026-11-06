@@ -99,6 +99,33 @@ class MockAutomationControl:
 
 
 @dataclass(frozen=True)
+class MockAutomationAccountResumeControl(MockAutomationControl):
+    """Durable member review receipts without changing standalone control fields."""
+    planned_review_resumes: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self):
+        super().__post_init__()
+        if (self.account_selection is None or self.planned_review_resume_id is not None
+                or type(self.planned_review_resumes) is not tuple or not self.planned_review_resumes
+                or any(type(row) is not tuple or len(row) != 2 for row in self.planned_review_resumes)
+                or any(type(row) is not tuple or len(row) != 2
+                    or type(row[0]) is not str or row[0] not in self.account_selection.member_spec_ids
+                    or type(row[1]) is not str or not row[1].startswith('planned_protection_resume_')
+                    for row in self.planned_review_resumes)
+                or tuple(sorted(self.planned_review_resumes)) != self.planned_review_resumes
+                or len({row[0] for row in self.planned_review_resumes}) != len(self.planned_review_resumes)):
+            raise ValueError('invalid account planned protection resume identities')
+
+    @property
+    def planned_review_resume_ids(self):
+        return dict(self.planned_review_resumes)
+
+    def to_dict(self):
+        return {**super().to_dict(), **({'planned_review_resume_ids': self.planned_review_resume_ids}
+                if not self.entry_resume_required else {})}
+
+
+@dataclass(frozen=True)
 class MockAutomationAdmission:
     admission_id: str
     version: str
@@ -405,6 +432,8 @@ def admit_mock_automation_account_selection(repository, runtime, *, account_ref:
         raise ValueError('mock account runtime does not match its declared anchor')
     control = repository.load_mock_automation_control(account_ref)
     same = control is not None and control.account_selection == selection
+    if selection.version == 'mock_automation_account_selection/v2' and not same:
+        raise RuntimeError('account replacement requires its explicit membership operation')
     if control is not None and (control.desired_state is not MockAutomationDesiredState.RUNNING
             or control.execution_run_id != run_id or control.active_spec_id != selection.primary_spec_id
             or not same):
@@ -418,11 +447,13 @@ def admit_mock_automation_account_selection(repository, runtime, *, account_ref:
     admissions = []
     for spec_id in selection.member_spec_ids:
         spec = repository.load_mock_automation_spec(account_ref, spec_id, require_canonical_document=True)
-        _verify_final_candidate(repository, spec)
+        if selection.allows_entry(spec_id):
+            _verify_final_candidate(repository, spec)
         existing = repository.load_mock_automation_admission_for_spec(account_ref, spec_id)
         if existing is not None and (existing.execution_run_id != run_id
                 or existing.version != MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION
-                or existing.account_selection_id != selection_id):
+                or not selection.matches_admission(spec_id=spec_id, admission_id=existing.admission_id,
+                    original_selection_id=existing.account_selection_id, execution_run_id=existing.execution_run_id)):
             raise RuntimeError('member already has a different standalone or account admission')
         admissions.append(existing or build_mock_automation_admission(spec,
             requested_at=requested_at, account_selection=selection))
@@ -446,10 +477,69 @@ def admit_mock_automation_account_selection(repository, runtime, *, account_ref:
     return tuple(admissions), tuple(receipts), control
 
 
+def prepare_mock_automation_account_replacement(repository, runtime, *, account_ref: str,
+        selection_id: str, requested_at: datetime, expected_control_revision: int, expected_implementation_hash):
+    """Prepare immutable new admissions; the current control grants them no authority."""
+    from kiwoom_monitor.domain.execution_activation import MockAutomationAccountSelectionV2
+
+    _require_aware(requested_at, 'requested_at')
+    selection = repository.load_mock_automation_account_selection(account_ref, selection_id)
+    control = repository.load_mock_automation_control(account_ref)
+    if not isinstance(selection, MockAutomationAccountSelectionV2) or control is None:
+        raise ValueError('explicit account replacement selection and current control are required')
+    if (runtime.account_ref != account_ref or runtime.run_id != control.execution_run_id
+            or selection.primary_spec_id != control.active_spec_id or requested_at < selection.frozen_at):
+        raise ValueError('account replacement must preserve its original runtime and anchor')
+    same = control.account_selection == selection
+    if control.control_revision not in ({expected_control_revision, expected_control_revision + 1}
+                                       if same else {expected_control_revision}):
+        raise RuntimeError('mock account control changed before replacement')
+    runtime.set_new_orders_enabled(False)
+    repository.publish_mock_automation_account_selection(selection,
+        expected_implementation_hash=expected_implementation_hash)
+    current_ids = set(control.account_selection.member_spec_ids if control.account_selection is not None
+                      else (control.active_spec_id,))
+    admissions, receipts, additions = [], [], []
+    for identity in selection.member_spec_ids:
+        spec = repository.load_mock_automation_spec(account_ref, identity, require_canonical_document=True)
+        if spec is None:
+            raise ValueError('account replacement member is not stored')
+        if selection.allows_entry(identity):
+            _verify_final_candidate(repository, spec)
+        admission = repository.load_mock_automation_admission_for_spec(account_ref, identity)
+        if admission is None:
+            if identity in current_ids or selection.retained_admission_ref(identity) is not None:
+                raise RuntimeError('retained account admission is missing')
+            admission = build_mock_automation_admission(spec, requested_at=requested_at, account_selection=selection)
+            additions.append(admission)
+        if (admission.account_ref != account_ref or admission.execution_run_id != runtime.run_id
+                or not selection.matches_admission(spec_id=identity, admission_id=admission.admission_id,
+                    original_selection_id=admission.account_selection_id, execution_run_id=admission.execution_run_id)):
+            raise RuntimeError('account replacement admission reference conflict')
+        receipt = repository.load_mock_automation_lease_for_admission(account_ref, admission.admission_id)
+        if receipt is None and identity in current_ids:
+            raise RuntimeError('retained account lease receipt is missing')
+        admissions.append(admission)
+        receipts.append(receipt)
+    # Validate every member before writing any new immutable admission.
+    for admission in additions:
+        repository.save_mock_automation_admission(admission)
+    for index, admission in enumerate(admissions):
+        if receipts[index] is None:
+            receipts[index] = build_mock_automation_lease_receipt(admission, admitted_at=requested_at)
+            repository.save_mock_automation_lease_receipt(receipts[index])
+    return selection, tuple(admissions), tuple(receipts), control
+
+
+
+
 def mock_automation_control_from_dict(value: Mapping[str, Any]) -> MockAutomationControl:
     if value.get('version') == MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION and type(value.get('control_revision')) is not int:
         raise ValueError('account control revision must be an integer')
-    control = MockAutomationControl(
+    reviews = value.get('planned_review_resume_ids')
+    if 'planned_review_resume_ids' in value and (type(reviews) is not dict or not reviews):
+        raise ValueError('account planned protection resume identities must be a nonempty object')
+    control = (MockAutomationAccountResumeControl if reviews is not None else MockAutomationControl)(
         version=str(value["version"]),
         account_ref=str(value["account_ref"]),
         desired_state=MockAutomationDesiredState(str(value["desired_state"])),
@@ -462,6 +552,7 @@ def mock_automation_control_from_dict(value: Mapping[str, Any]) -> MockAutomatio
         planned_review_resume_id=value.get("planned_review_resume_id"),
         account_selection=(mock_automation_account_selection_from_dict(value['account_selection'])
                            if value.get('account_selection') is not None else None),
+        **({'planned_review_resumes': tuple(sorted(reviews.items()))} if reviews is not None else {}),
     )
     if control.account_selection is not None and control.to_dict() != dict(value):
         raise ValueError('account control document is not canonical')
