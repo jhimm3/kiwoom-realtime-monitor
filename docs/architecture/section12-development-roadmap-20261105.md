@@ -4,7 +4,7 @@
 
 전체 단계와 완료 기준은 이 문서 한 곳에서 관리한다. **S12-01 → S12-02 → S12-03 → S12-04 → S12-05** 순서로 통합한다. 각 단계는 실행할 코드, 직접 관련 검사, 검증 기록과 로컬 커밋을 남긴다. [정본 12절](app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계) · [기능별 계약](r3-ownership.md) · [남은 작업](../OPEN_ITEMS.md) · [저장소 전체 로드맵](../../FUTURE_DEVELOPMENT_ROADMAP.md).
 
-**현재 상태.** S12-01~04 수락·전체4/5, S12-05 대표3·4·5·7·9의5/11 개발 수락이다. 명시한 두 READY 명세가 하나의 Runtime/계좌 권한으로 native 주문·예약·원금/실제 체결·계획별 청산을 처리하는 공통 경계를 Windows259/실제PG16으로 검증했다. 자금/동시성 초과와 다른 멤버 물량 침범은 주문·계획 저장 전에 거절한다. 이는 기존 완료봉 Family의 공통 계좌 합성 검증이며 돌파/종가베팅의 정상 자동 병행 수락은 아니다. 다음은 native 멤버 ID를 체결·Risk·같은 Runner에 전달하는 연결이다. 대표1·2·6·10의 실제 전략/재진입/병행/교체, 대표8·11 및 DD/MICRO·독립 계좌/원주문 조건은 유지한다. [공통 계좌 native 경계](#section12-native-shared-account-owner) · [대표 잔여](#s12-acceptance-remaining).
+**현재 상태.** S12-01~04 수락·전체4/5, S12-05 대표3·4·5·7·9의5/11 개발 수락이다. native 멤버 ID를 실제 주문/체결·하나의 공통 Risk·멤버별 보유/매도 예약·현재 계획 수량과 인증 조회/읽기 전용 연구 codec까지 연결해 Windows403/실제PG20으로 검증했다. 기존 단일 계좌/주문 자료의 직렬화 형식·hash와 현재 조건 재판단·정정 우선·UNKNOWN 중복 제출 금지는 유지한다. 기존 완료봉 Family의 공통 경계 합성 검증이며 실제 돌파/종가베팅의 정상 자동 병행 수락은 아니다. 다음은 멤버 입장·Position/checkpoint/clock을 하나의 Runner에 연결하고 실제 전략/재진입/복구·교체·Shadow/UI/매매일지를 닫는 작업이다. 대표1·2·6·8·10·11, DD/MICRO·독립 계좌/원주문 조건과 운영 제외는 유지한다. [현재 연결](#section12-native-member-risk-consumers) · [대표 잔여](#s12-acceptance-remaining).
 
 ## 1. 착수 기준과 선행 작업
 
@@ -362,7 +362,7 @@ P1이 재시작 후 확인 봉에서 후보를 내면 최초 급락 봉의 판�
 
 | 12.12 | 상태 | 근거와 남은 조건 |
 |---|---|---|
-| 1 · 2 · 6 | 진행 | 돌파 최초 진입·현재 조건 재판단/정정·만료·물리 잔량/보호와 명시 재개를 확인했다. 명시 v2의 진짜 추가/부분 청산·실제 귀속·전체 물량 보호·수동4 격리를 두 DB에서, 실제 연구 최종평가/관측 연속성→후보/현재 Shadow→READY를 현재64건으로 검증했다. 두 일반 READY 명세의 단일 계좌 native 권한·공통 예약/원금·계획별 실제 FILL/청산과 침범 거절도 검증했다([native 선행](#section12-native-shared-account-owner)). 실제 전략 소비자의 다른 계획 대조·재진입·서로 다른 전략의 동시 승인은 행동 근거·수량·공유 계좌 배분 정책을 같은 계좌의 다른 계획과 대조해야 한다. 계좌 위험 연구의 계획별 예약/부분 체결/평가와 기존 잔량 재요청 ADD/REDUCE를 새 행동의 전체 수락으로 대체하지 않는다. [실제 연구 체인/잔여](#section12-staged-final-source-chain) · [핵심 연결](#section12-leader-staged-actions) · [계좌 위험 연구](../../tests/unit/test_account_risk_research.py). |
+| 1 · 2 · 6 | 진행 | 돌파 최초 진입·현재 조건 재판단/정정·만료·물리 잔량/보호와 명시 재개를 확인했다. 명시 v2의 진짜 추가/부분 청산·실제 귀속·전체 물량 보호·수동4 격리를 두 DB에서, 실제 연구 최종평가/관측 연속성→후보/현재 Shadow→READY를 현재64건으로 검증했다. 두 일반 READY 명세의 단일 계좌 native 권한·공통 예약/원금·계획별 실제 FILL/청산과 침범 거절도 검증했다([native 선행](#section12-native-shared-account-owner)). native 멤버 체결·같은 Risk의 자기 수량/예약·scoped Position/현재 계획 수량과 인증 event API/읽기 전용 codec도 검증했다([현재 소비자](#section12-native-member-risk-consumers)); 하나의 Runner 조립/실제 전략·재개·교체/UI는 계속 남는다. 실제 전략 소비자의 다른 계획 대조·재진입·서로 다른 전략의 동시 승인은 행동 근거·수량·공유 계좌 배분 정책을 같은 계좌의 다른 계획과 대조해야 한다. 계좌 위험 연구의 계획별 예약/부분 체결/평가와 기존 잔량 재요청 ADD/REDUCE를 새 행동의 전체 수락으로 대체하지 않는다. [실제 연구 체인/잔여](#section12-staged-final-source-chain) · [핵심 연결](#section12-leader-staged-actions) · [계좌 위험 연구](../../tests/unit/test_account_risk_research.py). |
 | 3 | 개발 수락 | 일반 READY builder/서버·명시 화면·인증 조회·공개 기동에서 원계획의 진입/부분 체결/미확정 취소·늦은 체결·DB 재개방·Shadow 비활성·익일 갭 청산을 연결했다. 마감/휴장·가격 중단/정지 상태·오래된 0B는 가짜 청산/새 진입을 만들지 않으며 원래 3주를 보존한다. 실제 Collector의 마감 가격·첫 분봉으로 3주만 청산하고, 원장/계좌 잔량 0·일지 재조회/화면 계획 ID와 BUY=3/SELL=3을 확인했다. 기존 v1/v2 중지 정책과 최초 손절·정정/native 검증은 유지한다. 합성 계좌·명시 휴장/정지 입력의 소프트웨어 수락이며 운영 시장 감지·주문/체결 품질은 별도다. [수락 근거](#s12-acceptance-close-three). |
 | 4 | 개발 수락 | 신규주 두 방식/두 상장 단계의 실제 final/Shadow→정상 READY·UI/API→공개 자동 Episode→원계획·첫0B 구조 보호/부분·늦은 체결·재개→일지/실제 화면 조회를 연결했다. 부족한 이력을0으로 채우지 않고, 원래 계획 ID/정책 증거·상장 프로필과 BUY3/SELL3·잔량0을 보존했다. [수락 근거](#s12-acceptance-ipo-four). |
 | 5 | 개발 수락 | 낙주 P0/P1의 final/현재 Shadow→명시 READY/UI/API→공개 자동 관리·native 현재 판단/정정·일지를 연결했다. 부분2/취소 UNKNOWN/늦은1은 실제3주만 관리하고, 최초 반등/실패와 당일 미완료를 보존해 DB 재열기·익일3→부분1/확인된 취소→잔량2→0을 확인했다. 무체결 취소 뒤 늦은1도 같은 실행 중 원계획으로 복원한다. [수락 근거](#s12-acceptance-panic-five). |
@@ -792,3 +792,17 @@ source `1f3cda2408c5b45f0cd6923d827f5ee5165333e5c5f4876e3c0aaf7d0a1e5517`에서 
 최초 Windows는214통과/남은45의180초 작업자 제한으로 미완료였다. 같은 소스의45만600초 제한으로 통과했고214/PG16은 반복하지 않았다. 최초 실패/로그와 두 실행의 실제 ID·발견/종료를 보존·합쳤다. 성공11 worker와 실패1의 종료/고립·HKCU, 실패 TEMP1·개발5영수증과 PG2 DB/포트/비밀/Job active0 정리를 확인했다. [현재 소스/검증/정리](../../tmp/s12-05-account-execution/component-evidence.json) · [증분](../../tmp/s12-05-account-execution/review-execution-final.json) · [범위/최초 제한/잔여](../../tmp/s12-05-account-execution/impact-resolution.json).
 
 이 검증은 기존 완료봉 Family 두 합성 명세의 공통 native 경계다. 실제 돌파/CLOSE 등 멤버별 FILL·Risk/복구 상태, 하나의 Runner/공통 입력·Shadow·UI/API 병행 기동, 재진입·모든 멤버의 재개·기존 계획을 남긴 명세 교체는 아직 연결해야 한다. 단일 멤버의 복구로 group을 재개하지 않는다. 대표1/6/10의 수락을 대신하지 않으며 다음은 native 멤버 사실을 실제 소비자에 전달하는 작업이다. 전체4/5·대표5/11과 원래8·11/DD/MICRO·독립 계좌/원주문 조건 및 운영 제외를 유지한다.
+
+<a id="section12-native-member-risk-consumers"></a>
+
+### S12-05 대표1/2/6/10 · native 멤버 체결·공통 Risk·수량 소비자 연결 — 2026-11-06
+
+native claim이 확정한 spec_id만 별도 MemberExecutionRecord/MemberAccountExecutionEvent로 전달한다. 원래 base dataclass에 빈 필드를 추가하지 않아 기존 standalone asdict/wire/hash를 보존한다. 같은 native writer가 기존 plan 승인과 멤버 필드를 갱신 전 보존하며 신규 위조/변경은 거절한다. 이전 writer가 optional 필드를 생략해도 원래 귀속을 잃지 않는다. 새 DB 호출/스키마/table/QueryStore 계약은 없다.
+
+기존 공통 Risk owner가 실제 FILL/활성 SELL로 멤버별 수량·평균 진입가·예약을 한 번 계산하고 원래 전체 계좌 사실과 같은 Risk ID에 포함한다. scoped Position/gate/현재 계획 검증은 이 한 cut의 자기 멤버 사실을 사용한다. 미확인 귀속은 INCOMPLETE로 보존하며0을 만들거나 전체 계좌 수량을 다른 계획에 빌려주지 않는다. 공통 freshness의 이미 명시한 더 엄격한 제한도 native 제출 직전에 다시 확인한다. 새 임계값이나 전략 판단 조건은 추가하지 않았다.
+
+현재 소스efd20b1d에서 Windows403(20모듈)/실제PG20(새4/기존16)·구조1332/retirable38·소비자·증분 실행 대조가 통과했다. 새11정의/총7402·원장306·원래 미결49를 보존했다. 서로 다른 물리 주문의 같은 원 fill_id가 전체2@69500·멤버1@69000/1@70000으로 분리되고, Alpha 매도 예약/청산은 Beta1의 현재 계획 수량/가격을 바꾸지 않는다. 위조 귀속·옛 writer·누락 귀속·인증/옛 판본 거절·읽기 전용 planned record 복원과 standalone 원래 asdict hash도 대조했다. 기존 oversize2 검사는 자기 물량1의 app gate에서 더 일찍 거절하도록 강화했다. 숫자는 합성 입력이며 매매 성과가 아니다.
+
+최초5c5c63fd의403/20도 통과했으나 새 검사 원장에 기존 수정 helper 모듈 발견12를 누락한 정적 오류가 있었다. draft306의 metadata만 보완한 뒤 hash가 달라져 같은403/20을 한 번 재검증했다. 최초 실패/보고서를 보존하고 낡은 소스를 현재 통과로 바꾸지 않았다. 개발 helper 오류2의 원 로그와 종료 영수증도 보존했으며 종료 확인 뒤 그 TEMP2만 정리했다. 최종20 Windows worker와3 PG Job의 실제 ID/발견·종료·HKCU/TEMP·DB/포트/비밀·active0을 확인했다. [소스/실행/정리](../../tmp/s12-05-member-risk/component-evidence.json) · [증분](../../tmp/s12-05-member-risk/review-execution-final.json) · [full_required 조회와 실제 범위/잔여](../../tmp/s12-05-member-risk/impact-resolution.json).
+
+멤버 scoped Position은 실제 native FILL로 검증했지만 Episode 부모/Supervisor/하나의 Runner에 아직 조립하지 않았다. 인증 계좌 event API와 읽기 전용 연구 codec은 연결했고 매매일지의 멤버 영속·UI/public 병행 기동은 남는다. 실제 돌파/CLOSE·재진입·모든 멤버의 fresh 복구/재개·기존 계획을 남기는 교체·다중 Shadow/입력 연결을 닫아야 대표1/2/6/10을 수락한다. 원래8·11/DD/MICRO·독립 계좌/원주문 조건과 전체4/5·대표5/11은 유지한다. 새 라이브러리/측정 속도 향상·실제 운영 수락은 없다.

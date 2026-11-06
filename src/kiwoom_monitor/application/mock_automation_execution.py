@@ -19,6 +19,7 @@ from kiwoom_monitor.application.mock_automation_admission import (
     MockAutomationDesiredState,
     MockAutomationLeaseReceipt,
     MOCK_AUTOMATION_CONTROL_VERSION,
+    MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION,
 )
 from kiwoom_monitor.application.mock_automation_recovery import (
     MockAutomationRecoveryDecision,
@@ -1324,8 +1325,10 @@ def _validated_risk_metrics_and_admission(repository, runtime, recovery, risk, a
         balance_mismatch_count=risk.balance_mismatch_count,
         data_path=risk.data_path,
         reconciliation_pending=not risk.reconciliation_complete,
-        owned_position_quantities=risk.owned_position_quantities,
-        pending_sell_quantities=risk.pending_sell_quantities,
+        owned_position_quantities=(risk.owned_for_member(spec_id)
+            if admission.version == MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION else risk.owned_position_quantities),
+        pending_sell_quantities=(risk.pending_sells_for_member(spec_id)
+            if admission.version == MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION else risk.pending_sell_quantities),
     )
     return metrics, admission
 

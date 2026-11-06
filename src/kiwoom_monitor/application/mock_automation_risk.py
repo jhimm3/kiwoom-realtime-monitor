@@ -207,6 +207,11 @@ def validate_planned_leader_current_cut(
     quantity = plan_position["quantity"]
     cursor = plan_position["fill_cursor"]
     age = spec.maximum_data_gap_seconds
+    member = plan_position.get('spec_id')
+    if member is not None and member != spec.spec_id:
+        raise ValueError('planned leader current member is unconfirmed')
+    owned = (risk.owned_for_member(member) if member is not None else risk.owned_position_quantities)
+    pending = (risk.pending_sells_for_member(member) if member is not None else risk.pending_sell_quantities)
     if ((plan_position["plan_id"], plan_position["policy_ref"], plan_position["revision"],
          plan_position["run_id"], plan_position["symbol"]) != (plan.plan_id, plan.policy_ref,
          plan.expected_revision, run_id, symbol)
@@ -216,7 +221,7 @@ def validate_planned_leader_current_cut(
             or (risk.account_ref, risk.execution_run_id, risk.binding_revision)
             != (spec.account_scope.account_ref, run_id, spec.binding_revision)
             or not risk.reconciliation_complete or risk.submission_unknown_count or risk.balance_mismatch_count
-            or risk.pending_sell_quantities or dict(risk.owned_position_quantities) != {symbol: quantity}
+            or pending or dict(owned) != {symbol: quantity}
             or age is None or any(not 0 <= (now - at).total_seconds() <= age for at in (
                 risk.observed_at, risk.account_as_of,
             ))):
@@ -704,6 +709,9 @@ class MockAutomationRiskSnapshot:
     owned_position_quantities: tuple[tuple[str, int], ...]
     pending_sell_quantities: tuple[tuple[str, int], ...]
     owned_entry_prices: tuple[tuple[str, int], ...] = ()
+    member_attribution: str | None = None
+    member_positions: tuple[tuple[str, str, int, int], ...] = ()
+    member_pending_sells: tuple[tuple[str, str, int], ...] = ()
 
     def __post_init__(self) -> None:
         if self.version != MOCK_AUTOMATION_RISK_VERSION:
@@ -747,10 +755,54 @@ class MockAutomationRiskSnapshot:
                 or any(symbol not in dict(self.owned_position_quantities) or type(price) is not int or price <= 0
                        for symbol, price in self.owned_entry_prices)):
             raise ValueError('invalid owned fill entry prices')
+        if self.member_attribution not in {None, 'COMPLETE', 'INCOMPLETE'}:
+            raise ValueError('invalid member attribution state')
+        if self.member_attribution is None and (self.member_positions or self.member_pending_sells):
+            raise ValueError('member facts require their attribution state')
+        for rows, width in ((self.member_positions, 4), (self.member_pending_sells, 3)):
+            keys = set()
+            if type(rows) is not tuple:
+                raise ValueError('member facts must be immutable')
+            for row in rows:
+                if (type(row) is not tuple or len(row) != width or not _valid_member_spec_id(row[0])
+                        or not isinstance(row[1], str) or not row[1]
+                        or any(type(number) is not int or number <= 0 for number in row[2:])
+                        or row[:2] in keys):
+                    raise ValueError('invalid member position facts')
+                keys.add(row[:2])
+        if self.member_attribution == 'COMPLETE':
+            for rows, aggregate in ((self.member_positions, self.owned_position_quantities),
+                                    (self.member_pending_sells, self.pending_sell_quantities)):
+                totals = {}
+                for row in rows:
+                    totals[row[1]] = totals.get(row[1], 0)+row[2]
+                if totals != dict(aggregate):
+                    raise ValueError('complete member facts do not match their run totals')
+
+    def _require_member_attribution(self) -> None:
+        if self.member_attribution == 'INCOMPLETE' or (self.member_attribution is None
+                and (self.owned_position_quantities or self.pending_sell_quantities)):
+            raise ValueError('native member attribution is unavailable or incomplete')
+
+    def owned_for_member(self, spec_id: str) -> tuple[tuple[str, int], ...]:
+        self._require_member_attribution()
+        return tuple((symbol, quantity) for member, symbol, quantity, price in self.member_positions if member == spec_id)
+
+    def pending_sells_for_member(self, spec_id: str) -> tuple[tuple[str, int], ...]:
+        self._require_member_attribution()
+        return tuple((symbol, quantity) for member, symbol, quantity in self.member_pending_sells if member == spec_id)
+
+    def entry_prices_for_member(self, spec_id: str) -> tuple[tuple[str, int], ...]:
+        self._require_member_attribution()
+        return tuple((symbol, price) for member, symbol, quantity, price in self.member_positions if member == spec_id)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             **({'owned_entry_prices':[list(v) for v in self.owned_entry_prices]} if self.owned_entry_prices else {}),
+            **({'member_attribution': self.member_attribution,
+                'member_positions': [list(row) for row in self.member_positions],
+                'member_pending_sells': [list(row) for row in self.member_pending_sells]}
+               if self.member_attribution is not None else {}),
             "snapshot_id": self.snapshot_id,
             "version": self.version,
             "account_ref": self.account_ref,
@@ -906,6 +958,7 @@ def build_mock_automation_risk_snapshot(
     submission_unknown = sum(record.state.value == "SUBMISSION_UNKNOWN" for record in active_intents)
     owned = _run_positions(exact_fills, execution_run_id)
     entry_prices = _run_entry_prices(exact_fills, execution_run_id)
+    member_facts = _member_risk_facts(exact_fills, active_intents, execution_run_id)
     pending_sells: dict[str, int] = {}
     for record in active_intents:
         if record.intent.run_id == execution_run_id and record.intent.side.value == "SELL":
@@ -929,6 +982,7 @@ def build_mock_automation_risk_snapshot(
     cost_revision = _sha256(cost_document)
     account_revision = mock_automation_risk_account_revision(recovery)
     body = {
+        **member_facts,
         **({'owned_entry_prices':[list(v) for v in sorted(entry_prices.items())]} if entry_prices else {}),
         "version": MOCK_AUTOMATION_RISK_VERSION,
         "account_ref": account.account_ref,
@@ -967,6 +1021,8 @@ def build_mock_automation_risk_snapshot(
         "owned_position_quantities": tuple(tuple(value) for value in body["owned_position_quantities"]),
         "pending_sell_quantities": tuple(tuple(value) for value in body["pending_sell_quantities"]),
         "owned_entry_prices": tuple(sorted(entry_prices.items())),
+        'member_positions': tuple(tuple(row) for row in member_facts.get('member_positions', ())),
+        'member_pending_sells': tuple(tuple(row) for row in member_facts.get('member_pending_sells', ())),
     })
 
 
@@ -997,6 +1053,9 @@ def mock_automation_risk_snapshot_from_dict(value: Mapping[str, Any]) -> MockAut
         owned_position_quantities=tuple((str(item[0]), int(item[1])) for item in value.get("owned_position_quantities", ())),
         pending_sell_quantities=tuple((str(item[0]), int(item[1])) for item in value.get("pending_sell_quantities", ())),
         owned_entry_prices=tuple((item[0], item[1]) for item in value.get('owned_entry_prices', ())),
+        member_attribution=value.get('member_attribution'),
+        member_positions=tuple(tuple(row) for row in value.get('member_positions', ())),
+        member_pending_sells=tuple(tuple(row) for row in value.get('member_pending_sells', ())),
     )
     expected = _sha256({key: item for key, item in snapshot.to_dict().items() if key != "snapshot_id"})
     if snapshot.snapshot_id != expected:
@@ -1068,6 +1127,44 @@ def _run_positions(events: Sequence[AccountExecutionEvent], run_id: str) -> dict
         change = event.quantity if event.side == "BUY" else -event.quantity
         values[event.symbol] = values.get(event.symbol, 0) + change
     return values
+
+
+def _valid_member_spec_id(value):
+    prefix = 'mock_automation_spec_'
+    return (isinstance(value, str) and value.startswith(prefix) and len(value) == len(prefix)+64
+            and all(c in '0123456789abcdef' for c in value[len(prefix):]))
+
+
+def _member_risk_facts(events, active_intents, run_id):
+    fills = [event for event in events if event.run_id == run_id]
+    active = [record for record in active_intents if record.intent.run_id == run_id]
+    if not any(getattr(item, 'member_spec_id', None) is not None for item in (*fills, *active)):
+        return {}
+    complete = all(_valid_member_spec_id(getattr(item, 'member_spec_id', None)) for item in (*fills, *active))
+    positions, pending, invalid = {}, {}, set()
+    for event in sorted(fills, key=lambda item: item.accepted_sequence):
+        member = getattr(event, 'member_spec_id', None)
+        if not _valid_member_spec_id(member):
+            continue
+        key = (member, event.symbol)
+        quantity, price = positions.get(key, (0, 0))
+        if event.side == 'BUY':
+            positions[key] = (quantity+event.quantity,
+                mock_owned_buy_basis(quantity, price, event.quantity, event.price) if quantity >= 0 else event.price)
+        elif event.quantity > quantity:
+            invalid.add(key)
+            positions[key] = (quantity-event.quantity, price)
+        else:
+            positions[key] = (quantity-event.quantity, price)
+    for record in active:
+        member = getattr(record, 'member_spec_id', None)
+        if _valid_member_spec_id(member) and record.intent.side is OrderSide.SELL:
+            key = (member, record.intent.symbol)
+            pending[key] = pending.get(key, 0)+execution_remaining_quantity(record)
+    return {'member_attribution': 'COMPLETE' if complete and not invalid else 'INCOMPLETE',
+        'member_positions': [[member, symbol, quantity, price] for (member, symbol), (quantity, price)
+                             in sorted(positions.items()) if quantity > 0 and (member,symbol) not in invalid],
+        'member_pending_sells': [[member, symbol, quantity] for (member, symbol), quantity in sorted(pending.items()) if quantity > 0]}
 
 
 def _run_entry_prices(events, run_id):

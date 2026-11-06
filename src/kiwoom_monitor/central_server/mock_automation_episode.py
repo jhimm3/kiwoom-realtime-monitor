@@ -90,9 +90,10 @@ class MockAutomationEpisodePosition:
     Borrowed ledger/clock operations are used during a call and never retained.
     """
 
-    def __init__(self, *, account_ref: str, run_id: str) -> None:
+    def __init__(self, *, account_ref: str, run_id: str, member_spec_id: str | None = None) -> None:
         self._account_ref = account_ref
         self._run_id = run_id
+        self._member_spec_id = member_spec_id
         self._fill_cursor = 0
         self._state = StrategyState()
         self._position_state_lock = Lock()
@@ -156,6 +157,7 @@ class MockAutomationEpisodePosition:
                             if event.broker_order_id else event.broker_execution_id)
                 if (
                     event.run_id != self._run_id
+                    or self._member_spec_id is not None and getattr(event, 'member_spec_id', None) != self._member_spec_id
                     or event.event_type != "FILL"
                     or not event.broker_execution_id
                     or fill_key in self._seen_fill_ids
@@ -203,7 +205,11 @@ class MockAutomationEpisodePosition:
 
 
     def matches_risk(self, risk: Any) -> bool:
-        owned = {symbol: quantity for symbol, quantity in risk.owned_position_quantities}
+        try:
+            owned = dict(risk.owned_for_member(self._member_spec_id) if self._member_spec_id is not None
+                         else risk.owned_position_quantities)
+        except ValueError:
+            return False
         if self._state.status == "open":
             return owned == {self._state.symbol: int(self._state.position_quantity or 0)}
         return not owned

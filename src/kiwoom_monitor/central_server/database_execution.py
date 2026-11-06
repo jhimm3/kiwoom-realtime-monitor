@@ -21,6 +21,8 @@ PLAN_POSITION_COLLECTION = "execution_mock_plan_positions"
 def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
                                  value: dict[str, Any], p: str, *, now_provider=None,
                                  new_intent_claim=False, submission_claim=False, amendment_claim=False, control_facts=None):
+    if 'mock_account_member_spec_id' in value and (new_intent_claim or 'plan' not in value):
+        raise ValueError('account member attribution is assigned only by the native plan claim')
     if ownership is None:
         if "plan" in value:
             raise RuntimeError("PLANNED_EXECUTION_OWNER_REQUIRED")
@@ -138,6 +140,14 @@ def _control_member_allowed(cursor, p, control, account, spec_id):
     selection = _account_control_selection(cursor, p, control, account)
     return (spec_id in selection.member_spec_ids if selection is not None
             else control.get('active_spec_id') == spec_id)
+
+
+def _account_control_limits(control):
+    from kiwoom_monitor.application.mock_automation_admission import (
+        MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION, mock_automation_control_from_dict,
+    )
+    return (mock_automation_control_from_dict(control).account_selection.limits
+            if control.get('version') == MOCK_AUTOMATION_ACCOUNT_CONTROL_VERSION else None)
 
 
 def _account_control_selection(cursor, p, control, account, *, verify_admissions=False, require_current_binding=True):
@@ -558,7 +568,8 @@ def _claim_plan_position(cursor, p, value, ownership, now_provider, *, control=N
         cursor, p, account_ref, {**head, "revision": head["revision"] + 1},
         datetime.fromisoformat(value["created_at"]),
     )
-    return {**value, "mock_plan_approval": gate_id}
+    return {**value, "mock_plan_approval": gate_id,
+            **({'mock_account_member_spec_id': spec.spec_id} if selection is not None else {})}
 
 
 def _claim_account_plan_capacity(cursor, p, value, spec, selection, active):
@@ -615,6 +626,9 @@ def _plan_event_changes_position(event):
 def _validate_plan_event(stored, intent, event):
     if stored is None or event["intent_id"] != intent["intent_id"]:
         raise RuntimeError("EXECUTION_PLAN_EVENT_SCOPE_CHANGED")
+    if (intent.get('mock_account_member_spec_id') is not None
+            and intent['mock_account_member_spec_id'] != stored.get('mock_account_member_spec_id')):
+        raise RuntimeError('EXECUTION_PLAN_MEMBER_ATTRIBUTION_CHANGED')
     fields = ("plan", "decision_id", "symbol", "side", "quantity", "order_type", "limit_price", "policy_version")
     if (any(intent[name] != stored[name] for name in fields) or intent["state"] != event["state"]
             or (intent["state"] == "QUEUED" and stored["state"] != "QUEUED")):
@@ -2423,13 +2437,16 @@ class SQLiteExecutionStoreMixin:
                                          now_provider=getattr(self, '_execution_wall_now', None),
                                          submission_claim=event.get("event_type") == "SUBMISSION_STARTED",
                                          amendment_claim=event.get('event_type') == 'AMENDMENT_STARTED', control_facts=control_facts)
+            if stored is not None and 'plan' in intent:
+                from kiwoom_monitor.infrastructure.persistence.execution_repository import retain_native_plan_claim
+                intent = retain_native_plan_claim(stored,intent)
             stored = _validate_broker_ledger_write(connection.cursor(), "?", stored, intent, event, ownership,
                                                   getattr(self, '_execution_wall_now', None), control_facts)
             if "plan" in intent and not _validate_plan_event(stored, intent, event):
                 return False
             if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":
                 approval, _, _ = _require_plan_approval(connection.cursor(), "?", intent, ownership,
-                                                    getattr(self, "_execution_wall_now", None))
+                    getattr(self, "_execution_wall_now", None), account_limits=_account_control_limits(control_facts))
                 if stored is None or stored.get("mock_plan_approval") != approval:
                     raise RuntimeError("PLANNED_EXECUTION_APPROVAL_CHANGED")
             event = _require_mock_cancel_retry(connection.cursor(), ownership, intent, event, '?',
@@ -2447,8 +2464,6 @@ class SQLiteExecutionStoreMixin:
                 if ownership is None and "plan" in _json_document(row[0]):
                     raise RuntimeError("PLANNED_EXECUTION_OWNER_REQUIRED")
             intent = _retain_execution_claim(connection.cursor(), intent, '?')
-            if "plan" in intent:
-                intent = {**intent, "mock_plan_approval": stored["mock_plan_approval"]}
             intent_document = _event_document(intent)
             inserted = connection.execute(
                 "INSERT INTO central_execution_events("
@@ -2718,13 +2733,16 @@ class PostgresExecutionStoreMixin:
                                          now_provider=getattr(self, '_execution_wall_now', None),
                                          submission_claim=event.get("event_type") == "SUBMISSION_STARTED",
                                          amendment_claim=event.get('event_type') == 'AMENDMENT_STARTED', control_facts=control_facts)
+            if stored is not None and 'plan' in intent:
+                from kiwoom_monitor.infrastructure.persistence.execution_repository import retain_native_plan_claim
+                intent = retain_native_plan_claim(stored,intent)
             stored = _validate_broker_ledger_write(cursor, "%s", stored, intent, event, ownership,
                                                   getattr(self, '_execution_wall_now', None), control_facts)
             if "plan" in intent and not _validate_plan_event(stored, intent, event):
                 return False
             if "plan" in intent and event["event_type"] == "SUBMISSION_STARTED":
                 approval, _, _ = _require_plan_approval(cursor, "%s", intent, ownership,
-                                                    getattr(self, "_execution_wall_now", None))
+                    getattr(self, "_execution_wall_now", None), account_limits=_account_control_limits(control_facts))
                 if stored is None or stored.get("mock_plan_approval") != approval:
                     raise RuntimeError("PLANNED_EXECUTION_APPROVAL_CHANGED")
             event = _require_mock_cancel_retry(cursor, ownership, intent, event, '%s',
@@ -2747,7 +2765,6 @@ class PostgresExecutionStoreMixin:
             if "plan" in intent:
                 if stored is None:
                     raise KeyError(f"unknown execution intent: {intent['intent_id']}")
-                intent = {**intent, "mock_plan_approval": stored["mock_plan_approval"]}
             cursor.execute(
                 "UPDATE central_execution_intents SET state=%s,broker_order_id=%s,last_broker_as_of=%s,"
                 "updated_at=%s,document_json=%s WHERE intent_id=%s"

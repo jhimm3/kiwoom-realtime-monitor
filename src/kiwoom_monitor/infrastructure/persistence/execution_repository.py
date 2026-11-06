@@ -110,6 +110,16 @@ class ExecutionRecord:
     broker_revision: int = 0
 
 
+@dataclass(frozen=True, kw_only=True)
+class MemberExecutionRecord(ExecutionRecord):
+    """Extra native membership only on admitted account-member records.
+
+    The standalone record shape, including legacy asdict research identities,
+    stays unchanged.
+    """
+    member_spec_id: str
+
+
 def broker_legs_state(legs, requested, amendment=None):
     if amendment is not None and amendment.reconciliation_pending:
         return OrderState.SUBMISSION_UNKNOWN
@@ -236,7 +246,13 @@ class AccountExecutionEvent:
             "reason": self.reason,
             "broker_as_of": self.broker_as_of.isoformat() if self.broker_as_of else None,
             **({"plan": asdict(self.plan)} if self.plan is not None else {}),
+            **({'member_spec_id': self.member_spec_id} if getattr(self,'member_spec_id',None) is not None else {}),
         }
+
+
+@dataclass(frozen=True, kw_only=True)
+class MemberAccountExecutionEvent(AccountExecutionEvent):
+    member_spec_id: str
 
 
 @dataclass(frozen=True)
@@ -344,7 +360,8 @@ class ExecutionRepository:
         self, record: ExecutionRecord, event: OrderEvent, *, _connection: Any = None,
         _amendment_recovery: MockAccountRecovery | None = None, **changes: object,
     ) -> ExecutionRecord:
-        updated = ExecutionRecord(
+        record_type = MemberExecutionRecord if isinstance(record,MemberExecutionRecord) else ExecutionRecord
+        updated = record_type(
             intent=record.intent,
             state=event.state,
             broker_order_id=str(changes.get("broker_order_id", record.broker_order_id)),
@@ -361,6 +378,7 @@ class ExecutionRepository:
             broker_legs=tuple(changes.get("broker_legs", record.broker_legs)),
             amendment=changes.get("amendment", record.amendment),
             broker_revision=record.broker_revision + int(bool(record.broker_legs or changes.get("broker_legs"))),
+            **({'member_spec_id': record.member_spec_id} if isinstance(record,MemberExecutionRecord) else {}),
         )
         connection_args = {} if _connection is None else {"_connection": _connection}
         options = self._write_options()
@@ -546,6 +564,7 @@ def _record_document(record: ExecutionRecord) -> dict[str, Any]:
         "expires_at": intent.expires_at.isoformat(),
         "policy_version": intent.policy_version,
         **({"plan": asdict(intent.plan)} if isinstance(intent, PlannedOrderIntent) else {}),
+        **({'mock_account_member_spec_id': record.member_spec_id} if getattr(record,'member_spec_id',None) is not None else {}),
         "state": record.state.value,
         "broker_order_id": record.broker_order_id,
         "filled_quantity": record.filled_quantity,
@@ -587,9 +606,21 @@ def amendment_from_document(value: Mapping[str, Any] | None) -> ExecutionAmendme
         "started_at": datetime.fromisoformat(value["started_at"])}) if value else None
 
 
+def retain_native_plan_claim(stored, document):
+    """Carry immutable native lineage into a mutable physical-order candidate."""
+    if (document.get('mock_account_member_spec_id') is not None
+            and document['mock_account_member_spec_id'] != stored.get('mock_account_member_spec_id')):
+        raise RuntimeError('EXECUTION_PLAN_MEMBER_ATTRIBUTION_CHANGED')
+    if 'plan' not in stored or 'mock_plan_approval' not in stored:
+        return document
+    return {**document, 'mock_plan_approval': stored['mock_plan_approval'],
+            **({'mock_account_member_spec_id': stored['mock_account_member_spec_id']}
+               if stored.get('mock_account_member_spec_id') is not None else {})}
+
+
 def validate_broker_ledger_event(stored, document, event, *, recovery=None, now=None, authorized_assessment=None) -> None:
     """Validate the physical-order transition again inside the native writer's CAS."""
-    before, after = _record_from_document(stored), _record_from_document(document)
+    before, after = _record_from_document(stored), _record_from_document(retain_native_plan_claim(stored,document))
     if (before.intent != after.intent or before.broker_order_id != after.broker_order_id
             or after.broker_revision != before.broker_revision + 1
             or after.state.value != event["state"] or not after.broker_legs
@@ -742,7 +773,9 @@ def _record_from_document(value: Mapping[str, Any]) -> ExecutionRecord:
         **({"plan": OrderPlanRef(**value["plan"])} if "plan" in value else {}),
     )
     last_as_of = value.get("last_broker_as_of")
-    return ExecutionRecord(
+    member_spec_id = _native_member_spec_id(value)
+    record_type = MemberExecutionRecord if member_spec_id is not None else ExecutionRecord
+    return record_type(
         intent=intent, state=OrderState(str(value["state"])),
         broker_order_id=str(value.get("broker_order_id") or ""),
         filled_quantity=int(value.get("filled_quantity") or 0),
@@ -754,6 +787,7 @@ def _record_from_document(value: Mapping[str, Any]) -> ExecutionRecord:
         broker_legs=tuple(broker_leg_from_document(leg) for leg in value.get("broker_legs", ())),
         amendment=amendment_from_document(value.get("amendment")),
         broker_revision=int(value.get("broker_revision", 0)),
+        **({'member_spec_id':member_spec_id} if member_spec_id is not None else {}),
     )
 
 
@@ -783,7 +817,9 @@ def _account_event_from_document(
     source_event_id = str(event.get("event_id") or "")
     if not source_event_id:
         raise ValueError("execution event source identity is required")
-    return AccountExecutionEvent(
+    member_spec_id = _native_member_spec_id(intent)
+    event_type = MemberAccountExecutionEvent if member_spec_id is not None else AccountExecutionEvent
+    return event_type(
         accepted_sequence=sequence,
         source_event_id=source_event_id,
         intent_id=intent_id,
@@ -805,4 +841,18 @@ def _account_event_from_document(
         reason=str(event.get("reason") or ""),
         broker_as_of=broker_as_of,
         plan=OrderPlanRef(**intent["plan"]) if "plan" in intent else None,
+        **({'member_spec_id':member_spec_id} if member_spec_id is not None else {}),
     )
+
+
+def _native_member_spec_id(value: Mapping[str, Any]) -> str | None:
+    identity = value.get('mock_account_member_spec_id')
+    if identity is None:
+        return None
+    prefix = 'mock_automation_spec_'
+    if (not isinstance(identity, str) or not identity.startswith(prefix)
+            or len(identity) != len(prefix)+64
+            or any(c not in '0123456789abcdef' for c in identity[len(prefix):])
+            or not value.get('plan') or not value.get('mock_plan_approval')):
+        raise ValueError('native account member attribution is invalid')
+    return identity

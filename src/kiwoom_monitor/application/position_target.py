@@ -12,10 +12,10 @@ from typing import Any
 
 from kiwoom_monitor.application.research_execution import SimulationCostModel, estimate_buy_cash_won
 from kiwoom_monitor.domain.order_contract import (
-    AccountSnapshot, OrderIntent, OrderSide, OrderState, OrderType, TERMINAL_ORDER_STATES,
+    AccountSnapshot, OrderIntent, PlannedOrderIntent, OrderPlanRef, OrderSide, OrderState, OrderType, TERMINAL_ORDER_STATES,
 )
 from kiwoom_monitor.infrastructure.persistence.execution_repository import (
-    ExecutionRecord, amendment_from_document, broker_leg_from_document,
+    ExecutionRecord, MemberExecutionRecord, amendment_from_document, broker_leg_from_document,
 )
 
 
@@ -1883,7 +1883,10 @@ def _position_account_orders_from_dict(value: dict[str, Any], orders: list) -> t
         intent["order_type"] = OrderType(intent["order_type"])
         for name in ("created_at", "expires_at"):
             intent[name] = datetime.fromisoformat(intent[name])
-        raw_record["intent"] = OrderIntent(**intent)
+        intent_type = PlannedOrderIntent if 'plan' in intent else OrderIntent
+        if 'plan' in intent:
+            intent['plan'] = OrderPlanRef(**intent['plan'])
+        raw_record["intent"] = intent_type(**intent)
         raw_record["state"] = OrderState(raw_record["state"])
         raw_record["updated_at"] = datetime.fromisoformat(raw_record["updated_at"])
         if raw_record["last_broker_as_of"] is not None:
@@ -1891,7 +1894,10 @@ def _position_account_orders_from_dict(value: dict[str, Any], orders: list) -> t
         raw_record["fill_ids"] = tuple(raw_record["fill_ids"])
         raw_record["broker_legs"] = tuple(broker_leg_from_document(leg) for leg in raw_record.get("broker_legs", ()))
         raw_record["amendment"] = amendment_from_document(raw_record.get("amendment"))
-        records.append(ExecutionRecord(**raw_record))
+        record_type = MemberExecutionRecord if raw_record.get('member_spec_id') is not None else ExecutionRecord
+        if record_type is ExecutionRecord:
+            raw_record.pop('member_spec_id',None)
+        records.append(record_type(**raw_record))
     return account, tuple(records)
 
 

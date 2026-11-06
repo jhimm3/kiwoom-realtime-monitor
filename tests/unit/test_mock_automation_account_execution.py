@@ -228,8 +228,11 @@ def verify_group_native_fill_isolation(case, store):
     oversized.pop('decision_id')
     oversized['quantity'] = 2
     oversized = StrategyDecision(decision_id='decision_'+support._hash(oversized), **oversized)
-    with case.assertRaisesRegex(RuntimeError, 'EXECUTION_PLAN_QUANTITY_UNAVAILABLE'):
-        exit(data.specs[0], oversized, plans[0])
+    blocked, denied, no_receipt = exit(data.specs[0], oversized, plans[0])
+    case.assertEqual('BLOCKED', blocked.status.value)
+    case.assertIn('INSUFFICIENT_POSITION', blocked.reasons)
+    case.assertIsNone(denied)
+    case.assertIsNone(no_receipt)
     case.assertEqual(before, [head(plan) for plan in plans])
     case.assertEqual(2, len(owner.transport.calls))
     _, sell, receipt = exit(data.specs[0], original, plans[0])
