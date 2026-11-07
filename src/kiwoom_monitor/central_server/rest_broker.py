@@ -75,6 +75,8 @@ MOCK_ACCOUNT_ENDPOINTS = {
     "ka10076": "/api/dostk/acnt",  # fills
     "kt00018": "/api/dostk/acnt",  # evaluated balance and positions
 }
+MARKET_DATA_ENDPOINTS = {api_id: path for api_id, path in READ_ONLY_ENDPOINTS.items()
+                         if path != "/api/dostk/acnt"}
 
 # 숫자가 작을수록 먼저 처리한다. 화면과 체결 스냅샷을 과거 백필보다 앞세운다.
 REQUEST_PRIORITIES = {
@@ -158,6 +160,15 @@ class _Job:
     queued_at: float = field(default_factory=time.monotonic)
     observation: Any = field(default=None, repr=False)
     origin: OperationContextSnapshot = field(default_factory=OperationContextSnapshot, repr=False)
+    market_transport: _MarketTransport | None = field(default=None, repr=False)
+    transport_source: tuple[CentralRestBroker, _Job] | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class _MarketTransport:
+    broker: CentralRestBroker = field(repr=False)
+    identity: str
+    generation: int
 
 
 @dataclass(frozen=True)
@@ -227,6 +238,72 @@ class CentralRestBroker:
         self._activating_credentials: Any = None
         self._resume_task: asyncio.Task[None] | None = None
         self._close_task: asyncio.Task[None] | None = None
+        self._market_transport_provider: Callable[[], tuple[CentralRestBroker, str] | None] | None = None
+        self._market_transport_change: asyncio.Task | None = None
+        self._market_transport_paused = False
+        self._market_transport_closing = False
+
+    def set_market_transport_provider(self, provider):
+        """Compose the selected market TR transport before admitting requests."""
+        if self._worker is not None or self._market_transport_provider is not None:
+            raise BrokerCredentialBusyError("TR_CONNECTION_ALREADY_STARTED")
+        self._market_transport_provider = provider
+
+    @property
+    def market_transport_ready(self):
+        return not self._credential_paused and self._close_task is None
+
+    @property
+    def market_transport_change_pending(self):
+        return self._market_transport_change is not None
+
+    def _market_transport(self, api_id):
+        if api_id not in MARKET_DATA_ENDPOINTS or self._market_transport_provider is None:
+            return None
+        selection = self._market_transport_provider()
+        if selection is None:
+            return None  # No explicit selection: the existing market route.
+        broker, identity = selection
+        if not broker.market_transport_ready:
+            raise BrokerCredentialBusyError("TR_CONNECTION_PROFILE_NOT_READY")
+        return _MarketTransport(broker, identity, broker._credential_generation)
+
+    def _require_market_transport(self, transport_source):
+        if not self.market_transport_ready:
+            raise BrokerCredentialBusyError("TR_CONNECTION_PROFILE_NOT_READY")
+        source, source_job = transport_source
+        if source._market_transport(source_job.api_id) != source_job.market_transport:
+            raise BrokerCredentialBusyError("TR_CONNECTION_PROFILE_CHANGED")
+
+    async def change_market_transport(self, apply):
+        """Drain the market route without pausing the account client's orders."""
+        if self._market_transport_closing or self._market_transport_change is not None:
+            raise BrokerCredentialBusyError("TR_CONNECTION_CHANGE_IN_PROGRESS")
+        task = owned_create_task(self._change_market_transport(apply), name="market-tr-connection-change")
+        self._market_transport_change = task
+        def complete(done):
+            self._market_transport_change = None
+            if not done.cancelled():
+                done.exception()
+        task.add_done_callback(complete)
+        return await asyncio.shield(task)
+
+    async def _change_market_transport(self, apply):
+        async with self._guard:
+            self._market_transport_paused = True
+        try:
+            if self._lookup_tasks:
+                await asyncio.gather(*tuple(self._lookup_tasks), return_exceptions=True)
+            await self._queue.join()
+            await self._persist_queue.join()
+            return await apply()
+        finally:
+            self._market_transport_paused = False
+
+    async def finish_market_transport_changes(self):
+        self._market_transport_closing = True
+        if self._market_transport_change is not None:
+            await asyncio.gather(asyncio.shield(self._market_transport_change), return_exceptions=True)
 
     async def prepare_credentials(self, settings: Any) -> Any:
         """Explicit management job, lower priority than live ranking."""
@@ -357,6 +434,7 @@ class CentralRestBroker:
         await asyncio.shield(self._close_task)
 
     async def _close(self) -> None:
+        await self.finish_market_transport_changes()
         if self._lookup_tasks:
             await asyncio.gather(*tuple(self._lookup_tasks), return_exceptions=True)
         worker, self._worker = self._worker, None
@@ -394,9 +472,10 @@ class CentralRestBroker:
 
     async def _request(
         self, api_id: str, path: str, body: dict[str, Any], *, cont_yn: str,
-        next_key: str, record_response: bool,
+        next_key: str, record_response: bool, transport_source: tuple[CentralRestBroker, _Job] | None = None,
     ) -> BrokerResult:
-        observer = self._input_observer
+        transport_only = transport_source is not None
+        observer = None if transport_only else self._input_observer
         with (observer.broker_request_scope(self._input_observer_state, self,
                 namespace=self._namespace, api_id=api_id, path=path, body=body,
                 cont_yn=cont_yn, next_key=next_key, record_response=record_response,
@@ -404,15 +483,23 @@ class CentralRestBroker:
                 cache_lookup=bool(record_response and self._store is not None and _persistent_cache_ttl(api_id, cont_yn)))
                 if observer is not None else nullcontext()) as observed:
             request_handle, returned = observed if observed is not None else (None, None)
-            self._validate(api_id, path, cont_yn, next_key)
+            self._validate(api_id, path, cont_yn, next_key,
+                           endpoints=MARKET_DATA_ENDPOINTS if transport_only else None)
             origin = _operation_origin()
+            if transport_only:
+                self._require_market_transport(transport_source)
             await self.start()
-            key = self._fingerprint(api_id, path, body, cont_yn, next_key)
-            if not record_response:
-                key = f"unrecorded:{key}"
             async with self._guard:
+                if transport_only:
+                    self._require_market_transport(transport_source)
                 if self._credential_paused:
                     raise BrokerCredentialBusyError("CREDENTIAL_CHANGE_IN_PROGRESS")
+                if not transport_only and api_id in MARKET_DATA_ENDPOINTS and self._market_transport_paused:
+                    raise BrokerCredentialBusyError("TR_CONNECTION_CHANGE_IN_PROGRESS")
+                route = None if transport_only else self._market_transport(api_id)
+                key = self._fingerprint(api_id, path, body, cont_yn, next_key, route=route)
+                if not record_response:
+                    key = f"{'transport' if transport_only else 'unrecorded'}:{key}"
                 self._prune_memory_cache()
                 cached = self._cache.get(key)
                 basic_recording_pending = (
@@ -442,7 +529,7 @@ class CentralRestBroker:
                         self._resolve_cache_or_queue(
                             key, api_id, path, copy.deepcopy(body), cont_yn,
                             next_key, record_response, generation, existing,
-                            request_handle=request_handle,
+                            request_handle=request_handle, route=route, transport_source=transport_source,
                         ),
                         name=f"broker-cache-lookup-{api_id}",
                     )
@@ -468,10 +555,12 @@ class CentralRestBroker:
         self, key: str, api_id: str, path: str, body: dict[str, Any],
         cont_yn: str, next_key: str, record_response: bool, generation: int,
         entry: _InFlightRequest,
-        *, request_handle: Any = None,
+        *, request_handle: Any = None, route: _MarketTransport | None = None,
+        transport_source: tuple[CentralRestBroker, _Job] | None = None,
     ) -> None:
         future = entry.future
-        observer = self._input_observer
+        transport_only = transport_source is not None
+        observer = None if transport_only else self._input_observer
         with operation_context_scope(entry.origin):
             try:
                 stored = None
@@ -479,7 +568,9 @@ class CentralRestBroker:
                 if record_response and _persistent_cache_ttl(api_id, cont_yn) and self._store is not None:
                     with (observer.broker_effect_scope(group, "cache_read") if observer is not None else nullcontext()):
                         stored = await owned_to_thread(self._store.load_query, key)
-                if api_id == "ka10001" and key != self._fingerprint(api_id, path, body, cont_yn, next_key):
+                if not transport_only and self._market_transport(api_id) != route:
+                    raise BrokerCredentialBusyError("TR_CONNECTION_PROFILE_CHANGED")
+                if api_id == "ka10001" and key != self._fingerprint(api_id, path, body, cont_yn, next_key, route=route):
                     # A slow DB lookup can cross 07:00/midnight. Do not stamp the
                     # previous period's cached payload as a fresh observation.
                     stored = None
@@ -499,6 +590,8 @@ class CentralRestBroker:
                 async with self._guard:
                     if self._inflight.get(key) is not entry:
                         raise BrokerCredentialBusyError("REQUEST_OWNERSHIP_CHANGED")
+                    if transport_only:
+                        self._require_market_transport(transport_source)
                     if self._credential_paused or self._credential_generation != generation:
                         raise BrokerCredentialBusyError("CREDENTIAL_CHANGE_IN_PROGRESS")
                     # A separate request may have populated RAM while the DB lookup ran.
@@ -518,7 +611,8 @@ class CentralRestBroker:
                         future.set_result(copy.deepcopy(result))
                     else:
                         job = _Job(key, api_id, path, body, cont_yn, next_key, future, record_response,
-                                   observation=group, origin=entry.origin)
+                                   observation=group, origin=entry.origin,
+                                   market_transport=route, transport_source=transport_source)
                         self._queue.put_nowait((REQUEST_PRIORITIES.get(api_id, 50), next(self._sequence), job))
             except BaseException as error:
                 async with self._guard:
@@ -565,7 +659,15 @@ class CentralRestBroker:
                         delegated = False
                         started_at = time.monotonic()
                         queue_wait_ms = round((started_at - job.queued_at) * 1000)
-                        payload, has_next, next_key = await owned_to_thread(self._call_transport, job)
+                        route = job.market_transport
+                        if job.transport_source is not None:
+                            self._require_market_transport(job.transport_source)
+                        elif self._market_transport(job.api_id) != route:
+                            raise BrokerCredentialBusyError("TR_CONNECTION_PROFILE_CHANGED")
+                        if route is not None and route.broker is not self:
+                            payload, has_next, next_key = await self._call_market_transport(job, route)
+                        else:
+                            payload, has_next, next_key = await owned_to_thread(self._call_transport, job)
                         api_audit_logger.info(
                             "request completed namespace=%s api_id=%s continuation=%s queue_wait_ms=%d duration_ms=%d",
                             self._namespace, job.api_id, job.cont_yn,
@@ -573,7 +675,7 @@ class CentralRestBroker:
                             round((time.monotonic() - started_at) * 1000),
                         )
                         result = BrokerResult(payload, has_next, next_key)
-                        ttl = CACHE_SECONDS.get(job.api_id, 0.0) if job.cont_yn == "N" else 0.0
+                        ttl = CACHE_SECONDS.get(job.api_id, 0.0) if job.cont_yn == "N" and job.transport_source is None else 0.0
                         if ttl > 0:
                             async with self._guard:
                                 self._cache[job.key] = (time.monotonic() + ttl, result)
@@ -599,13 +701,20 @@ class CentralRestBroker:
 
     def _call_transport(self, job: _Job):
         """Own the physical call; optional input observation never executes it."""
-        observer = self._input_observer
-        with (observer.broker_transport_scope(job.observation) if observer is not None else nullcontext()) as returned:
+        source, logical_job = job.transport_source or (self, job)
+        observer, observation = source._input_observer, logical_job.observation
+        with (observer.broker_transport_scope(observation) if observer is not None else nullcontext()) as returned:
             result = self._client.request_with_continuation(job.api_id, job.path, job.body,
                 cont_yn=job.cont_yn, next_key=job.next_key)
             if returned is not None:
                 returned(result)
             return result
+
+    async def _call_market_transport(self, job: _Job, route: _MarketTransport):
+        """Use the admitted account queue and client without a second cache/ingestor."""
+        result = await route.broker._request(job.api_id, job.path, job.body, cont_yn=job.cont_yn,
+            next_key=job.next_key, record_response=False, transport_source=(self, job))
+        return result.payload, result.has_next, result.next_key
 
     async def _run_persistence(self) -> None:
         observer = self._input_observer
@@ -683,8 +792,8 @@ class CentralRestBroker:
             for key, _ in sorted(self._cache.items(), key=lambda item: item[1][0])[:overflow]:
                 self._cache.pop(key, None)
 
-    def _validate(self, api_id: str, path: str, cont_yn: str, next_key: str) -> None:
-        expected = self._allowed_endpoints.get(api_id)
+    def _validate(self, api_id: str, path: str, cont_yn: str, next_key: str, *, endpoints=None) -> None:
+        expected = (self._allowed_endpoints if endpoints is None else endpoints).get(api_id)
         if expected is None:
             raise ValueError(f"중앙 서버에서 허용하지 않는 조회 API입니다: {api_id}")
         if path != expected:
@@ -704,10 +813,13 @@ class CentralRestBroker:
             return as_kst(current).timestamp()
         return datetime.now(KST).timestamp()
 
-    def _fingerprint(self, api_id: str, path: str, body: dict[str, Any], cont_yn: str, next_key: str) -> str:
+    def _fingerprint(self, api_id: str, path: str, body: dict[str, Any], cont_yn: str, next_key: str,
+                     *, route: _MarketTransport | None = None) -> str:
         parts = [self._namespace if self._credential_generation == 0 else
                  f"{self._namespace}:credential-generation:{self._credential_generation}",
                  api_id, path, body, cont_yn, next_key]
+        if route is not None:
+            parts.extend(("market-tr-connection", route.identity, route.generation))
         if api_id == "ka10001":
             current = datetime.fromtimestamp(self._wall_time(), KST)
             # Both RAM and persistent caches must exclude pre-refresh responses.

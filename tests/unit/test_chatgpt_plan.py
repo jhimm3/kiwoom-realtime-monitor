@@ -10,10 +10,11 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import urlopen
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -21,7 +22,7 @@ from google.auth import crypt, jwt
 
 from kiwoom_monitor.infrastructure.chatgpt_auth import (
     ChatGPTAuth, ChatGPTCredentialStore, ChatGPTPlanError, DIRECT_SCOPE,
-    ISSUER, RESOURCE, _ROTATION_UNSAVED, validate_identity,
+    ISSUER, RESOURCE, _ROTATION_UNSAVED, storage_path_for, validate_identity,
 )
 from kiwoom_monitor.infrastructure.chatgpt_plan import ChatGPTPlanClient, GroundedResponse, _completed_response
 from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig, NaverNewsCredentials, NewsAISettings
@@ -81,6 +82,29 @@ class StreamDeadlineTests(unittest.TestCase):
 
 
 class ChatGPTPlanTests(unittest.TestCase):
+    def test_darwin_store_uses_user_state_protection_and_exclusive_lock(self):
+        from kiwoom_monitor.infrastructure.kiwoom_rest import local_secret_keychain as keychain
+
+        home = Path(self.temp.name)
+        flock = Mock(side_effect=[None, BlockingIOError(), None])
+        native_flock = SimpleNamespace(flock=flock, LOCK_EX=2, LOCK_NB=4)
+        with patch('sys.platform', 'darwin'), patch.object(Path, 'home', return_value=home), \
+             patch.dict('sys.modules', {'fcntl': native_flock}), \
+             patch.object(keychain, '_keychain_key', return_value=bytes(32)):
+            path = storage_path_for(home / 'data' / 'naver_news.dat')
+            self.assertEqual(home / 'Library' / 'Application Support' / 'KiwoomMonitor' / 'ChatGPTPlan',
+                             path.parent.parent)
+            self.assertEqual('credentials.enc', path.name)
+            store = ChatGPTCredentialStore(path)
+            with store.locked():
+                store.save({'host_id': 'fixture-host', 'active': '', 'accounts': {}})
+                with self.assertRaisesRegex(ChatGPTPlanError, 'storage_busy'), store.locked():
+                    self.fail('second lock acquired')
+            with ChatGPTCredentialStore(path).locked():
+                self.assertEqual('fixture-host', store.load()['host_id'])
+            self.assertNotIn(b'fixture-host', path.read_bytes())
+            self.assertEqual([6, 6, 6], [call.args[1] for call in flock.call_args_list])
+
     @classmethod
     def setUpClass(cls):
         cls.key = rsa.generate_private_key(public_exponent=65537, key_size=2048)

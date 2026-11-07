@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import re
+import sys
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -17,14 +18,14 @@ from urllib.request import Request, urlopen
 
 from kiwoom_monitor.application.news_analysis import assess_stock_news
 from kiwoom_monitor.domain.news_ai_contract import NewsAssessment, StockNewsItem
-from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import _protect, _unprotect
+from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import LocalSecretUnavailable, _protect, _unprotect
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 
 
 @dataclass(frozen=True)
 class NaverNewsCredentials:
-    client_id: str = ""
-    client_secret: str = ""
+    client_id: str = field(default="", repr=False)
+    client_secret: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -46,7 +47,7 @@ class NewsFilterSettings:
 @dataclass(frozen=True)
 class NewsAISettings:
     provider: str = "none"
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     model: str = ""
     daily_limit: int = 30
     auto_recent_limit: int = 10
@@ -65,7 +66,7 @@ class NewsAISettings:
 
 @dataclass(frozen=True)
 class OfficialNewsSettings:
-    dart_api_key: str = ""
+    dart_api_key: str = field(default="", repr=False)
     dart_enabled: bool = False
 
 
@@ -198,8 +199,10 @@ class LocalNaverNewsConfig:
             return {}
         raw = self._path.read_text(encoding="utf-8").strip()
         if not raw.startswith("NAVER_NEWS_CONFIG_ENCRYPTED="):
+            if sys.platform == 'darwin':
+                raise LocalSecretUnavailable('local credential belongs to another protection format')
             return {}
-        payload = _unprotect(base64.b64decode(raw.split("=", 1)[1])).decode("utf-8")
+        payload = _unprotect(base64.b64decode(raw.split("=", 1)[1]), path=self._path).decode("utf-8")
         values = json.loads(payload)
         return values if isinstance(values, dict) else {}
 
@@ -251,7 +254,7 @@ class LocalNaverNewsConfig:
                 local_news_world_url=sources.world_url,
             )
         payload = json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        encrypted = base64.b64encode(_protect(payload)).decode("ascii")
+        encrypted = base64.b64encode(_protect(payload, path=self._path)).decode("ascii")
         temporary = self._path.with_name(
             f".{self._path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         )

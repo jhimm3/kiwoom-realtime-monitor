@@ -158,6 +158,7 @@ class SourceRuntimeDeployTests(unittest.TestCase):
         self.assertEqual(["PySide6==6.11.1", "Pillow==12.3.0"], extras["query"])
         self.assertEqual([
             "fastapi>=0.116,<1", "uvicorn[standard]>=0.35,<1", "psycopg[binary]>=3.2,<4",
+            "psutil==7.2.2; sys_platform == 'win32'",
             "cryptography>=46,<47", "google-auth==2.41.1",
         ], extras["server"])
         self.assertEqual([
@@ -187,17 +188,19 @@ class SourceRuntimeDeployTests(unittest.TestCase):
             "websockets==16.1.1", "tzdata==2026.3", "PySide6==6.11.1", "Pillow==12.3.0",
             "paddlepaddle==3.2.2", "paddleocr==3.7.0", "google-api-python-client==2.187.0",
             "google-auth-oauthlib==1.2.3", "fastapi>=0.116,<1", "uvicorn[standard]>=0.35,<1",
-            "psycopg[binary]>=3.2,<4", "cryptography>=46,<47", "google-auth==2.41.1",
+            "psycopg[binary]>=3.2,<4", "psutil==7.2.2; sys_platform == 'win32'",
+            "cryptography>=46,<47", "google-auth==2.41.1",
         }, set(full))
         lock = dict(line.lower().replace("_", "-").split("==", 1) for line in
                     (root / "requirements.lock.txt").read_text(encoding="utf-8").splitlines()
                     if "==" in line and not line.startswith("#"))
         for requirement in full:
-            name = re.split(r"[<>=!\[]", requirement, maxsplit=1)[0].lower().replace("_", "-")
             with self.subTest(requirement=requirement):
+                pinned_requirement = requirement.split(";", 1)[0].strip()
+                name = re.split(r"[<>=!\[]", pinned_requirement, maxsplit=1)[0].lower().replace("_", "-")
                 self.assertIn(name, lock)
-                if "==" in requirement:
-                    self.assertEqual(requirement.split("==", 1)[1], lock[name])
+                if "==" in pinned_requirement:
+                    self.assertEqual(pinned_requirement.split("==", 1)[1], lock[name])
 
     def test_known_downgrade_converts_only_after_stop_and_before_source_selection(self):
         result, log, pinned, running = self.run_fixture("downgrade", "old")

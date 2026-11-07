@@ -133,6 +133,28 @@ class CentralContentClient:
         return self._request("GET", "/api/v1/research/reported-results/" + quote(result_id, safe=""),
                              expected_result_owner=expected_owner)
 
+    @classmethod
+    def for_observation_archive(cls, server_url: str, source_stream: str, access_token: str) -> CentralContentClient:
+        """Pin archive source/target credentials to the configured server, including on export reads."""
+        return cls(validate_producer_connection(server_url, source_stream, access_token),
+                   access_token, opener=_result_urlopen)
+
+    def accept_observation_archive(
+        self, document: dict[str, Any], *, source_stream: str, sha256: str,
+    ) -> dict[str, Any]:
+        from kiwoom_monitor.domain.observation_archive import OBSERVATION_ARCHIVE_PATH
+
+        return self._request("POST", OBSERVATION_ARCHIVE_PATH + "?" + urlencode({"sha256": sha256}),
+                             document, compact_json=True, expected_archive_stream=source_stream)
+
+    def load_observation_archive(
+        self, batch_id: str, *, source_stream: str, include_body: bool = False,
+    ) -> dict[str, Any]:
+        from kiwoom_monitor.domain.observation_archive import OBSERVATION_ARCHIVE_PATH, archive_batch_id
+
+        path = OBSERVATION_ARCHIVE_PATH + "/" + quote(archive_batch_id(batch_id), safe="")
+        return self._request("GET", path if include_body else path + "/receipt", expected_archive_stream=source_stream)
+
     def claim_news_body_job(self, *, expected_owner: str) -> dict[str, Any]:
         return self._request("POST", "/api/v1/news/body-jobs/claim", {}, expected_result_owner=expected_owner)
 
@@ -534,7 +556,8 @@ class CentralContentClient:
 
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None,
                  *, timeout_seconds: float | None = None, compact_json: bool = False,
-                 expected_result_owner: str | None = None) -> dict[str, Any]:
+                 expected_result_owner: str | None = None,
+                 expected_archive_stream: str | None = None) -> dict[str, Any]:
         with _http_operation_context(self._token) as request_id:
             if body is None:
                 encoded = None
@@ -548,8 +571,11 @@ class CentralContentClient:
             if expected_result_owner is not None:
                 from kiwoom_monitor.domain.research_contract import encode_reported_result_owner
                 headers["X-Kiwoom-Expected-Result-Owner"] = encode_reported_result_owner(expected_result_owner)
+            if expected_archive_stream is not None:
+                from kiwoom_monitor.domain.research_contract import encode_reported_result_owner
+                headers["X-Kiwoom-Expected-Archive-Stream"] = encode_reported_result_owner(expected_archive_stream)
             request = Request(f"{self._server_url}{path}", method=method, data=encoded, headers=headers)
-            opener = self._opener if expected_result_owner is None else self._result_opener
+            opener = self._result_opener if expected_result_owner is not None or expected_archive_stream is not None else self._opener
             try:
                 with opener(request, timeout=self._timeout if timeout_seconds is None else timeout_seconds,
                                   context=system_ssl_context()) as response:

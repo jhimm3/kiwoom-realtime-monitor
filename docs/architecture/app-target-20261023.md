@@ -8,19 +8,21 @@
 
 ## 0. 현재 기준과 진행 현황
 
-갱신. **2026-11-07 · 승인 12절 개발·라이브러리 비교 종결(로컬)**. 이전 수락·실패 근거는11절에 둔다.
+갱신. **2026-11-07 · 승인 12절 개발 종결 및 정본 비운영 후속**. 이전 수락·실패 근거는 11절에 둔다.
 
 **현재 단계.** 승인 S12-01~05의 개발 범위를 5/5 수락했다. 12.12 대표 연결은 11/11이며 DD/MICRO의 추가 연구·복구/입력 경계도 개발 수락했다. 돌파·종가베팅·신규주·낙주의 연구/final/Shadow·명시 READY와 기존 단일 계좌 Runner, 현재 조건 재판단/정정 우선·추가/부분 청산·새 셋업 재진입·설정/일지/API를 연결했다. 명세 교체는 원입장·잔여 계획·늦은 체결을 보존한다. 선별 복구는 원정책과 전체 단일 계획 원장, 대상의 새 단일 권한·현재 설정·Risk/복구를 분리하며 신규 진입 OFF를 유지한다. 한 고정 소스에서 관련 Windows1328건·격리 PostgreSQL97건, 구조·소비 계약·증분 실행 대조와 소유 자원 정리를 확인했다. 이는 격리/합성 및 명시 동결 자료의 소프트웨어 수락이며 과거 수익성·실제 장중 공급·운영 전환을 합산하지 않는다. [최종 범위·검증·남은 외부 조건](#section12-final-development-acceptance) · [승인 로드맵](section12-development-roadmap-20261105.md#s12-final-development-acceptance).
 
-**연속 실행 제어.** 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
+**이번 비운영 후속.** 실제 연구 평가·개발 사용 기록의 두 자식과 보호 환경을 검증했다. Darwin RSS·일지 소유권·macOS 보호 저장을 연결하고, 순위·분봉·일봉·TOP20의 선택 장후 보관과 첫 내구 영수증을 구현했다. 개인 서버 계좌 설정에 **시장조회 TR과 매매 TR의 통합/분리**를 추가했다. 기존 공통 0B와 현재 매매 계좌·원주문은 유지한다. 최종 고정 소스에서 관련 Windows 396건·격리 PostgreSQL 3건, 별도 역할 기동 및 Windows 설치 후보 컴파일을 검증했다. [후속 근거·환경 한계](#canonical-offline-followup) · [TR 설정](canonical-offline-followup-20261107.md#offline-tr-routing).
+
+**연속 실행 제어.** 이전 소스의 자동 CI 41872124336가 7분 33초에 최종 성공했다. Windows 6,672건·필수/확장 PG·Linux·operator·봉인 v1/v2, 동일 소스·증분 실행 대조와 최종 필수 판정을 수락했다. 이번 소스의 새 외부 CI는 실행하지 않았다. 이전 실패는 각각 보존한다. [540](#c24-hosted-539-run-540).
 
 **목표·필수 원칙:** [승인 v1](#11-이번-재설계-기준-계획-v1)을 따른다. 선택한 Windows/macOS/Linux 실행 컴퓨터가 장중 공통 엔진·로컬 SSD·주문 상태를 소유하고 NAS는 장후 보관을 맡는 [목표 배치](#portable-execution-target)를 유지한다. 순위 이력과 확정된 설정/편집·미확정 주문/미완료 저장/복구의 최소 예외는 보존하고, 나머지 과거 자료는 기존 DB에 보관한다([11.12](#1112-데이터-보존과-db-구조-재설계--2026-10-24)). 동일 순간·당시 가용성·KST 표시와 시계 필요성을 구분하며 새 계층·중복 상태·매 틱 DB 조회를 추가하지 않는다. 녹화/진단·일회성 도구는 현재 유지하면서 제거 경계를 확보하고 자체 로컬 LLM은 제외한다.
 
-**실행 제한:** 이번 승인 S12 범위의 로컬 commit과 실제 운영은 구분한다. 별도 승인 없는 push·새 GitHub CI·배포·운영 DB/설정·실계좌·로컬 전체 회귀·새 라이브러리/이미지/환경 구축·권한 변경은 실행하지 않는다. NAS 임시 관리자 권한은 2026-11-02 09:30 KST에 만료됐고 추가 사용·연장0이다. 원 권한과 영수증·회수 조건은 [241](../../tmp/ar-test-session-until0930-241/execution/current-access241.json)에 보존한다. 526은 사용자가 승인한 단일 NAS 격리 검사를 기존 제한 operator로 실행했다.
+**실행 제한:** 이번 승인 S12 및 비운영 후속의 로컬 commit과 실제 운영은 구분한다. 별도 승인 없는 push·새 GitHub CI·배포·운영 DB/설정·실계좌·로컬 전체 회귀·새 라이브러리/이미지/환경 구축·권한 변경은 실행하지 않는다. NAS 임시 관리자 권한은 2026-11-02 09:30 KST에 만료됐고 추가 사용·연장0이다. 원 권한과 영수증·회수 조건은 [241](../../tmp/ar-test-session-until0930-241/execution/current-access241.json)에 보존한다. 526은 사용자가 승인한 단일 NAS 격리 검사를 기존 제한 operator로 실행했다.
 
 **검사 자료 정리.** 367에서 복원 가능한 빌드 중간물 19개를 정리해 약 **0.82 GiB**를 확보했다. 직후 C 드라이브 여유는 **66.28 GiB**였다. 과거 검사 환경의 Qt 사본 약 **3.75 GiB**는 재실행에 복원이 필요해 보존했다. [367 결과](../../tmp/ar08-c24-observer367-20261104/STORAGE_RESULT367.json) · [365·366 이력](#c24-owned-job-fixture-and-tmp-cleanup-366).
 
-**완료 범위:** 독립 완료 조건90개 중 **검증 완료83·재발 시 이관1·현재 잔여6, 세부 행동17개**다. C16은 현재 진행과 완료 수에서 분리한다. AR05는8완료/3잔여/9행동이며 전체 AR 로컬 종결은 AR02만1/9·Q0/14·운영 미수락이다. 기존 부분12/외부연결부분31·OS/장후 전송의 필수 범위도 유지한다. [541](#c16-recurrence-handoff-541).
+**완료 범위:** 독립 완료 조건90개 중 **검증 완료83·재발 시 이관1·현재 잔여6, 세부 행동17개**다. C16은 현재 진행과 완료 수에서 분리한다. AR05는8완료/3잔여/9행동이며 전체 AR 로컬 종결은 AR02만1/9다. 유한한 범위·변경 승인·단계별 집계를 연결한 Q02만 독립 수락해 **Q1/14**다. 운영은 미수락이다. 기존 부분12/외부연결부분31·OS/장후 전송의 실제 환경 조건도 유지한다. [Q02](#canonical-offline-followup) · [C16](#c16-recurrence-handoff-541).
 
 | AR | 완료 | 부분 완료 | 미완료 | 외부 환경 대기 | 재발 시 이관 | 현재 잔여 | 남은 세부행동 |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -40,7 +42,7 @@
 - **설치 검증 source290:** 로컬 소유 서버의 종료 ACK/오류 전파와 호출자·저장·취소·복구·선택 의존성 부재를 관련31건으로 확인했다. 실제2 native probe는 이전 정상/실패 모두 final 저장0행→수정 후 literal1행 COMMIT/연결 close 및 exit0/실패exit1을 검증했다. 새 Manager/queue/poll·업무 DB/스키마/시계/주문 변경0이며 Windows 자원 owner만 추가했다. 기존5초+강제정리2초를 유지한다. 포장290의 현재 코드34와 실제303 두 기동·닫힌 source clone cut/사본 소비는 수락했다. 같은 원ID의 POSIX 실제2를 추가 수락했다(새 고유검사 증가0). 운영 producer quiet/final ACK·T0·권한 전환은 별도 미검증이다. [POSIX 실제 근거](#posix-owned-stop308).
 
 - source277의14건은 실제 headless 연결을 포함한 입력 권한6 + 기존 native 소비자 실패·취소·재시작/ACK8이다. 원2revision·고정 watermark/cursor·선택 INPUT bearer·원파일/원시각/hash·native PUBLISHED/job/acceptance·재열기를 확인했다. 직접 headless 함수를 실행한 검사이며 독립 프로세스의 실제 NAS 작업 전체나 전략 유효성은 아니다. theme는 빈 sidecar 표본이다.
-- source276의86건에는 연구 UI/7 launch 계약·실제 자식 smoke3과 알려진22개 환경 이름을 검증한 실제 자식 witness1이 있다. 알 수 없는 비밀이나 같은 사용자 파일/OS ACL 격리는 증명하지 않는다. 기존 full/operator 연결은 명시 선택 호환으로 남아 있으므로 최종 독립 역할 수락 전 운영 input grant와 연결을 전환해야 한다. FinalHoldout의 두 실제 subprocess는 아직 별도 미검증이다.
+- source276의86건에 이어 이번 고정 소스에서 FinalHoldout 평가와 개발 사용 기록의 실제 자식 두 개를 한 시나리오로 검증했다. 알려진 23개 환경 이름과 원자료 보존·native 저장 전환을 확인했다. 임의의 비밀 파일과 OS ACL 격리까지 증명하지 않는다. 실제 독립 역할 수락의 운영 input grant와 기존 full/operator 연결 전환은 남는다. [11.294](#canonical-offline-followup).
 - source27581PASS/4fixture 실패·등록/순서 지문 거절과 기존269/270/272·139/C24 실패는 보존한다. source271 실제 자료 HTTP·앞선 순위/Drive/NAS7·포장258은 각 소스·범위의 근거다. 현재16이나 이전86을 전체 AR·Q·운영·GitHub CI·설치 전체 통과로 승격하지 않는다.
 
 **남은 조건·차단 사유·재개 조건**
@@ -52,7 +54,7 @@
 | AR08-C24 | **완료(검증 수락).** `6495993` GitHub 필수 회귀 성공과 526 실제 NAS 선택 경로 수락을 결합했다. | 운영 전환은 별도 조건이다. [540](#c24-hosted-539-run-540). |
 | AR08-C18·C25 | 402 시험용 빌드에서 동일 EXE 관리형 서버 기동·인증 조회와 서버→앱 정상 종료, 포트·잠금·Job·게스트 정리를 확인했다. 기존 source290의 실제303 사본 소비와 POSIX 종료 검증을 각각 유지한다. | 최종 selected/T0·source quiet/final ACK·운영 공급/권한·TLS/ACL/다른 PC/장중 조건이 남는다. [402](#c18-managed-frozen-and-c24-attribution-402). |
 
-**다음 작업·재개 조건.** 이번 승인 S12 개발의 필수 잔여는 종결했다. 실제 장중 자료·수익성 실증, MICRO의 실제 거래 가능/교차 순서/VI 해제 체결가와 DD 원주가·체결별 비용 근거, 브로커 상세 API·namespace 검증은 아래 최종 외부 조건을 따른다. 실제 운영 재개에는 원본/대상·선별 최소 상태·T0와 source quiet/final ACK·권한/배포 승인이 필요하다. 기존 AR의83완료/재발 이관1/운영 잔여6 및 C16 재발 조건은 바꾸지 않는다. [최종 S12 근거](#section12-final-development-acceptance) · [기존 운영 준비310](#c25-readiness310).
+**다음 작업·재개 조건.** 실제 장중 자료·수익성 실증, MICRO의 거래 가능/교차 순서/VI 해제 체결가, DD 원주가·체결별 비용, 브로커 상세 API·namespace 검증은 확보된 자료와 권한이 필요하다. 실제 운영 재개에는 원본/대상·선별 최소 상태·T0와 source quiet/final ACK·권한/배포 승인이 필요하다. 실제 macOS/Linux 및 대상 Windows 설치, Linux 데스크톱 보호 저장, 장후 전송 운영 grant/시간, 매매 정책 결정은 별도다. 기존 AR의83완료/재발 이관1/운영 잔여6 및 C16 재발 조건은 바꾸지 않는다. [이번 후속의 잔여](canonical-offline-followup-20261107.md#기존-6개-조건의-운영-경계) · [최종 S12 근거](#section12-final-development-acceptance) · [기존 운영 준비310](#c25-readiness310).
 
 **읽기·기록 규칙:** 이 절의 목표·제약·현황부터 확인한 뒤 담당 AR/F·호출자/소비자·관련 미해결 실패와 근거만 선택해 읽는다. 최신 내용은 교체하고 원 실행·이전 판단은 11절에 보존한다.11.71 현재표와 공유 원장은 함께 맞추며 완료 조건·집계 기준 변경은 현황 갱신과 구분한다. 문서 저장은 명시적 LF로 처리하고 표 행 사이에 빈 줄을 넣지 않는다. 다른 현황 문서는 이 절을 참조한다.
 
@@ -745,6 +747,7 @@ v1 제시 당시에는 원인 로그/계약 차이 확인까지만 했고 제품
 | 이번 기준 계획 v1 제시 당시 | 전체748 대응·깊이/잔여 분리, 유지영역 근거·9공통 적용표, 목표/AR/선행/완료/환경·정책/CI 미결·단일현황/선택읽기·fork none 정책 통합 | 당시 승인 요청 / AR 구현 미착수. 별도 실행/배포·추가Git 승인 제한 유지 |
 | v1 승인(2026-10-23) | 사용자가 현재 CI 실패 보완부터 시작하고 충돌 없는 AR를 fork none으로 병렬 구현하도록 승인 | 로컬 단계적 구현·관련 검사/정본·F 갱신. commit/push/배포/운영 DB 변경/전체 회귀 금지 유지 |
 | v1 공통 평가 기준 보완(2026-10-23 후속 지시) | PC/NAS 전체 반복을 만드는 책임·인터페이스와 해당 AR 연결, 구조 전환 때 함께 해결할 문제/순수 최적화·필수 안전 반복 구분 | 기존 Q03/04/09/14·AR01~09 구체화. 새 AR/전역 재감사·새 성능 시스템/정책/운영 권한 추가 없음 |
+| v1 비운영 후속·N07 추가(2026-11-07, `b1024cd` 기준) | 사용자가 정본 잔여의 비운영 구현·검증과 로컬 커밋, 이어 데이터/매매 TR 통합·분리 설정을 승인했다. N07은 기존 계좌·시장 조회 owner에 영향, 0B·계좌 권한·원주문·미정 정책 유지 | [N01~07 종료 기준·제외](canonical-offline-followup-20261107.md), [API·저장 계약 및 현재 검증](#canonical-offline-followup). 기존 14Q·9AR·90조건 유지, 정책/외부/실제 운영은 미수락 |
 
 ### 11.8 1차 구현 — CI 원인 보완·AR02 선택 상태
 
@@ -1967,6 +1970,8 @@ MAIN139에 AR06 수락 결과의 출처 전달과 AR09 version1 owner-state를 �
 
 현재 집계는 [0절](#0-현재-기준과-진행-현황)과 이 절의 표를 따른다. **90개 중 검증 완료 83·재발 시 이관 1·잔여 6(세부 행동 17)**이다. 잔여는 전환 전 조건 5개와 별도 승인 운영 단계 AR08-C25다. OS별 배포·장후 전송의 단계별 범위는 [11.72](#portable-execution-target)에 둔다. 이 집계는 각 조건의 국소 판정이며 AR 전체 종결·운영 수락은 0절에서 별도로 본다.
 
+이번 [비운영 후속](#canonical-offline-followup)의 실제 연구 자식·관측 보관·설치 후보·TR 연결 근거를 관련 AR 조건의 로컬 준비에 연결한다. 실제 원본·대상·운영 grant/T0가 필요한 6개 조건은 유지한다. 별도 Q02 수락은 기존 AR의 완료 수를 바꾸지 않는다.
+
 라이브러리와 12절의 새 제품 개발은 [최초 범위11.239](#rss-and-section12-development)와 [현재0절](#0-현재-기준과-진행-현황)을 따른다. 추가·부분 청산과 실제 연구 체인의 근거는 [11.286](#section12-leader-staged-actions)·[11.287](#section12-staged-final-source-chain)·[11.288](#section12-explicit-account-composition)·[11.289](#section12-native-shared-account-owner)·[11.290](#section12-native-member-risk-consumers)·[11.291](#section12-member-episode-single-runner)에 두며 이 표의 조건별 검증·운영 수락과 분리한다. 승인 S12-01~05의 최종 개발 수락은 [11.293](#section12-final-development-acceptance)에 분리하며 이 표의 AR 집계에 더하지 않는다.
 
 **정본 사용:** 이 표를 갱신하고 같은 상태 보고를 계속 덧붙이지 않는다. **완료**는 해당 국소 조건의 본 코드 연결/관련 검증 수락, **부분 완료**는 일부 본 코드/검증 수락 후 필수 조건 잔여, **미완료**는 본 코드 미수락(격리 구현 포함), **외부 환경 대기**는 필요한 실제 입력/환경·승인 미확보다. 격리 후보나 정책 문서만으로 완료를 올리지 않는다. 개별 항목은 한 담당 AR에서만 집계하며 다른 AR의 선행·참조는 중복0이다. [전체 대조 근거/현재 코드/개별 완료조건](../../tmp/ar-v1-wave48-20261028/v1-remaining-checklist/consolidated.json)에 실제 함수·기존 실행 소스·미확인 범위와 root의 선행 정정을 보존한다. 최초 체크리스트 대조에서는 제품 변경·새 검사 시작·운영 접근 없이 기존 baseline 종료만 정리했다. 이후 승인 v1 연속 진행의 격리 후보 검사와 현재 결과는 0절 및 해당 잔여행에 반영한다.
@@ -2239,10 +2244,10 @@ MAIN139에 AR06 수락 결과의 출처 전달과 AR09 version1 owner-state를 �
 |---|---|---|
 | 수집·입력·RAM·집계 | 선택 실행 컴퓨터의 기존 Collector/TOP20·설정/시장 owner. 현재가/체결은 기존0B, 연구/보완 분봉과 구분 | [로컬 서버](../../src/kiwoom_monitor/infrastructure/central_server_process.py#L54)·[저장소 선택](../../src/kiwoom_monitor/central_server/database.py#L752) 재사용. NAS와 매틱 왕복하는 새 경로를 만들지 않음. 현재0B RAM/latest/분봉을 원시틱 전량 영구 보관으로 표현하지 않음 |
 | 장중 영속/실행 | 실행 컴퓨터의 native 저장소가 transaction·Risk/control·원주문/FILL·UNKNOWN·checkpoint·미완료 저장을 소유 | SQLite/PG의 기존 native guard·원자성을 유지. 로컬 SSD와 DB 엔진 선택은 실제 저장량/회귀로 확정하며 기존 schema를 고정하지 않음. 새 위치의 실수신·주문/복구 수락은 미완료 |
-| 뉴스 | 같은 기존 수집/NewsJobRunner/RULE·BODY/입력 판본·attempt/receipt owner를 로컬 조립 | BODY 전용 CLI를 RULE/전체 처리기 완료로 합산하지 않음. 로컬 처리 시 NAS job claim 의존 제거가 필요. 표시/명시 재분석 정책·원문/hash/발행/가용시각 유지; AI/자체LLM 신규 기능 없음 |
-| NAS 보관/연구 | NAS는 보관 수락/조회/결과·백업, 연구는 고정 watermark·revision/input hash를 가진 입력과 독립 결과 배송 | 원 입력 순간과 NAS 반입시각을 분리. 공개 조회·수락 계약 재사용, 공유 SQLite/내부 테이블 직접 수정과 매 봉 원격 재조회 금지. 초기 최소 이전과 이후 당일 자료 누적 전송은 별도 |
+| 뉴스 | 같은 기존 수집/NewsJobRunner/RULE·BODY/입력 판본·attempt/receipt owner를 로컬 조립 | 기존 로컬 서버 전체 BODY/RULE의 같은 SQLite owner·native 수락/종료를 재확인했다. BODY 전용 CLI와 실제 운영 수집은 별도다. 표시/명시 재분석·원문/hash/발행/가용시각 유지. [11.294](#canonical-offline-followup) |
+| NAS 보관/연구 | NAS는 보관 수락/조회/결과·백업, 연구는 고정 watermark·revision/input hash를 가진 입력과 독립 결과 배송 | 순위·분봉·일봉·TOP20의 고정 공개 자료와 선택 내구 보관을 격리 검증했다. 원 입력 순간과 반입시각을 분리한다. 실제 운영 grant·기간/스케줄·이전 대상은 별도다. [보관 계약](canonical-offline-followup-20261107.md#offline-observation-archive) |
 | 계좌 권한/기기 교체 | 한 계좌의 권한 있는 실행 주체 하나. NAS 사본·lease 복사는 실행 권한이 아님 | 별도 SSD/DB마다 lease가 동시에 성공할 수 있음. 통신 단절 자동 failover/주문 인계 없음. 실제 기기 교체는 입장 차단·old owner drain/철회·미완료 상태 인계·새 계좌/주문 대사·명시 재개가 필요 |
-| OS 주변부/선택 도구 | AppPaths·credential owner·process/자원 관측·설치/UI의 기존 경계. Windows 기능 유지 | [macOS RSS 공백](../../src/kiwoom_monitor/application/research_resources.py#L49)·[시작토큰 공백](../../src/kiwoom_monitor/presentation/process_control.py#L140)·[DPAPI](../../src/kiwoom_monitor/infrastructure/kiwoom_rest/local_config.py#L25)을 해당 경계에서 해결. CREON/진단 도구는 선택 구성, 모든 기능을 plugin/별도 process로 만들지 않음 |
+| OS 주변부/선택 도구 | AppPaths·credential owner·process/자원 관측·설치/UI의 기존 경계. Windows 기능 유지 | Darwin RSS·시작 신원·Keychain 보호 저장의 코드와 모의 호출/원문 보존을 검증했다. Windows DPAPI를 유지한다. 실제 macOS 동작과 Linux 데스크톱 보호 저장/설치가 남는다. CREON/진단 도구는 선택 구성이다. [11.294](#canonical-offline-followup) |
 
 **장후 보관과 실행 인계는 다르다.** 일일 배치는 ACK된 일관된 cut/sequence와 원본·판본·미전송 상태를 보존하는 일이며 매일 모든 작업/미체결 주문을 종료하라는 요구가 아니다. 거래일 이후의 정정/늦은 FILL은 후속 판본·배치로 연결한다. 배치 ID/source-stream·범위·hash·원자 수락·첫 receipt·중복 재전송·부분 전송·저장후 응답 손실을 검증하고, 확실한 NAS 보관 확인 전 로컬 미전송 자료를 지우지 않는다. NAS의 archive 수락은 실제 내구성 기준이어야 한다. [빈target 순위 importer](../../src/kiwoom_monitor/central_server/database_rank_import.py#L211)와 [일부 live PG synchronous_commit OFF](../../src/kiwoom_monitor/central_server/database_datasets.py#L157)를 누적 archive 완료/내구성 ACK로 그대로 사용하지 않는다. 활성 SQLite 파일 하나만 복사해서 일관된 백업이라고 하지 않는다. 원본 DB 삭제·자료 이동/재작성은 별도 승인이다.
 
@@ -2251,7 +2256,7 @@ MAIN139에 AR06 수락 결과의 출처 전달과 AR09 version1 owner-state를 �
 | AR01·02·03 | UI/설정/Collector·TOP20의 같은 owner를 선택 실행 위치에 조립, 공통 입력 공급·장중 RAM/로컬 native 분리 | 기존 Windows 기능/입출력·ACK/세대·실패/종료 유지. 기존 관련 검사 재사용; 새 실행 위치는 해당OS에서 별도 실제 수락 |
 | AR04·05 | 로컬 원본과 NAS archive·백업·초기 최소이전·실행권한 인계를 분리. C07/C08 및 C08~C11의 실제 source/T0/target은 이 모델 뒤 고정 | 동일 자료/관계/시각·sequence/receipt, 원자 실패/중복·충돌·ACK-loss·재시작. SQLite/격리PG를 구분. 옛 승인/lease 자동 부활 없음 |
 | AR06 | 같은 뉴스 수집/RULE/본문·판본/완료 owner를 로컬 조립, NAS는 수락된 자료/결과 보관 | 현재 UI·본문/판정·재분석·native receipt 계약 유지. 실제설치/수신·실패/종료/재시작과 archive 연결을 각각 검증 |
-| AR07 | 같은 Episode/주문·Risk/계좌·원run/FILL·checkpoint, 기기 교체와 C20 같은계좌 키교체를 구분 | C20의 원 국소 수락과 현재 Windows PG3초 오류의 C24 잔여는 [현재 현황](#0-현재-기준과-진행-현황)·[11.71](#checklist-ar07)을 따른다. 기기 교체·실계좌·신규 배치의 수락과 혼동하지 않는다. |
+| AR07 | 같은 Episode/주문·Risk/계좌·원run/FILL·checkpoint, 기기 교체와 C20 같은계좌 키교체를 구분 | C20 원 국소 수락과 C24의 이전 소스 수락은 [현재 현황](#0-현재-기준과-진행-현황)·[11.71](#checklist-ar07)을 따른다. 기기 교체·실계좌·신규 배치는 별도다. |
 | AR08·09 | headless·OS별 경로/자격증명/프로세스 신원·RSS·설치/업데이트, 선택도구의 실제 부재/제거 | Windows 동작 유지, Linux/macOS/ARM은 실제 역할별 설치/수명·복구 검증. 기존Linux4는 operator fixture 수락이며 전체엔진 수락 아님. 새 라이브러리 선정/설치는 별도 승인 |
 
 **단계와 현재 상태 — 분리는 제외/완료 처리가 아니다.**
@@ -2260,8 +2265,8 @@ MAIN139에 AR06 수락 결과의 출처 전달과 AR09 version1 owner-state를 �
 |---|---|---|
 | 목표/책임 계약 반영 | 이번 사용자 선택으로 설계 반영 | v1/Q01~14·AR01~09/F 계약에 이 절 연결. 코드·배포 수락 아님 |
 | 공통 구조/안전·현재 기능 전환 | 승인 v1 연속 진행·현재 판정은 0절 | 실제caller·owner·native·수명 연결과 미결 회귀. 불필요한 재구현/옛 중복 경로 영구 유지 없음 |
-| 장후 archive 기능 연결 | 단계적 구현 대기·미검증 | AR04/05의 자료별 authority/내구성 수락 뒤 원자 반입·중복/충돌·전송 중단·ACK-loss/정정·재시작. 첫1종에서 관련 경로씩 확대, 새 전송 플랫폼은 선결론 아님 |
-| OS별 배포/운영 전환 | 단계적 구현/환경 수락 대기 | 공통경계 뒤 Windows 기존기능/각OS 실제설치·자원·권한·정상/강제종료·재시작; 실제배포/운영DB·실계좌/CI 별도 승인. Mac/Linux 지원 완료로 자동승계 금지 |
+| 장후 archive 기능 연결 | 네 관측 종류의 소프트웨어·격리 내구성 수락 | 기존 writer/reader와 원자 반입·중복/충돌·전송 중단·ACK-loss/정정·재시작. 실제 NAS grant·환경·자료·보관 범위/스케줄과 계좌 자료의 별도 계약은 남음 |
+| OS별 배포/운영 전환 | Windows 후보와 Darwin 주변 코드의 국소 검증; 실제 환경 수락 대기 | 대상별 실제 설치·자원·권한·종료·재시작을 분리. 실제배포/운영DB·실계좌/CI 별도 승인. macOS/Linux 전체 지원으로 자동승계 금지 |
 
 **현재 집계:** 0절/11.71을 따른다. 아래 수치는 목표 배치 채택 당시 이력이며 현재 진척과 합산하지 않는다.
 
@@ -5058,11 +5063,35 @@ native claim이 확정한 spec_id만 별도 MemberExecutionRecord/MemberAccountE
 **외부 근거/운영 재개 조건:** 사후 복원 분봉과 명시 동결 자료는 연구에 사용할 수 있고 미래 정보를 최초 신호에 넣지 않는다. 합성/재구성 근거는 실제 당시 관측이나 과거 수익성 증명이 아니다. DD 원주가 보호/체결별 비용과 MICRO 실제 tradability·교차 순서·VI 해제 체결가, 브로커 kt00007/kt00009 실제 지원·완전한 상세, 검증 가능한 계좌 namespace가 필요하며 부족하면 UNKNOWN을 유지한다. 실제 이전 대상·운영 source/target·OS 설치·장중 부하/단절·NAS 배포·권한 인계/T0·외부 push는 별도 승인/수락이다. 이 작업은 운영 계좌 주문·운영 NAS 변경/재시작·자료 삭제/실제 이전·T0·push를 실행하지 않았다.
 
 
+<a id="canonical-offline-followup"></a>
+
+### 11.294 정본 비운영 후속과 TR 계좌 연결 선택 — 2026-11-07
+
+사용자가 정본 잔여의 로컬 작업·검증·문서·커밋과 TR 통합/분리 설정을 승인했다. [승인 변경 기록](#117-완료-판정과-계획-변경)과 [N01~07 범위·종료 기준·미정](canonical-offline-followup-20261107.md)을 적용했다. S12 5/5·대표11/11은 기존 [11.293](#section12-final-development-acceptance)의 별도 수락이다.
+
+| ID | 구현/검증 근거 | 별도 남는 조건 |
+|---|---|---|
+| N01·Q02 | 기존 14Q·9AR·90조건을 [대조](../../tmp/canonical-offline-20261107/scope-crosscheck.md)하고 사용자 승인/추가, 영향 owner·자료, 현행 계약·검사, 외부 제외를 정본에 연결했다. 조사/승인/구현/검증/실제 운영을 분리하는 Q02만 독립 수락한다. | 다른 Q/AR의 개별 완료 조건·운영 SLA/RPO/RTO는 그대로다. |
+| N02 | 합성 고정 입력으로 실제 Windows 평가 자식과 개발 사용 기록 자식 두 PID를 실행해 native `COMPLETED`→`EXPOSED_DEVELOPMENT`, 화면 반영, 원입력 불변, 보관 grant 포함 23개 환경 이름 차단과 자원 정리를 확인했다. [최종 witness](../../tmp/canonical-offline-20261107/roles/user-context005-final/roles-run.json) | 실제 봉인 입력과 실제 역할 grant/ACL·운영 연결 |
+| N03 | 네 관측 종류의 기존 writer·고정 export→첫 원자 보관/재전송→기존 연구 reader. 로컬 뉴스 BODY/RULE의 기존 owner·수명 재사용. Darwin RSS, 프로세스 신원 UNKNOWN과 일지 소유 보존, macOS Keychain/AES-GCM 및 기존 Windows DPAPI. [보관](../../tmp/canonical-offline-20261107/archive/REPORT.md) · [OS 검사](../../tmp/canonical-offline-20261107/security/REVIEW.md) | 실제 NAS grant·스케줄/부하, macOS native Keychain·설치/ACL, Linux 데스크톱 보호 저장 대상 환경 |
+| N04 | 고정 소스의 wheel·Windows 실행물과 Inno 설치 후보를 생성했다. 같은 EXE로 서버 두 기동/종료, 연구 정상·재시작·취소와 원본 해시를 검증했다. | 기존 설치 환경과 분리된 실제 대상 Windows 설치/제거, macOS/Linux 설치·기동 및 별도 운영 수락 |
+| N05 | 실제 보유 TRAIN/VALIDATION 입력 6개와 원자료 251개 불변 확인. 요청 148개 중 결과 28, 보류 119, 대체 1이며 승인된 미실행 S12 요청은 0. [연구 지원표](../../tmp/canonical-offline-20261107/research/support-matrix.md) | 미래 정보가 없는 복원 봉 연구는 유지. 실제 봉인 결과, DD 원주가·비용, MICRO 실거래 가능/VI/순서 및 채택 정책은 미수락. |
+| N07 | [설정·안전 경계](canonical-offline-followup-20261107.md#offline-tr-routing): 설정 UI→HTTPS→native CAS→기존 브로커/한도. 가짜 계좌에서 분봉·잔고·체결·주문·취소의 분리, 공통 0B, 키 교체·닫힘 경합·저장 응답 유실·재기동 및 기존 통합 흐름을 검증했다. [구성요소 206건](../../tmp/canonical-offline-20261107/routing/component02/component-summary.json) | 개인 서버의 검증된 계좌 연결 범위. 기존 단일 키 로컬 모드, 실제 키움 한도/장중 지연, 실전자동매매 신규 허용은 포함하지 않는다. |
+| N06 | 최종 고정 실행 소스와 실제 관련 ID, OS/PG 정리 및 정적·증분 검사를 아래에 기록한다. | 신규 hosted CI, 운영 배포·이전·권한·T0는 별도다. |
+
+고정 소스는 1,301파일, LF SHA-256 `0e4a7dc4998cd19fce2dca581637434d44941eebe17d985b0f4386da708a5272`다. 관련 Windows 396건(31모듈), PostgreSQL 17.0.11 3건(2모듈)을 동일 소스에서 계획·발견·실행·종료와 대조했다. 별도 실제 연구 witness 1건과 보완 역할 5건의 이전 집계와의 중복을 제외한다. Windows Job·전용 TEMP/HKCU와 PostgreSQL 격리 DB·비밀번호 파일·포트·Job을 정리했다. [소스](../../tmp/canonical-offline-20261107/final-source.json) · [실행 대조](../../tmp/canonical-offline-20261107/final-verification.json) · [역할 5건](../../tmp/canonical-offline-20261107/packaging/current-role-tests/run.json).
+
+Windows 설치 후보 `KiwoomMonitor-Setup-2.1.0.exe`는 253,598,065바이트, SHA-256 `8a358d971d91379bd69aa0a7647af6967b71adf1e75b6d51880ff6d6a29c15cd`다. 최초 컴파일의 긴 경로 오류를 보존하고, 바이트가 동일한 5,007파일을 더 짧은 격리 경로에 두어 같은 Inno recipe로 성공했다. 설치 프로그램은 실행하지 않았다. [컴파일](../../tmp/canonical-offline-20261107/packaging/installer-verification.json) · [wheel](../../tmp/canonical-offline-20261107/packaging/wheel-verification.json) · [실행물](../../tmp/canonical-offline-20261107/packaging/build-verification.json) · [서버](../../tmp/canonical-offline-20261107/packaging/frozen-server-verification.json) · [연구](../../tmp/canonical-offline-20261107/packaging/frozen-runtime-verification.json).
+
+선택 수신과 TR 설정의 native 호출만 [구조](guardrails.json)와 [QueryStore 소비 계약](../db_refactoring/baseline_query_store_consumers.json)에 증분 기록했다. [구조 검사](../../tmp/canonical-offline-20261107/architecture-final.json)·[소비자 검사](../../tmp/canonical-offline-20261107/consumers-final.json)·[증분 실행 검사](../../tmp/canonical-offline-20261107/test-execution-gate.json)가 통과했다(7,670정의/310기록, 27 추가·7 변경·삭제0). 골든 원문/기대 hash를 교체하지 않았다. 세 기존 계약의 최초 실패는 기준 `b1024cd`와의 대조 및 native migration25 영수증/인덱스의 한정 메모리 projection으로 분리하고 원 실패를 보존했다. 기존 49개 미결, C16 재발 이관, C24 이전 소스 수락은 유지한다.
+
+새 제품 의존성은 없고, S12의 Windows psutil 채택과 기존 비교 결과를 유지한다. TR은 별도 계좌일 때 조회 작업의 연결 예산을 나눈다는 구조적 근거가 있다. 실제 키움 지연·처리량과 새 저장 성능 개선을 이번 검증에서 주장하지 않는다.
+
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 
 2026-10-24 사용자는 기존 앱에 맞추지 않아도 되며 재설계 중인 지금 돌파·종가베팅·신규주·낙주 중심으로 목표를 다시 잡고, 사용할 수 있는 기존 구현은 재사용하도록 요청했다. 이어 네 운용군의 전체 매매 흐름·공통 구조·코드 재사용/변경을 구체화해 정본에 반영하도록 지시했다. **네 운용군 전체를 먼저 설계하고, 구현은 완결된 흐름 단위로 연결한다.** 첫 구현의 돌파 규칙이나 현재 Family/DB/화면이 나머지 방식의 구조를 결정하지 않게 한다.
 
-이 절은 해당 요청에 따른 목표 설계다. 기존 v1의 안전·원본·복구·역할 분리·최소 이전 계약은 유지하고, 자동매매·연구의 목표와 전환 방향이 겹치는 곳은 이 절을 우선한다. 11.16~11.17의 당시 “새 전략을 추가하지 않음”은 역할 분리 구현의 범위였으며 이번 **전략 설계**를 배제하지 않는다. 제품 코드 구현·네 전략 성과 검증·모의/실전 활성화는 이번 문서 반영에 포함하지 않는다. 기존 AR02 1/9·Q0/14와 원실패·미검증 상태는 0절에 그대로 유지한다.
+이 절은 해당 요청에 따른 목표 설계다. 기존 v1의 안전·원본·복구·역할 분리·최소 이전 계약은 유지하고, 자동매매·연구의 목표와 전환 방향이 겹치는 곳은 이 절을 우선한다. 11.16~11.17의 당시 “새 전략을 추가하지 않음”은 역할 분리 구현의 범위였으며 이 전략 설계를 배제하지 않는다. 설계 후 제품 개발과 대표 연결의 로컬 수락은 [11.293](#section12-final-development-acceptance), 실제 수익성·실전 활성화 및 AR/Q 현재값은 [0절](#0-현재-기준과-진행-현황)에 분리한다.
 
 ### 12.1 연구 근거와 해석 범위
 

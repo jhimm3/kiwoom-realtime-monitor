@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import tempfile
@@ -16,6 +17,37 @@ from kiwoom_monitor.infrastructure.persistence.theme_backup import ThemeBackupSe
 
 
 class GoogleDriveSyncServiceTest(unittest.TestCase):
+    def test_protected_token_unavailable_keeps_original_without_oauth_or_refresh(self):
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        from googleapiclient import discovery
+        from kiwoom_monitor.infrastructure.kiwoom_rest import local_secret_keychain as keychain
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = GoogleDriveSyncService(Path(directory) / 'monitor.sqlite3')
+            service._client_path.write_text('{}', encoding='utf-8')
+            inputs = (
+                ('win32', b'KRM-MAC-KEYCHAIN\x01' + bytes(28)),
+                ('darwin', b'legacy-dpapi'),
+                ('darwin', b'KRM-MAC-KEYCHAIN\x01' + bytes(28)),
+                ('linux', b'legacy-dpapi'),
+            )
+            for platform, data in inputs:
+                with self.subTest(platform=platform, is_keychain=data.startswith(b'KRM')):
+                    token = base64.b64encode(data)
+                    service._token_path.write_bytes(token)
+                    with patch('sys.platform', platform), \
+                         patch.object(keychain, '_keychain_key', side_effect=keychain.LocalSecretUnavailable('locked')), \
+                         patch.object(InstalledAppFlow, 'from_client_secrets_file') as oauth, \
+                         patch.object(Credentials, 'from_authorized_user_info') as deserialize, \
+                         patch.object(Request, '__call__') as request, patch.object(discovery, 'build') as build:
+                        with self.assertRaises(GoogleDriveSyncError):
+                            service._drive_service(interactive=True)
+                        for caller in (oauth, deserialize, request, build):
+                            caller.assert_not_called()
+                    self.assertEqual(token, service._token_path.read_bytes())
+
     @staticmethod
     def _backup_set_transport():
         from types import SimpleNamespace

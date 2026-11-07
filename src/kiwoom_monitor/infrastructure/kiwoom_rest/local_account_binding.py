@@ -1,4 +1,4 @@
-"""Windows DPAPI mirror for verified account bindings."""
+"""Locally protected mirror for verified account bindings."""
 
 from __future__ import annotations
 
@@ -31,9 +31,9 @@ class LocalAccountBindingConfig:
             return ()
         raw = self._path.read_text(encoding="utf-8").strip()
         if not raw.startswith(_HEADER):
-            raise ValueError("local account binding file is not DPAPI protected")
+            raise ValueError("local account binding file has no protected format")
         document = json.loads(
-            _unprotect(base64.b64decode(raw.split("=", 1)[1])).decode("utf-8")
+            _unprotect(base64.b64decode(raw.split("=", 1)[1]), path=self._path).decode("utf-8")
         )
         if document.get("version") != _FORMAT_VERSION or not isinstance(document.get("bindings"), list):
             raise ValueError("unsupported local account binding format")
@@ -61,7 +61,7 @@ class LocalAccountBindingConfig:
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
-        encoded = base64.b64encode(_protect(payload)).decode("ascii")
+        encoded = base64.b64encode(_protect(payload, path=self._path)).decode("ascii")
         self._path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self._path.with_name(f"{self._path.name}.tmp")
         temporary.write_text(f"{_HEADER}{encoded}\n", encoding="utf-8")

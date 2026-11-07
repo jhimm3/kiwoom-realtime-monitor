@@ -1,3 +1,5 @@
+import io
+import json
 import os
 import tempfile
 import unittest
@@ -15,6 +17,37 @@ from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
 from kiwoom_monitor.presentation.api_settings_dialog import ApiSettingsDialog
 from kiwoom_monitor.presentation.nas_credentials_dialog import NasCredentialsDialog
 from qt_settings_test_support import dispose_dialogs, wait_until
+
+
+class TrConnectionTransportTests(unittest.TestCase):
+    def test_tr_connection_client_uses_verified_refs_and_cas_without_key_fields(self):
+        client = CentralCredentialsClient(DataSourceSettings("personal_server", "https://nas.example.test", "access"))
+        scope = {"broker": "kiwoom", "environment": "mock", "account_ref": str(uuid.uuid4())}
+        target = {"scope": scope, "credential_profile_id": "mock-one", "binding_revision": 4}
+        values = {"mode": "integrated", "execution_target": target, "data_target": target}
+        applied = {"settings": {**values, "revision": 5}, "applied_revision": 5, "status": "applied",
+                   "effective_mode": "integrated", "execution_ready": True,
+                   "realtime_market": {"environment": "real", "credential_profile_id": "nas-real-default"}}
+        responses = iter([applied, {"accounts": [{**scope, "credential_profile_id": "mock-one", "binding_revision": 4,
+                                                 "display_label": "모의 계좌", "extra": "ignored"}]}, applied])
+        requests = []
+
+        def open_response(request, timeout):
+            self.assertEqual(10, timeout)
+            requests.append(request)
+            response = io.BytesIO(json.dumps(next(responses)).encode())
+            response.geturl = lambda: request.full_url
+            return response
+
+        with patch("kiwoom_monitor.infrastructure.central_credentials_client.build_opener") as build:
+            build.return_value.open.side_effect = open_response
+            self.assertEqual([(target, "모의 계좌")], client.load_tr_connections()["targets"])
+            self.assertEqual(applied, client.update_tr_connections(values, 4))
+            with self.assertRaisesRegex(ValueError, "TR_CONNECTION_SETTINGS_INVALID"):
+                client.update_tr_connections({**values, "app_key": "never-send"}, 5)
+        self.assertEqual(["GET", "GET", "PUT"], [request.method for request in requests])
+        self.assertEqual({**values, "expected_revision": 4}, json.loads(requests[-1].data))
+        self.assertTrue(requests[-1].full_url.endswith("/api/v1/settings/tr-connections"))
 
 
 class NasCredentialsDialogTests(unittest.TestCase):
@@ -61,6 +94,32 @@ class NasCredentialsDialogTests(unittest.TestCase):
         self.assertFalse(dialog._prepare_button.isEnabled())
         self.assertFalse(dialog._create_button.isEnabled())
         self.assertFalse(dialog._settings_button.isEnabled())
+
+    def test_tr_settings_selects_shared_account_and_separately_displays_realtime_source(self):
+        dialog = self.open()
+        execution = {"scope": self.settings["settings"]["scope"], "credential_profile_id": self.profile["profile_id"],
+                     "binding_revision": 1}
+        realtime = {"scope": {"broker": "kiwoom", "environment": "real", "account_ref": str(uuid.uuid4())},
+                    "credential_profile_id": "market-realtime", "binding_revision": 2}
+        legacy = {"settings": {"mode": "separated", "execution_target": None, "data_target": None, "revision": 0},
+                  "status": "legacy", "applied_revision": None, "effective_mode": None, "execution_ready": None,
+                  "realtime_market": {"environment": "real", "credential_profile_id": "market-realtime"},
+                  "targets": [(execution, "모의 매매"), (realtime, "실전 시세")]}
+        with patch.object(self.client, "load_tr_connections", return_value=legacy), \
+             patch.object(self.client, "update_tr_connections", side_effect=RuntimeError("응답 유실")) as update:
+            dialog._tr_reload.click()
+            wait_until(lambda: dialog._worker is None and dialog._tr_settings is not None)
+            self.assertFalse(dialog._tr_apply.isEnabled())
+            self.assertIn("실시간 0B 공통 입력: 실전 시세", dialog._tr_realtime.text())
+            dialog._tr_execution.setCurrentIndex(0)
+            self.assertFalse(dialog._tr_apply.isEnabled())
+            dialog._tr_mode.setCurrentIndex(dialog._tr_mode.findData("integrated"))
+            self.assertFalse(dialog._tr_data.isEnabled())
+            dialog._tr_apply.click()
+            wait_until(lambda: dialog._worker is None)
+            update.assert_called_once_with({"mode": "integrated", "execution_target": execution, "data_target": execution}, 0)
+            self.assertFalse(dialog._tr_apply.isEnabled())
+            self.assertIn("다시 불러오세요", dialog._tr_status.text())
 
     def test_prepare_clears_keys_and_prevents_duplicate_clicks(self):
         dialog = self.open()

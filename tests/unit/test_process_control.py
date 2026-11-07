@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import json
+import ctypes
+import errno
 import os
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import MappingProxyType
+from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
+from kiwoom_monitor.presentation import process_control as control
 
 from kiwoom_monitor.presentation.process_control import (
     AuxiliaryProcessManager,
@@ -39,6 +44,53 @@ class ProcessControlTests(unittest.TestCase):
         self.assertFalse(process_identity_is_alive(identity["pid"], "wrong-token"))
         self.assertEqual('running', process_identity_state(identity['pid'], identity['start_token']))
         self.assertEqual('exited', process_identity_state(identity['pid'], 'wrong-token'))
+
+    def test_darwin_native_identity_preserves_microseconds_and_detects_pid_reuse(self) -> None:
+        raw = bytearray(136)
+        struct.pack_into('=I', raw, 12, 42)
+        struct.pack_into('=QQ', raw, 120, 1_793_678_400, 123_456)
+
+        def query(pid, flavor, argument, buffer, size):
+            self.assertEqual((42, 3, 0, 136), (pid, flavor, argument, size))
+            ctypes.memmove(buffer, bytes(raw), len(raw))
+            return len(raw)
+
+        native = Mock(side_effect=query)
+        control._darwin_process_api.cache_clear()
+        try:
+            with patch.object(control.sys, 'platform', 'darwin'), patch.object(
+                    control.ctypes, 'CDLL', return_value=SimpleNamespace(proc_pidinfo=native)) as load:
+                self.assertEqual('darwin:1793678400:123456', process_start_token(42))
+                self.assertEqual('running', process_identity_state(42, 'darwin:1793678400:123456'))
+                self.assertTrue(process_identity_is_alive(42, 'darwin:1793678400:123456'))
+                struct.pack_into('=Q', raw, 128, 123_457)
+                self.assertEqual('exited', process_identity_state(42, 'darwin:1793678400:123456'))
+                self.assertFalse(process_identity_is_alive(42, 'darwin:1793678400:123456'))
+            load.assert_called_once_with('/usr/lib/libproc.dylib', use_errno=True)
+            self.assertEqual(ctypes.c_int, native.restype)
+            self.assertEqual([ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int], native.argtypes)
+        finally:
+            control._darwin_process_api.cache_clear()
+
+    def test_darwin_denied_incomplete_and_absent_identity_remain_distinct(self) -> None:
+        def query(*_arguments):
+            ctypes.set_errno(native_error[0])
+            return returned[0]
+
+        control._darwin_process_api.cache_clear()
+        try:
+            with patch.object(control.sys, 'platform', 'darwin'), patch.object(
+                    control.ctypes, 'CDLL', return_value=SimpleNamespace(proc_pidinfo=Mock(side_effect=query))):
+                for count, error, expected in ((0, errno.EPERM, 'unknown'), (135, 0, 'unknown'),
+                                               (135, errno.ESRCH, 'unknown'),
+                                               (0, errno.ESRCH, 'exited')):
+                    returned, native_error = [count], [error]
+                    with self.subTest(returned=count, errno=error):
+                        self.assertEqual('', process_start_token(42))
+                        self.assertEqual(expected, process_identity_state(42, 'darwin:1793678400:123456'))
+                        self.assertFalse(process_identity_is_alive(42, 'darwin:1793678400:123456'))
+        finally:
+            control._darwin_process_api.cache_clear()
 
     def test_exited_child_is_distinguished_from_unverifiable_identity(self) -> None:
         child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(1)'])

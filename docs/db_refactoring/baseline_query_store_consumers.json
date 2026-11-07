@@ -5897,6 +5897,39 @@
       "GET",
       "/api/v1/mock-automation/selected-order-evidence/{operation_id}/management",
       "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app",
+      "store",
+      "load_tr_connection_settings",
+      "direct_call",
+      "store.load_tr_connection_settings",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app.read_tr_connections",
+      "store",
+      "load_tr_connection_settings",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app.save_tr_connections.apply",
+      "store",
+      "save_tr_connection_settings",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
     ]
   ],
   "forwarding_identities": [
@@ -7054,6 +7087,17 @@
       "",
       "",
       "central-mock-runtime"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app",
+      "create_observation_archive_router",
+      "store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-app-store-closure"
     ]
   ],
   "contracts": {
@@ -7201,7 +7245,12 @@
       "load_selected_order_identity_context": "{\"arguments\": \"arguments(args=[arg(arg='self')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "load_selected_order_management_policy": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='context')], kwonlyargs=[arg(arg='_reader')], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "prepare_selected_order_management": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='operation_id')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
-      "replace_mock_automation_control": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load())), arg(arg='expected_selection_id', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+      "replace_mock_automation_control": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load())), arg(arg='expected_selection_id', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "accept_observation_archive": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source_stream', annotation=Name(id='str', ctx=Load())), arg(arg='raw', annotation=Name(id='bytes', ctx=Load())), arg(arg='expected_sha256', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "load_observation_archive": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source_stream', annotation=Name(id='str', ctx=Load())), arg(arg='batch_id', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='include_body', annotation=Name(id='bool', ctx=Load()))], kw_defaults=[Constant(value=False)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
+      "load_tr_connection_settings": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "prepare_observation_archive": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "save_tr_connection_settings": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value')], kwonlyargs=[arg(arg='expected_revision')], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
     },
     "QueryStore": {
       "acquire_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -7328,7 +7377,9 @@
       "save_news_body_revision_receipt": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "mock_automation_read_scope": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='AbstractContextManager', ctx=Load()), slice=Name(id='Any', ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "publish_mock_automation_current_risk": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='document', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected', annotation=BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None)))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "load_close_gap_observations": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='closing_start', annotation=Name(id='datetime', ctx=Load())), arg(arg='closing_end', annotation=Name(id='datetime', ctx=Load())), arg(arg='next_open', annotation=Name(id='datetime', ctx=Load())), arg(arg='as_of', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+      "load_close_gap_observations": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='closing_start', annotation=Name(id='datetime', ctx=Load())), arg(arg='closing_end', annotation=Name(id='datetime', ctx=Load())), arg(arg='next_open', annotation=Name(id='datetime', ctx=Load())), arg(arg='as_of', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "load_tr_connection_settings": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "save_tr_connection_settings": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load()))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     },
     "SQLiteQueryStore": {
       "_connect": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Attribute(value=Name(id='sqlite3', ctx=Load()), attr='Connection', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -7468,7 +7519,12 @@
       "load_selected_order_identity_context": "{\"arguments\": \"arguments(args=[arg(arg='self')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "load_selected_order_management_policy": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='context')], kwonlyargs=[arg(arg='_reader')], kw_defaults=[Constant(value=None)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "prepare_selected_order_management": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='operation_id')], kwarg=arg(arg='kwargs'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
-      "replace_mock_automation_control": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load())), arg(arg='expected_selection_id', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+      "replace_mock_automation_control": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load())), arg(arg='expected_selection_id', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "accept_observation_archive": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source_stream', annotation=Name(id='str', ctx=Load())), arg(arg='raw', annotation=Name(id='bytes', ctx=Load())), arg(arg='expected_sha256', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "load_observation_archive": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source_stream', annotation=Name(id='str', ctx=Load())), arg(arg='batch_id', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='include_body', annotation=Name(id='bool', ctx=Load()))], kw_defaults=[Constant(value=False)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
+      "load_tr_connection_settings": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "prepare_observation_archive": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "save_tr_connection_settings": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value')], kwonlyargs=[arg(arg='expected_revision')], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
     }
   },
   "incremental_reviews": [
@@ -8783,6 +8839,121 @@
         "tmp/s12-05-group-integration/final-static-review-current-settings-proposal.json"
       ],
       "execution_scope": "Static source review only. Current executable source, discovered/executed IDs, resource cleanup and final S12 acceptance require the separate final source run."
+    },
+    {
+      "id": "N03-N07-offline-archive-and-tr-settings-20261107",
+      "added": [
+        [
+          "src/kiwoom_monitor/central_server/app.py",
+          "create_app",
+          "store",
+          "load_tr_connection_settings",
+          "direct_call",
+          "store.load_tr_connection_settings",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/app.py",
+          "create_app.read_tr_connections",
+          "store",
+          "load_tr_connection_settings",
+          "callable_argument",
+          "asyncio.to_thread",
+          "",
+          "",
+          "reviewed_store_binding"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/app.py",
+          "create_app.save_tr_connections.apply",
+          "store",
+          "save_tr_connection_settings",
+          "callable_argument",
+          "asyncio.to_thread",
+          "",
+          "",
+          "reviewed_store_binding"
+        ]
+      ],
+      "removed": [],
+      "forwarding_added": [
+        [
+          "src/kiwoom_monitor/central_server/app.py",
+          "create_app",
+          "create_observation_archive_router",
+          "store",
+          "0",
+          "direct_call",
+          "",
+          "",
+          "central-app-store-closure"
+        ]
+      ],
+      "forwarding_removed": [],
+      "contract_delta": {
+        "PostgresQueryStore": {
+          "accept_observation_archive": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source_stream', annotation=Name(id='str', ctx=Load())), arg(arg='raw', annotation=Name(id='bytes', ctx=Load())), arg(arg='expected_sha256', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "load_observation_archive": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source_stream', annotation=Name(id='str', ctx=Load())), arg(arg='batch_id', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='include_body', annotation=Name(id='bool', ctx=Load()))], kw_defaults=[Constant(value=False)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "load_tr_connection_settings": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "prepare_observation_archive": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "save_tr_connection_settings": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value')], kwonlyargs=[arg(arg='expected_revision')], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          }
+        },
+        "QueryStore": {
+          "load_tr_connection_settings": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "save_tr_connection_settings": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load()))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          }
+        },
+        "SQLiteQueryStore": {
+          "accept_observation_archive": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source_stream', annotation=Name(id='str', ctx=Load())), arg(arg='raw', annotation=Name(id='bytes', ctx=Load())), arg(arg='expected_sha256', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "load_observation_archive": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source_stream', annotation=Name(id='str', ctx=Load())), arg(arg='batch_id', annotation=Name(id='str', ctx=Load()))], kwonlyargs=[arg(arg='include_body', annotation=Name(id='bool', ctx=Load()))], kw_defaults=[Constant(value=False)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "load_tr_connection_settings": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "prepare_observation_archive": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "save_tr_connection_settings": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value')], kwonlyargs=[arg(arg='expected_revision')], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          }
+        }
+      },
+      "reason": "TR settings의 3 app→store caller와 archive의 명시 router 전달 1건. 기본 QueryStore는 TR 설정만, 두 native backend는 선택 archive 3개도 제공한다. 동일 이름 미확정 후보 및 기존 계약을 유지한다.",
+      "evidence": [
+        "docs/architecture/canonical-offline-followup-20261107.md",
+        "tmp/canonical-offline-20261107/consumers-first.json"
+      ],
+      "execution_scope": "정적 소비자와 native API 검토. 환경별 작동/운영 수락은 별도 실행 증거를 따른다."
     }
   ]
 }

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+from functools import lru_cache
 from collections.abc import Callable
 from typing import Mapping, Sequence
 
@@ -161,11 +163,53 @@ def process_start_token(process_id: int) -> str:
             return str((created.high << 32) | created.low)
         finally:
             ctypes.windll.kernel32.CloseHandle(handle)
+    if sys.platform == "darwin":
+        try:
+            return _darwin_process_start_token(process_id)
+        except OSError:
+            return ""
     try:
         # Linux /proc의 22번째 필드는 부팅 이후 프로세스 시작 tick이다.
         return Path(f"/proc/{process_id}/stat").read_text(encoding="ascii").split()[21]
     except (OSError, IndexError):
         return ""
+
+
+@lru_cache(maxsize=1)
+def _darwin_process_api():
+    class BSDInfo(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint32) for name in (
+            'flags', 'status', 'xstatus', 'pid', 'ppid', 'uid', 'gid',
+            'ruid', 'rgid', 'svuid', 'svgid', 'reserved',
+        )] + [('comm', ctypes.c_char * 16), ('name', ctypes.c_char * 32)] + [
+            (name, ctypes.c_uint32) for name in ('nfiles', 'pgid', 'pjobc', 'tdev', 'tpgid')
+        ] + [('nice', ctypes.c_int32), ('start_seconds', ctypes.c_uint64),
+             ('start_microseconds', ctypes.c_uint64)]
+
+    try:
+        query = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True).proc_pidinfo
+    except AttributeError:
+        raise OSError('PROC_PIDTBSDINFO API unavailable') from None
+    query.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+    query.restype = ctypes.c_int
+    return BSDInfo, query
+
+
+def _darwin_process_start_token(process_id: int) -> str:
+    BSDInfo, query = _darwin_process_api()
+    info = BSDInfo()
+    ctypes.set_errno(0)
+    # PROC_PIDTBSDINFO returns its full byte count; errno distinguishes ESRCH
+    # from denied/unavailable inspection. A short response has no proven identity.
+    expected = ctypes.sizeof(info)
+    received = query(process_id, 3, 0, ctypes.byref(info), expected)
+    if received == 0:
+        raise OSError(ctypes.get_errno(), 'PROC_PIDTBSDINFO failed')
+    if received != expected:
+        raise OSError('PROC_PIDTBSDINFO returned an incomplete identity')
+    if info.pid != process_id or not info.start_seconds or info.start_microseconds >= 1_000_000:
+        raise OSError('PROC_PIDTBSDINFO returned an invalid identity')
+    return f'darwin:{info.start_seconds}:{info.start_microseconds:06d}'
 
 
 def process_identity_document(process_id: int | None = None) -> dict[str, object]:
@@ -186,6 +230,8 @@ def read_process_identity(path: Path) -> tuple[int, str]:
 
 
 def process_identity_is_alive(process_id: int, start_token: str) -> bool:
+    if sys.platform == 'darwin':
+        return process_identity_state(process_id, start_token) == 'running'
     return bool(
         process_id > 0
         and start_token
@@ -198,6 +244,12 @@ def process_identity_state(process_id: int, start_token: str) -> str:
     """Return running, exited, or unknown without mistaking access denial for exit."""
     if type(process_id) is not int or process_id <= 0 or not start_token:
         return 'unknown'
+    if sys.platform == 'darwin':
+        try:
+            current = _darwin_process_start_token(process_id)
+        except OSError as error:
+            return 'exited' if error.errno == errno.ESRCH else 'unknown'
+        return 'running' if current == start_token else 'exited'
     current = process_start_token(process_id)
     if current:
         if current != start_token:

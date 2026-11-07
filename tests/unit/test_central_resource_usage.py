@@ -61,3 +61,14 @@ class CentralResourceUsageTests(unittest.TestCase):
             self.assertIsNone(result["process_memory_bytes"])
             self.assertGreater(result["data_disk_total_bytes"], 0)
             self.assertEqual(12345, result["database_size_bytes"])
+
+    def test_darwin_reuses_current_resident_measurement_and_preserves_unknown(self) -> None:
+        for measured in (123_456_789, OSError('native measurement unavailable')):
+            options = {'side_effect': measured} if isinstance(measured, OSError) else {'return_value': measured}
+            with self.subTest(measured=type(measured).__name__), patch.object(resources, 'platform', 'darwin'), patch(
+                    'kiwoom_monitor.application.research_resources.current_rss_bytes', **options) as rss:
+                result = resource_usage(Path.cwd(), 12345)
+            self.assertEqual(None if isinstance(measured, OSError) else measured, result['process_memory_bytes'])
+            rss.assert_called_once_with()
+            self.assertGreater(result['data_disk_total_bytes'], 0)
+            self.assertEqual(12345, result['database_size_bytes'])

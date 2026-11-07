@@ -22,7 +22,7 @@ from .market_ingest import (
 )
 from .realtime_hub import RealtimeHub
 from .realtime_collector import CentralRealtimeCollector
-from .rest_broker import CentralRestBroker
+from .rest_broker import BrokerCredentialBusyError, CentralRestBroker
 from .autonomous_top20 import AutonomousTop20Service
 from .external_market_collector import YahooDelayedMarketCollector
 from .market_observations import KST, as_kst
@@ -175,6 +175,8 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             diagnostic_inputs = diagnostic_tools.compose_application_inputs(store)
         realtime_hub = RealtimeHub(now_provider=server_now, observer=diagnostic_inputs.get("hub"))
         store.initialize()
+        if active.observation_archive_grants:
+            store.prepare_observation_archive()
         credential_statuses: dict[str, str] = {}
         if active.credential_directory:
             from kiwoom_monitor.central_server.credential_store import (
@@ -434,6 +436,99 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             if collector is not None:
                 collector._account_event_handler = real_owner.on_market_account_event
             credential_runtime.register("kiwoom_real", real_owner.hooks())
+
+        # TR routing does not replace the market WebSocket or the selected order owner.
+        from kiwoom_monitor.domain.credential_contract import same_tr_account
+        tr_connection_available = broker is not None and (real_owner is not None or mock_owner is not None)
+        tr_connection_document = None
+        tr_connection_recovery = False
+
+        def tr_target_transport(target):
+            profile = target["credential_profile_id"]
+            owner = mock_owner if target["scope"]["environment"] == "mock" else real_owner
+            bundle = owner.bundle(profile) if owner is not None else None
+            revision = owner.active_revision(profile) if bundle is not None else None
+            if bundle is None or bundle.binding is None or revision is None:
+                raise BrokerCredentialBusyError("TR_CONNECTION_PROFILE_NOT_READY")
+            if (bundle.binding.scope.to_dict() != target["scope"]
+                    or bundle.binding.credential_profile_id != profile
+                    or bundle.binding.binding_revision != target["binding_revision"]):
+                raise BrokerCredentialBusyError("TR_CONNECTION_PROFILE_CHANGED")
+            if not bundle.broker.market_transport_ready:
+                raise BrokerCredentialBusyError("TR_CONNECTION_PROFILE_NOT_READY")
+            return bundle.broker, revision
+
+        def tr_market_transport():
+            if tr_connection_recovery or tr_connection_document is None:
+                raise BrokerCredentialBusyError("TR_CONNECTION_SETTINGS_RECOVERY_REQUIRED")
+            if tr_connection_document["revision"] == 0:
+                return None
+            execution = tr_connection_document["execution_target"]
+            data = tr_connection_document["data_target"]
+            target = execution if same_tr_account(execution, data) else data
+            transport, credential_revision = tr_target_transport(target)
+            return transport, json.dumps((tr_connection_document["revision"], target, credential_revision),
+                                         sort_keys=True, separators=(",", ":"))
+
+        async def read_tr_connections():
+            saved = await asyncio.to_thread(store.load_tr_connection_settings)
+            applied = None
+            effective_mode = None
+            execution_ready = None
+            status = "unavailable"
+            if tr_connection_available:
+                if broker.market_transport_change_pending:
+                    status = "applying"
+                elif tr_connection_recovery or saved != tr_connection_document:
+                    status = "recovery_required"
+                elif saved["revision"] == 0:
+                    status = "legacy"
+                else:
+                    execution, data = saved["execution_target"], saved["data_target"]
+                    effective_mode = "integrated" if same_tr_account(execution, data) else "separated"
+                    try:
+                        tr_target_transport(execution)
+                        execution_ready = True
+                    except BrokerCredentialBusyError:
+                        execution_ready = False
+                    try:
+                        tr_market_transport()
+                        if not broker.market_transport_ready:
+                            raise BrokerCredentialBusyError("TR_CONNECTION_PROFILE_NOT_READY")
+                        applied, status = saved["revision"], "applied"
+                    except BrokerCredentialBusyError:
+                        status = "waiting_for_profile"
+            return {"settings": saved, "applied_revision": applied, "status": status,
+                    "effective_mode": effective_mode, "execution_ready": execution_ready,
+                    "realtime_market": {"environment": active.kiwoom_environment if collector else None,
+                                        "credential_profile_id": (real_owner.market_profile_id if real_owner else
+                                            main_binding.credential_profile_id if main_binding else None)}}
+
+        async def save_tr_connections(settings, *, expected_revision):
+            async def apply():
+                nonlocal tr_connection_document, tr_connection_recovery
+                execution, data = settings["execution_target"], settings["data_target"]
+                for target in ((execution,) if execution == data else (execution, data)):
+                    tr_target_transport(target)
+                try:
+                    saved = await asyncio.to_thread(store.save_tr_connection_settings,
+                                                    settings, expected_revision=expected_revision)
+                except ValueError:
+                    raise  # The native transaction rejected the proposal.
+                except Exception:
+                    # An unknown write outcome may already have committed; no old-route fallback.
+                    tr_connection_recovery = True
+                    raise BrokerCredentialBusyError("TR_CONNECTION_SETTINGS_RECOVERY_REQUIRED") from None
+                tr_connection_document = saved
+                tr_connection_recovery = False
+            return await broker.change_market_transport(apply)
+
+        if tr_connection_available:
+            try:
+                tr_connection_document = store.load_tr_connection_settings()
+            except (ValueError, OSError):
+                tr_connection_recovery = True
+            broker.set_market_transport_provider(tr_market_transport)
         if active.news_configured or credential_runtime is not None or bool(operational["news_naver_stock_enabled"]):
             from kiwoom_monitor.infrastructure.dart_disclosures import DartDisclosureClient
             from kiwoom_monitor.infrastructure.naver_news import NaverNewsClient, NaverNewsCredentials
@@ -678,6 +773,8 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                 await operational_state.candidate_monitor.start()
         async def close_services(_app: Any):
             ram_shadow_session.begin_close()
+            if tr_connection_available:
+                await broker.finish_market_transport_changes()
             status = _app.state.shutdown_status
             status["stage"] = "diagnostic_runs"
             if diagnostic_runs is not None:
@@ -889,6 +986,25 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                         return grant.owner
             raise HTTPException(status_code=401, detail="전용 뉴스 BODY 접속 토큰이 필요합니다.")
 
+        def authorize_archive_stream(
+            authorization: str = Header(default=""),
+            x_kiwoom_expected_archive_stream: str = Header(default=""),
+        ) -> str:
+            from kiwoom_monitor.domain.research_contract import decode_reported_result_owner
+
+            scheme, _, supplied = authorization.partition(" ")
+            if scheme.casefold() == "bearer" and supplied:
+                for grant in active.observation_archive_grants:
+                    if _token_matches(supplied, grant.token):
+                        try:
+                            stream = decode_reported_result_owner(x_kiwoom_expected_archive_stream)
+                        except ValueError:
+                            raise HTTPException(status_code=409, detail="보관할 원본 스트림을 확인하세요.") from None
+                        if stream != grant.owner:
+                            raise HTTPException(status_code=409, detail="보관 접속 권한의 원본 스트림이 다릅니다.")
+                        return grant.owner
+            raise HTTPException(status_code=401, detail="전용 관측자료 보관 접속 토큰이 필요합니다.")
+
         def valid_token(supplied: str) -> bool:
             return bool(supplied) and _token_matches(supplied, active.access_token)
 
@@ -899,7 +1015,9 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         install_credential_routes(app, credential_runtime, authorize, active.credential_trusted_proxies, mock_owner, real_owner)
 
         from .account_settings_routes import create_account_settings_router
-        app.include_router(create_account_settings_router(store, authorize, real_owner, mock_owner))
+        app.include_router(create_account_settings_router(store, authorize, real_owner, mock_owner,
+            read_tr_connections=read_tr_connections,
+            save_tr_connections=save_tr_connections if tr_connection_available else None))
 
         app.add_middleware(
             _HttpOperationContextMiddleware, server_now=server_now, access_token=active.access_token,
@@ -1128,6 +1246,9 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                                                            read_authorize=authorize_read))
 
         from .research_read_routes import create_research_read_router
+        if active.observation_archive_grants:
+            from .observation_archive_routes import create_observation_archive_router
+            app.include_router(create_observation_archive_router(store, authorize_archive_stream))
         if active.news_body_grants:
             from .news_body_routes import create_news_body_router
             app.include_router(create_news_body_router(store, authorize_news_body, now_provider=server_now))

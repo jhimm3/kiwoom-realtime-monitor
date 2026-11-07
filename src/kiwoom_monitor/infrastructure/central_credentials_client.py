@@ -12,6 +12,7 @@ from urllib.request import Request, HTTPRedirectHandler, HTTPSHandler, build_ope
 from .central_server_config import DataSourceSettings
 from .system_ssl import system_ssl_context
 from .central_content_client import _http_operation_context
+from kiwoom_monitor.domain.credential_contract import tr_connection_settings, tr_connection_target
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -297,3 +298,53 @@ class CentralCredentialsClient:
         return self._accept_settings(self._request("PUT", "/api/v1/settings/accounts/" + target + "?" + urlencode({"environment": self.ACCOUNT_ENVIRONMENTS[self.provider]}),
             {"expected_revision": revision, "active_profile_id": profile,
              "monitor_enabled": monitor_enabled, "mock_order_enabled": mock_order_enabled}), target)
+
+    def load_tr_connections(self):
+        result = self._accept_tr_connections(self._request("GET", "/api/v1/settings/tr-connections"))
+        if result["status"] == "unavailable":
+            return {**result, "targets": []}
+        contexts = self._request("GET", "/api/v3/kiwoom/accounts").get("accounts")
+        if not isinstance(contexts, list):
+            raise RuntimeError("서버 계좌 목록 형식이 올바르지 않습니다.")
+        targets = []
+        try:
+            for row in contexts:
+                target = tr_connection_target({"scope": {key: row[key] for key in ("broker", "environment", "account_ref")},
+                    "credential_profile_id": row["credential_profile_id"], "binding_revision": row["binding_revision"]})
+                if target["credential_profile_id"] == "nas-main-mock-default":
+                    continue  # Legacy query-only transport is not admitted by the account owner.
+                targets.append((target, str(row.get("display_label") or target["credential_profile_id"])))
+        except (KeyError, TypeError, ValueError):
+            raise RuntimeError("서버 계좌 목록 형식이 올바르지 않습니다.") from None
+        return {**result, "targets": targets}
+
+    def update_tr_connections(self, settings, expected_revision):
+        values = tr_connection_settings(settings)
+        self._revision(expected_revision)
+        return self._accept_tr_connections(self._request("PUT", "/api/v1/settings/tr-connections",
+            {**values, "expected_revision": expected_revision}))
+
+    @staticmethod
+    def _accept_tr_connections(result):
+        try:
+            settings = tr_connection_settings(result.get("settings"), stored=True)
+            applied = result.get("applied_revision")
+            status = result.get("status")
+            realtime = result.get("realtime_market")
+            effective = result.get("effective_mode")
+            execution_ready = result.get("execution_ready")
+            if (status not in ("unavailable", "legacy", "applying", "waiting_for_profile", "recovery_required", "applied")
+                    or (applied is not None and (type(applied) is not int or applied != settings["revision"]))
+                    or ((status == "applied") != (applied is not None and applied > 0))
+                    or effective not in (None, "integrated", "separated")
+                    or (execution_ready is not None and type(execution_ready) is not bool)
+                    or not isinstance(realtime, dict) or realtime.get("environment") not in (None, "real", "mock")):
+                raise ValueError
+            profile = realtime.get("credential_profile_id")
+            if profile is not None:
+                CentralCredentialsClient._profile(profile)
+        except (ValueError, TypeError, AttributeError):
+            raise RuntimeError("서버 TR 연결 설정 형식이 올바르지 않습니다.") from None
+        return {"settings": settings, "applied_revision": applied, "status": status,
+                "effective_mode": effective, "execution_ready": execution_ready,
+                "realtime_market": {"environment": realtime.get("environment"), "credential_profile_id": profile}}

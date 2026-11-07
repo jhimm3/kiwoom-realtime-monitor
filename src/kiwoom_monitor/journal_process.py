@@ -105,6 +105,7 @@ from kiwoom_monitor.presentation.process_control import (
     JsonCommandChannel,
     process_identity_document,
     read_process_identity,
+    write_json_command,
 )
 from kiwoom_monitor.presentation.trade_review_view_model import (
     TradeHistoryEpisodeDisplay,
@@ -2489,11 +2490,11 @@ def _run_journal_process(arguments: list[str]) -> int:
     command_path = Path(options.command_file); last_id = -1
     state_path = command_path.with_name("journal_process.pid")
     window = JournalWindow(Path(options.monitor_database), Path(options.journal_database), Path(options.config))
+    owner_identity = None
     try:
         window.setWindowIcon(app.windowIcon())
-        state_path.write_text(
-            json.dumps(process_identity_document(), ensure_ascii=True), encoding="ascii"
-        )
+        owner_identity = process_identity_document()
+        write_json_command(state_path, owner_identity)
         parent_pid = options.parent_pid
         parent_missing_since: float | None = None
 
@@ -2550,8 +2551,8 @@ def _run_journal_process(arguments: list[str]) -> int:
         window.finish_shutdown()
         try:
             state_pid, state_token = read_process_identity(state_path)
-            own_identity = process_identity_document()
-            if state_pid == own_identity["pid"] and state_token == own_identity["start_token"]:
+            if (owner_identity is not None and state_pid == owner_identity["pid"]
+                    and state_token == owner_identity["start_token"]):
                 state_path.unlink(missing_ok=True)
         except OSError:
             pass

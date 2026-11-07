@@ -86,6 +86,27 @@ class Store:
 
 
 class RequestInputTests(unittest.IsolatedAsyncioTestCase):
+    async def test_selected_market_transport_records_one_physical_response_under_original_request(self):
+        events, default, selected = [], Client(), Client()
+        selected_broker = CentralRestBroker(selected, namespace="account-source")
+        broker = CentralRestBroker(default, input_observer=rest_inputs)
+        broker.set_market_transport_provider(lambda: (selected_broker, "private-selection-identity"))
+        try:
+            with recording(events), capture_owner("top20", "service:one", "lane:basics", cause_input_id="ranking-root"):
+                result = await broker.request("ka10001", PATH, {"stk_cd": "005930"})
+            self.assertEqual([], default.calls)
+            self.assertEqual(1, len(selected.calls))
+            self.assertEqual({"code": "005930", "return_code": 0}, result.payload)
+            calls = list(read_request_tape(events)["calls"].values())
+            self.assertEqual(1, len(calls))
+            self.assertEqual("ranking-root", calls[0]["start"]["parent_input_id"])
+            self.assertEqual("network", calls[0]["end"]["origin"])
+            self.assertEqual(2, len(calls[0]["transport"]))
+            self.assertNotIn("private-selection-identity", str(events))
+        finally:
+            await broker.close()
+            await selected_broker.close()
+
     async def collect(self, *, cached=False, failure=False):
         events, store, client = [], Store(), Client()
         if failure:

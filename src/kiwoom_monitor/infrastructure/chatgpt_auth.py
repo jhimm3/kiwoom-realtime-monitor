@@ -1,4 +1,4 @@
-"""Windows SIWC credentials and loopback OAuth; no API-key vault or app DB.
+"""Local SIWC credentials and loopback OAuth; no API-key vault or app DB.
 
 One exclusive, cross-process lock covers token rotation and publication. Each
 operation reloads the encrypted record. Tokens never appear in public status.
@@ -12,6 +12,7 @@ import math
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 import uuid
@@ -23,6 +24,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, HTTPSHandler
 
+from kiwoom_monitor.infrastructure.app_paths import AppPaths
 from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import _protect, _unprotect
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
 
@@ -135,37 +137,46 @@ def _form_request(url: str, values: dict[str, str]) -> Request:
 
 def storage_path_for(config_path: Path) -> Path:
     # Separate app/config installations without exposing a local path in settings.
-    root = os.environ.get("LOCALAPPDATA")
-    if not root:
+    windows = sys.platform == 'win32'
+    if windows and not os.environ.get('LOCALAPPDATA'):
         raise ChatGPTPlanError("storage_unavailable")
-    profile = hashlib.sha256(str(config_path.resolve()).casefold().encode()).hexdigest()[:24]
-    return Path(root) / "KiwoomMonitor" / "ChatGPTPlan" / profile / "credentials.dpapi"
+    location = str(config_path.resolve())
+    profile = hashlib.sha256((location.casefold() if windows else location).encode()).hexdigest()[:24]
+    filename = 'credentials.dpapi' if windows else 'credentials.enc'
+    return AppPaths.user_state_root() / 'ChatGPTPlan' / profile / filename
 
 
 class ChatGPTCredentialStore:
     def __init__(self, path: Path):
         self.path = Path(path)
-        self._key = str(self.path.resolve()).casefold()
+        self._key = str(self.path.resolve())
+        if sys.platform == 'win32':
+            self._key = self._key.casefold()
         with _LOCKS_GUARD:
             self._lock = _LOCKS.setdefault(self._key, threading.RLock())
 
     @contextmanager
     def locked(self):
         """A second process fails busy; it cannot reuse an old rotating token."""
-        import msvcrt
         with self._lock:
             handle = None
             acquired = False
+            windows = sys.platform == 'win32'
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 handle = self.path.with_suffix(".lock").open("a+b")
-                handle.seek(0)
                 try:
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    if windows:
+                        import msvcrt
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     acquired = True
                 except OSError:
                     raise ChatGPTPlanError("storage_busy") from None
-                if os.fstat(handle.fileno()).st_size == 0:
+                if windows and os.fstat(handle.fileno()).st_size == 0:
                     handle.write(b"0")
                     handle.flush()
                 yield
@@ -175,16 +186,18 @@ class ChatGPTCredentialStore:
                 raise ChatGPTPlanError("storage_unavailable") from None
             finally:
                 if handle:
-                    if acquired:
-                        handle.seek(0)
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                    handle.close()
+                    try:
+                        if windows and acquired:
+                            handle.seek(0)
+                            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    finally:
+                        handle.close()
 
     def load(self) -> dict:
         try:
             if not self.path.exists():
                 return {"host_id": "", "active": "", "accounts": {}}
-            value = json.loads(_unprotect(self.path.read_bytes()))
+            value = json.loads(_unprotect(self.path.read_bytes(), path=self.path))
             if not isinstance(value, dict) or not isinstance(value.get("accounts"), dict):
                 raise ValueError()
             for key, account in value["accounts"].items():
@@ -196,7 +209,9 @@ class ChatGPTCredentialStore:
     def save(self, value: dict) -> None:
         temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
         try:
-            protected = _protect(json.dumps(value, separators=(",", ":")).encode())
+            if sys.platform == 'darwin' and self.path.exists():
+                self.load()
+            protected = _protect(json.dumps(value, separators=(",", ":")).encode(), path=self.path)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with temporary.open("xb") as target:
                 target.write(protected)

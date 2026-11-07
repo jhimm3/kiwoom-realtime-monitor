@@ -20,6 +20,7 @@ class AccountSettingsReadStore(Protocol):
 def create_account_settings_router(
     store: AccountSettingsReadStore, authorize: Callable[..., None],
     real_owner: RealCredentialOwner | None, mock_owner: MockCredentialOwner | None,
+    *, read_tr_connections=None, save_tr_connections=None,
 ) -> APIRouter:
     """Read stored preferences and delegate role changes to the same admitted owner."""
     from fastapi import APIRouter, Depends, HTTPException, Query
@@ -82,5 +83,40 @@ def create_account_settings_router(
         if real_owner and environment == "real":
             result["monitor_status"] = real_owner.account_monitor_status(document["scope"])
         return result
+
+    @router.get("/api/v1/settings/tr-connections", dependencies=[Depends(authorize)])
+    async def tr_connections() -> dict[str, object]:
+        if read_tr_connections is None:
+            raise HTTPException(503, detail="TR_CONNECTION_RUNTIME_NOT_READY")
+        try:
+            return await read_tr_connections()
+        except ValueError:
+            raise HTTPException(409, detail="TR_CONNECTION_SETTINGS_RECOVERY_REQUIRED") from None
+
+    @router.put("/api/v1/settings/tr-connections", dependencies=[Depends(authorize)])
+    async def put_tr_connections(values: dict[str, Any]) -> dict[str, object]:
+        from kiwoom_monitor.domain.credential_contract import tr_connection_settings
+        from .rest_broker import BrokerCredentialBusyError
+        revision = values.get("expected_revision")
+        if type(revision) is not int or not 0 <= revision < 2**63:
+            raise HTTPException(422, detail="TR_CONNECTION_SETTINGS_INVALID")
+        try:
+            settings = tr_connection_settings({key: value for key, value in values.items() if key != "expected_revision"})
+        except ValueError:
+            raise HTTPException(422, detail="TR_CONNECTION_SETTINGS_INVALID") from None
+        if save_tr_connections is None:
+            raise HTTPException(503, detail="TR_CONNECTION_RUNTIME_NOT_READY")
+        try:
+            await save_tr_connections(settings, expected_revision=revision)
+        except BrokerCredentialBusyError as error:
+            raise HTTPException(503, detail=str(error)) from None
+        except ValueError as error:
+            code = str(error) if str(error) in {
+                "TR_CONNECTION_SETTINGS_REVISION_CONFLICT", "TR_CONNECTION_PROFILE_UNAVAILABLE",
+                "TR_CONNECTION_SETTINGS_REVISION_EXHAUSTED", "TR_CONNECTION_SETTINGS_RECOVERY_REQUIRED",
+                "ACCOUNT_CONTEXT_MISMATCH", "ACCOUNT_IDENTITY_UNVERIFIED", "ACCOUNT_SETTINGS_RECOVERY_REQUIRED",
+            } else "TR_CONNECTION_SETTINGS_RECOVERY_REQUIRED"
+            raise HTTPException(409, detail=code) from None
+        return await tr_connections()
 
     return router

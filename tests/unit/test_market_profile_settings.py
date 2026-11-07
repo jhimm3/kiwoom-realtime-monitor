@@ -38,7 +38,8 @@ def fixed_contract_clock(app_factory, clock):
         yield
 
 
-def contract_storage_hash(database_path, *, document_receipt_clock=None, observation_receipt_clock=None):
+def contract_storage_hash(database_path, *, document_receipt_clock=None, observation_receipt_clock=None,
+                          project_s12_window_migration=False):
     """Require KST writes and compare all other bytes to the frozen UTC contract.
 
     Only these audited clock columns change representation. The native fixture
@@ -46,7 +47,8 @@ def contract_storage_hash(database_path, *, document_receipt_clock=None, observa
     baseline's checks of every row, identifier, value, and JSON/hash payload.
     An explicit document_receipt_clock additionally asserts every document
     receipt equals the injected clock before projecting only that column to
-    the old fixture's epoch clock in the in-memory comparison copy.
+    the old fixture's epoch clock in the in-memory comparison copy. Three old
+    settings/order/query oracles opt in to projecting the exact S12 window index.
     """
     clock_columns = (
         ("central_schema_migrations", "applied_at"),
@@ -59,8 +61,21 @@ def contract_storage_hash(database_path, *, document_receipt_clock=None, observa
         ("central_credential_profiles", "created_at"),
         ("central_credential_profiles", "archived_at"),
     )
-    with closing(sqlite3.connect(database_path)) as source, closing(sqlite3.connect(":memory:")) as copy:
+    source_connection = (sqlite3.connect(Path(database_path).resolve().as_uri() + "?mode=ro", uri=True)
+                         if project_s12_window_migration else sqlite3.connect(database_path))
+    with closing(source_connection) as source, closing(sqlite3.connect(":memory:")) as copy:
         source.backup(copy)
+        if project_s12_window_migration:
+            fixture = ACCOUNT_SETTINGS_BASELINE.with_name("s12_additive_20261106.json")
+            migration = json.loads(fixture.read_text(encoding="utf-8"))["diagnostic_migration"]
+            rows = copy.execute("SELECT version,name,applied_at FROM central_schema_migrations WHERE version>=25").fetchall()
+            index = copy.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                                 (migration["index_name"],)).fetchall()
+            if rows != [tuple(migration["row"])] or index != [(migration["index_ddl"],)]:
+                raise AssertionError(("expected exact S12 window index and migration receipt", rows, index))
+            copy.execute("DROP INDEX idx_central_observation_window")
+            copy.execute("DELETE FROM central_schema_migrations WHERE version=25")
+            copy.commit()
         if document_receipt_clock is not None:
             expected_now, historical_now = document_receipt_clock
             rows = copy.execute(
@@ -231,7 +246,7 @@ def capture_account_settings_http_contract(client, store, request_store, real, m
         if before != after:
             raise AssertionError((name, "settings HTTP request changed native storage"))
         cases.append({"name": name, "status": response.status_code, "headers": dict(response.headers),
-            "body": response.json(), "storage_hash": contract_storage_hash(database_path),
+            "body": response.json(), "storage_hash": contract_storage_hash(database_path, project_s12_window_migration=True),
             "market_reads": [(call.args, call.kwargs) for call in market.call_args_list],
             "account_reads": [(call.args, call.kwargs) for call in account.call_args_list],
             "real_calls": [(call[0], call.args, call.kwargs) for call in real.method_calls] if real is not None else [],
@@ -347,6 +362,223 @@ class MarketProfileSettingsTests(unittest.TestCase):
     def choose(self, profile, *, revision=0, binding=1, store=None):
         return (store or self.store).save_market_profile_settings({
             "market_profile_id": profile, "expected_binding_revision": binding}, expected_revision=revision)
+
+    def test_tr_connections_native_cas_and_binding_leave_existing_owners_unchanged(self):
+        def target(account):
+            return {"scope": {"broker": "kiwoom", "environment": account["environment"],
+                              "account_ref": account["account_ref"]},
+                    "credential_profile_id": account["profile_id"], "binding_revision": 1}
+        a, b = target(self.account("mock")), target(self.account())
+        self.assertEqual({"mode": "separated", "execution_target": None, "data_target": None, "revision": 0},
+                         self.store.load_tr_connection_settings())
+        self.assertEqual([], self.store.load_documents("server_tr_connection_settings"))
+        existing = (self.store.load_market_profile_settings(), self.store.load_account_bindings(),
+                    self.store.load_documents("server_account_settings"))
+        split = {"mode": "separated", "execution_target": a, "data_target": b}
+        integrated = {"mode": "integrated", "execution_target": a, "data_target": a}
+        self.assertEqual({**split, "revision": 1}, self.store.save_tr_connection_settings(split, expected_revision=0))
+        with self.assertRaisesRegex(ValueError, "REVISION_CONFLICT"):
+            self.store.save_tr_connection_settings(integrated, expected_revision=0)
+        with self.assertRaisesRegex(ValueError, "ACCOUNT_CONTEXT_MISMATCH"):
+            self.store.save_tr_connection_settings({**split, "data_target": {**b, "binding_revision": 2}}, expected_revision=1)
+        with self.assertRaisesRegex(ValueError, "SETTINGS_INVALID"):
+            self.store.save_tr_connection_settings({**split, "mode": "integrated"}, expected_revision=1)
+        self.assertEqual({**integrated, "revision": 2}, self.store.save_tr_connection_settings(integrated, expected_revision=1))
+        persisted = self.store.load_documents("server_tr_connection_settings")
+        self.assertEqual({**integrated, "revision": 2}, self.store.save_tr_connection_settings(integrated, expected_revision=2))
+        self.assertEqual(persisted, self.store.load_documents("server_tr_connection_settings"))
+        self.assertEqual(existing, (self.store.load_market_profile_settings(), self.store.load_account_bindings(),
+                                    self.store.load_documents("server_account_settings")))
+
+    def test_tr_connections_wire_routing_orders_rotation_ack_loss_and_restart(self):
+        from io import BytesIO
+        from kiwoom_monitor.central_server.app import create_app
+        from kiwoom_monitor.central_server.config import CentralServerSettings
+        from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
+
+        now = datetime(2026, 11, 6, 0, 31, 15, tzinfo=timezone.utc)
+        sent, stores, failed, transports = [], [], set(), []
+
+        def wire(request, *, timeout):
+            headers = {key.casefold(): value for key, value in request.header_items()}
+            body = json.loads(request.data)
+            api_id = headers.get("api-id", "oauth")
+            marker = headers.get("authorization", "").removeprefix("Bearer token:") or body["appkey"]
+            sent.append((marker, api_id, body))
+            accounts = {"r": "1111111111", "a": "2222222222", "b": "3333333333", "b2": "3333333333",
+                        "d": "4444444444"}
+            payload = {
+                "oauth": {"token": "token:" + marker}, "ka00001": {"acctNo": accounts[marker]},
+                "ka10080": {"transport": marker} if marker not in failed else {"return_code": 99, "return_msg": "data offline"},
+                "ka10075": {"oso": []}, "ka10076": {"cntr": []}, "kt00018": {"acnt_evlt_remn_indv_tot": []},
+                "kt00001": {"ord_alow_amt": "1000000" if marker == "a" else "2000000"},
+                "kt00007": {"acnt_ord_cntr_prps_dtl": [{"ord_no": "fill-" + marker}]},
+                "kt10000": {"ord_no": "1001"}, "kt10003": {"ord_no": "1002"},
+            }[api_id]
+            result = BytesIO(json.dumps(payload).encode())
+            result.headers = {}
+            return result
+
+        class FakeWireClient(KiwoomRestClient):
+            def __init__(self, settings):
+                # Only the external transport and test pacing are replaced.
+                super().__init__(settings, opener=wire, clock=lambda: now, request_interval_seconds=0)
+
+            def server_now(self):
+                return now
+
+        config = CentralServerSettings(f"sqlite:///{self.path}", "private-token", query_access_token="read-token",
+            credential_directory=str(self.path.parent / "vault"), kiwoom_app_key="r", kiwoom_secret_key="fake",
+            account_identity_registry_enabled=True, account_identity_hmac_key="routing-fixture-key" * 3,
+            autonomous_top20_enabled=False, market_event_collection_enabled=False, news_history_jobs_enabled=False,
+            news_naver_api_enabled=False, news_naver_stock_enabled=False, news_naver_market_enabled=False,
+            news_query_set_enabled=False)
+        factory = create_app.__globals__["create_query_store"]
+
+        def capture_store(*args, **kwargs):
+            store = factory(*args, **kwargs)
+            store._execution_wall_now = lambda: now
+            stores.append(store)
+            return store
+
+        async def activate(app, key, profile=None, revision=0, environment="mock"):
+            runtime = app.state.credential_runtime
+            provider = "kiwoom_" + environment
+            if profile is None:
+                profile = (await runtime.create_profile(provider, str(uuid.uuid4()), key))["profile_id"]
+            prepared = await runtime.prepare(provider, profile, str(uuid.uuid4()), revision,
+                                             {"app_key": key, "secret_key": "fake"}, disabled=False)
+            operation = runtime._operations[prepared["operation_id"]]
+            await asyncio.wait_for(asyncio.shield(operation.task), 10)
+            self.assertEqual("READY", operation.state, operation.error_code)
+            await runtime.apply(operation.operation_id, revision, operation.candidate.account_ref)
+            await asyncio.wait_for(asyncio.shield(operation.task), 10)
+            self.assertEqual("ACTIVE", operation.state, operation.error_code)
+            owner = app.state.mock_credential_owner if environment == "mock" else app.state.real_credential_owner
+            return owner.bundle(profile)
+
+        def target(bundle):
+            binding = bundle.binding
+            return {"scope": binding.scope.to_dict(), "credential_profile_id": binding.credential_profile_id,
+                    "binding_revision": binding.binding_revision}
+
+        async def verify():
+            route = "/api/v1/settings/tr-connections"
+            bars = "/api/v1/kiwoom/query"
+            query = {"api_id": "ka10080", "path": "/api/dostk/chart", "body": {"stk_cd": "005930"}}
+            headers = {"Authorization": "Bearer private-token"}
+            app = create_app(config)
+            async with app.router.lifespan_context(app), httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="https://routing.test", headers=headers) as client:
+                self.assertEqual(403, (await client.get(route, headers={"Authorization": "Bearer read-token"})).status_code)
+                self.assertEqual("legacy", (await client.get(route)).json()["status"])
+                self.assertEqual("r", (await client.post(bars, json=query)).json()["payload"]["transport"])
+                a, b = await activate(app, "a"), await activate(app, "b")
+                self.assertIsNot(a.client._request_lock, b.client._request_lock)
+                execution, data = target(a), target(b)
+                owner = app.state.mock_credential_owner
+                await owner.update_settings(execution["scope"], {"active_profile_id": execution["credential_profile_id"],
+                    "monitor_enabled": True, "mock_order_enabled": True}, 1)
+                a = owner.bundle(execution["credential_profile_id"])
+                self.assertIs(a.client, a.broker._client)
+                self.assertEqual(1000000, (await a.monitor.refresh_recovery()).account.available_cash_won)
+                self.assertEqual(2000000, (await b.monitor.refresh_recovery()).account.available_cash_won)
+                split = {"mode": "separated", "execution_target": execution, "data_target": data}
+                integrated = {"mode": "integrated", "execution_target": execution, "data_target": execution}
+                real_data = target(await activate(app, "d", environment="real"))
+                await app.state.real_credential_owner.update_settings(real_data["scope"], {
+                    "active_profile_id": real_data["credential_profile_id"], "monitor_enabled": False,
+                    "mock_order_enabled": False}, 1)
+                real_split = {**split, "data_target": real_data}
+                cut = len(sent)
+                response = await client.put(route, json={**real_split, "expected_revision": 0})
+                self.assertEqual(200, response.status_code, response.text)
+                self.assertEqual("d", (await client.post(bars, json=query)).json()["payload"]["transport"])
+                self.assertEqual([("d", "ka10080")], [(marker, api) for marker, api, _ in sent[cut:]])
+                self.assertFalse(stores[0].load_account_settings(real_data["scope"])["monitor_enabled"])
+                rejected = await client.put(route, json={**split, "expected_revision": False})
+                self.assertEqual(422, rejected.status_code)
+                saved = await client.put(route, json={**split, "expected_revision": 1})
+                self.assertEqual(200, saved.status_code, saved.text)
+                self.assertEqual(2, saved.json()["applied_revision"])
+                self.assertEqual({"environment": "real", "credential_profile_id": "nas-real-default"}, saved.json()["realtime_market"])
+                self.assertEqual("token:r", app.state.realtime_collector._token_provider())
+                self.assertEqual(409, (await client.put(route, json={**integrated, "expected_revision": 0})).status_code)
+                self.assertEqual("b", (await client.post(bars, json=query)).json()["payload"]["transport"])
+                self.assertTrue((await client.post(bars, json=query)).json()["cache_hit"])
+                b = await activate(app, "b2", data["credential_profile_id"], 1)
+                self.assertEqual(data, target(b))
+                self.assertEqual("b2", (await client.post(bars, json=query)).json()["payload"]["transport"])
+
+                def scope(target):
+                    return {"account_scope": target["scope"], "credential_profile_id": target["credential_profile_id"],
+                            "expected_binding_revision": target["binding_revision"]}
+                async def fill(target):
+                    response = await client.post("/api/v3/kiwoom/account-query", json={**scope(target),
+                        "api_id": "kt00007", "path": "/api/dostk/acnt", "body": {}})
+                    self.assertEqual(200, response.status_code, response.text)
+                    return response.json()["payload"]["acnt_ord_cntr_prps_dtl"][0]["ord_no"]
+                failed.add("b2")
+                failed_bar = await client.post(bars, json={**query, "body": {"stk_cd": "000660"}})
+                self.assertEqual(502, failed_bar.status_code)
+                self.assertEqual("fill-a", await fill(execution))
+                self.assertEqual("fill-b2", await fill(data))
+                orders = "/api/v2/mock/accounts/" + execution["scope"]["account_ref"] + "/orders"
+                order = await client.post(orders, json={**scope(execution), "request_id": "route-order",
+                    "symbol": "005930", "side": "BUY", "quantity": 1, "limit_price": 70000})
+                self.assertEqual(200, order.status_code, order.text)
+                self.assertEqual("1001", order.json()["broker_order_id"], order.text)
+                normal_save = stores[0].save_tr_connection_settings
+
+                def lost_ack(*args, **kwargs):
+                    normal_save(*args, **kwargs)
+                    raise OSError("saved response lost")
+
+                with patch.object(stores[0], "save_tr_connection_settings", side_effect=lost_ack):
+                    self.assertEqual(503, (await client.put(route, json={**integrated, "expected_revision": 2})).status_code)
+                recovery = (await client.get(route)).json()
+                self.assertEqual({**integrated, "revision": 3}, recovery["settings"])
+                self.assertEqual("recovery_required", recovery["status"])
+                self.assertIsNone(recovery["applied_revision"])
+                self.assertEqual(502, (await client.post(bars, json=query)).status_code)
+                cancelled = await client.post(orders + "/" + order.json()["intent_id"] + "/cancel", json=scope(execution))
+                self.assertEqual(200, cancelled.status_code, cancelled.text)
+                self.assertEqual([("a", "kt10000"), ("a", "kt10003")],
+                                 [(marker, api) for marker, api, _ in sent if api.startswith("kt1000")])
+                self.assertEqual("1001", next(body["orig_ord_no"] for _, api, body in sent if api == "kt10003"))
+
+            restarted = create_app(config)
+            async with restarted.router.lifespan_context(restarted), httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=restarted), base_url="https://routing.test", headers=headers) as client:
+                owner = restarted.state.mock_credential_owner
+                await asyncio.wait_for(asyncio.gather(*owner._boot_tasks), 10)
+                restored = (await client.get(route)).json()
+                self.assertEqual({**integrated, "revision": 3}, restored["settings"])
+                self.assertEqual(3, restored["applied_revision"])
+                self.assertEqual("a", (await client.post(bars, json=query)).json()["payload"]["transport"])
+                a = owner.bundle(execution["credential_profile_id"])
+                self.assertIs(a.client, next(client for client, api in reversed(transports) if api == "ka10080"))
+                self.assertIs(a.client, a.broker._client)
+                self.assertIs(a.client, a.runtime._lifecycle._transport._client)
+                same_account_split = {**integrated, "mode": "separated", "expected_revision": 3}
+                changed = (await client.put(route, json=same_account_split)).json()
+                self.assertEqual("integrated", changed["effective_mode"])
+                self.assertEqual("a", (await client.post(bars, json=query)).json()["payload"]["transport"])
+                self.assertEqual("token:r", restarted.state.realtime_collector._token_provider())
+
+        with ExitStack() as stack:
+            from kiwoom_monitor.central_server.rest_broker import CentralRestBroker
+            original_call = CentralRestBroker._call_transport
+            def capture_transport(broker, job):
+                transports.append((broker._client, job.api_id))
+                return original_call(broker, job)
+            stack.enter_context(patch.object(CentralRestBroker, "_call_transport", capture_transport))
+            stack.enter_context(patch.dict(create_app.__globals__, {"create_query_store": capture_store}))
+            stack.enter_context(patch("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient", FakeWireClient))
+            for target_name in ("realtime_collector.CentralRealtimeCollector", "mock_account_monitor.MockAccountRealtimeCollector",
+                                "mock_account_monitor.RealAccountRealtimeCollector"):
+                stack.enter_context(patch(f"kiwoom_monitor.central_server.{target_name}.start", new_callable=AsyncMock))
+            asyncio.run(verify())
 
     def test_missing_role_returns_legacy_defaults_without_persisting(self):
         self.assertEqual({"market_profile_id": "nas-real-default", "legacy_real_profile_id": "nas-real-default",

@@ -213,7 +213,7 @@ from kiwoom_monitor.presentation.process_control import (
     build_auxiliary_command,
     JsonCommandChannel,
     JsonRequestInbox,
-    process_identity_is_alive,
+    process_identity_state,
     read_process_identity,
 )
 from kiwoom_monitor.presentation.ranking_worker_controller import RankingWorkerController
@@ -1826,7 +1826,7 @@ class MainWindow(QMainWindow):
             return
         if self._journal_process_path is not None:
             existing_pid, start_token = read_process_identity(self._journal_process_path)
-            if process_identity_is_alive(existing_pid, start_token):
+            if existing_pid > 0 and start_token and process_identity_state(existing_pid, start_token) != 'exited':
                 return
         if self._journal_database_path is None or self._monitor_database_path is None or self._journal_command_path is None:
             return
@@ -1861,21 +1861,28 @@ class MainWindow(QMainWindow):
         if self._journal_process_path is None or self._journal_command_path is None:
             return
         pid, start_token = read_process_identity(self._journal_process_path)
-        if not process_identity_is_alive(pid, start_token):
-            # 과거 PID 한 줄 파일은 동일 프로세스라는 증명이 불가능하다.
-            # Windows가 재사용한 PID의 무관한 프로그램을 종료하지 않는다.
-            try: self._journal_process_path.unlink(missing_ok=True)
-            except OSError: pass
-            return
-        self._send_journal_command(action="shutdown")
-        deadline = time.monotonic() + 2.0
-        while process_identity_is_alive(pid, start_token) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if process_identity_is_alive(pid, start_token):
-            try: os.kill(pid, 15)
-            except OSError: pass
-        try: self._journal_process_path.unlink(missing_ok=True)
-        except OSError: pass
+        # A legacy PID-only file does not authorize sending signals.
+        if pid > 0 and start_token:
+            state = process_identity_state(pid, start_token)
+            if state == 'running':
+                self._send_journal_command(action="shutdown")
+                deadline = time.monotonic() + 2.0
+                while state == 'running' and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                    state = process_identity_state(pid, start_token)
+                if state == 'running':
+                    try:
+                        os.kill(pid, 15)
+                    except OSError:
+                        pass
+                    state = process_identity_state(pid, start_token)
+            if state != 'exited':
+                return
+        if read_process_identity(self._journal_process_path) == (pid, start_token):
+            try:
+                self._journal_process_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _stop_current_journal_process(self) -> None:
         if self._journal_command_path is None:

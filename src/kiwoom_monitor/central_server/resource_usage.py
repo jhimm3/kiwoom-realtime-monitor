@@ -44,6 +44,13 @@ def _process_rss_bytes() -> int | None:
             return psutil.Process().memory_info().rss
         except (psutil.Error, OSError):
             return None
+    if platform == "darwin":
+        from kiwoom_monitor.application.research_resources import current_rss_bytes
+
+        try:
+            return current_rss_bytes()
+        except OSError:
+            return None
     try:
         pages = int(Path("/proc/self/statm").read_text(encoding="ascii").split()[1])
         return pages * int(os.sysconf("SC_PAGE_SIZE"))

@@ -46,6 +46,25 @@ def _windows_rss_api():
     return Counters, kernel, psapi
 
 
+@lru_cache(maxsize=1)
+def _darwin_rss_api():
+    # libproc PROC_PIDTASKINFO uses fixed-width fields on Intel and Apple Silicon.
+    class TaskInfo(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint64) for name in (
+            'virtual_size', 'resident_size', 'total_user', 'total_system',
+            'threads_user', 'threads_system',
+        )] + [(name, ctypes.c_int32) for name in (
+            'policy', 'faults', 'pageins', 'cow_faults', 'messages_sent',
+            'messages_received', 'syscalls_mach', 'syscalls_unix', 'csw',
+            'threadnum', 'numrunning', 'priority',
+        )]
+
+    query = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True).proc_pidinfo
+    query.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+    query.restype = ctypes.c_int
+    return TaskInfo, query
+
+
 def current_rss_bytes() -> int:
     if sys.platform == 'win32':
         Counters, kernel, psapi = _windows_rss_api()
@@ -56,6 +75,13 @@ def current_rss_bytes() -> int:
         return int(counters.working)
     if sys.platform.startswith('linux'):
         return int(Path('/proc/self/statm').read_text().split()[1]) * os.sysconf('SC_PAGE_SIZE')
+    if sys.platform == 'darwin':
+        TaskInfo, query = _darwin_rss_api()
+        info = TaskInfo()
+        ctypes.set_errno(0)
+        if query(os.getpid(), 4, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
+            raise OSError(ctypes.get_errno(), 'PROC_PIDTASKINFO failed')
+        return int(info.resident_size)
     raise OSError('RSS measurement unsupported on this platform')
 
 

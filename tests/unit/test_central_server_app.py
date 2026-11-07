@@ -884,7 +884,8 @@ def capture_mock_orders_http_contract(client, app, store, bundles, transports, p
             assert before == after, (name, "read/rejected request changed native ledger")
         assert all(not gateway._commands for gateway in owned_gateways), "owned command still running after response"
         cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response), "body": response.json(),
-            "storage_hash": contract_storage_hash(database_path), "transport_calls": {profile: list(transport.calls) for profile, transport in transports.items()}})
+            "storage_hash": contract_storage_hash(database_path, project_s12_window_migration=True),
+            "transport_calls": {profile: list(transport.calls) for profile, transport in transports.items()}})
         return response.json()
     events = "/api/v2/mock/accounts/" + a.account_ref + "/execution-events"
     for method, path, body in (("POST", legacy, command), ("GET", legacy + "/missing", None),
@@ -1341,7 +1342,9 @@ def capture_market_query_http_contract(client, app, store, broker, request_store
         if stored_hash() != before:
             raise AssertionError((name, "HTTP query changed native archive"))
         cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response), "body": response.json(),
-            "storage_hash": contract_storage_hash(database_path, document_receipt_clock=(datetime(2026, 10, 10, 3, tzinfo=timezone.utc).timestamp(), 2000.0)), "store_calls": {key: [(call.args, call.kwargs) for call in spy.call_args_list]
+            "storage_hash": contract_storage_hash(database_path, project_s12_window_migration=True,
+                document_receipt_clock=(datetime(2026, 10, 10, 3, tzinfo=timezone.utc).timestamp(), 2000.0)),
+            "store_calls": {key: [(call.args, call.kwargs) for call in spy.call_args_list]
                                                        for key, spy in spies.items()},
             "broker_calls": [(call.args, call.kwargs) for call in broker.request.call_args_list] if broker is not None else []})
 
@@ -2676,6 +2679,20 @@ class CentralServerAppTests(unittest.TestCase):
                 self.assertTrue(set(case["route_order"]).isdisjoint(insertion["paths"]))
                 position = case["route_order"].index(insertion["before"])
                 case["route_order"][position:position] = insertion["paths"]
+            # N07 adds two authenticated settings operations with the same
+            # dictionary request/response schema as the existing role settings.
+            tr_path = "/api/v1/settings/tr-connections"
+            self.assertNotIn(tr_path, case["schema"]["paths"])
+            tr = copy.deepcopy(case["schema"]["paths"]["/api/v1/settings/market-profile"])
+            tr["get"].update(summary="Tr Connections", operationId="tr_connections_api_v1_settings_tr_connections_get")
+            tr["put"].update(summary="Put Tr Connections", operationId="put_tr_connections_api_v1_settings_tr_connections_put")
+            tr["get"]["responses"]["200"]["content"]["application/json"]["schema"]["title"] = (
+                "Response Tr Connections Api V1 Settings Tr Connections Get")
+            tr["put"]["responses"]["200"]["content"]["application/json"]["schema"]["title"] = (
+                "Response Put Tr Connections Api V1 Settings Tr Connections Put")
+            case["schema"]["paths"][tr_path] = tr
+            position = case["route_order"].index("/api/v1/settings/accounts/{account_ref}") + 1
+            case["route_order"].insert(position, tr_path)
         actual = []
         for configured in (False, True):
             with tempfile.TemporaryDirectory() as directory:
@@ -4063,6 +4080,8 @@ class CentralServerAppTests(unittest.TestCase):
             ("GET", "/api/v1/settings/operations"),
             ("GET", "/api/v1/settings/market-profile"),
             ("PUT", "/api/v1/settings/market-profile"),
+            ("GET", "/api/v1/settings/tr-connections"),
+            ("PUT", "/api/v1/settings/tr-connections"),
             ("PUT", "/api/v1/settings/operations"),
             ("GET", "/api/v1/settings/accounts/{account_ref}"),
             ("GET", "/api/v1/settings/credentials"),

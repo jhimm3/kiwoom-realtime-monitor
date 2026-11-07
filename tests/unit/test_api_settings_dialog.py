@@ -291,6 +291,8 @@ class ApiSettingsDialogTests(unittest.TestCase):
             self.assertEqual("http://127.0.0.1:8787", values.server_url)
             self.assertGreaterEqual(len(values.access_token), 32)
             self.assertFalse(dialog._local_fallback.isEnabled())
+            self.assertFalse(dialog._nas_credentials_button.isEnabled())
+            self.assertFalse(dialog._tr_local_note.isHidden())
 
     def test_personal_server_mode_exposes_server_and_failover_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -301,6 +303,7 @@ class ApiSettingsDialogTests(unittest.TestCase):
             dialog._local_fallback.setChecked(True)
             self.assertTrue(dialog._server_url.isEnabled())
             self.assertTrue(dialog._local_fallback.isEnabled())
+            self.assertTrue(dialog._tr_local_note.isHidden())
             self.assertEqual("https://nas.example.test", dialog.data_source_values.server_url.rstrip("/"))
 
     def test_nas_ai_provider_offers_recommended_models(self) -> None:

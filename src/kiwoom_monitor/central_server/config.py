@@ -101,13 +101,15 @@ class CentralServerSettings:
     selected_research_artifact_file: str = ""
     research_input_grants: tuple[ProducerGrant, ...] = field(default=(), repr=False)
     micro_book_codes: tuple[str, ...] = ()
+    observation_archive_grants: tuple[ProducerGrant, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         if self.query_access_token and self.query_access_token == self.access_token:
             raise ValueError("조회 토큰과 관리자 토큰은 달라야 합니다.")
         tokens = {self.access_token, self.query_access_token}
         for role, grants in (("research input", self.research_input_grants),
-                             ("research result", self.research_result_grants), ("news BODY", self.news_body_grants)):
+                             ("research result", self.research_result_grants), ("news BODY", self.news_body_grants),
+                             ("observation archive", self.observation_archive_grants)):
             owners: set[str] = set()
             if not isinstance(grants, tuple):
                 raise ValueError(role + " grants must be an immutable tuple")
@@ -233,6 +235,7 @@ class CentralServerSettings:
             research_input_grants=_producer_grants_from_environment("MONITOR_SERVER_RESEARCH_INPUT_GRANTS_JSON"),
             research_result_grants=_producer_grants_from_environment("MONITOR_SERVER_RESEARCH_RESULT_GRANTS_JSON"),
             news_body_grants=_producer_grants_from_environment("MONITOR_SERVER_NEWS_BODY_GRANTS_JSON"),
+            observation_archive_grants=_producer_grants_from_environment("MONITOR_SERVER_OBSERVATION_ARCHIVE_GRANTS_JSON"),
             selected_research_artifact_file=os.environ.get("MONITOR_SERVER_SELECTED_RESEARCH_ARTIFACT_FILE", "").strip(),
             host=os.environ.get("KIWOOM_SERVER_HOST", "0.0.0.0").strip() or "0.0.0.0",
             port=port,

@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import sqlite3
+import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -16,7 +17,9 @@ from io import BytesIO
 from pathlib import Path
 
 from kiwoom_monitor.infrastructure.central_settings_sync import is_shared_setting
-from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import _protect, _unprotect
+from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import (
+    LocalSecretUnavailable, _protect, _unprotect, _write_protected_text,
+)
 
 from .database import DEFAULT_SETTINGS
 from .settings_backup import SettingsBackupError, SettingsBackupService
@@ -340,6 +343,8 @@ class GoogleDriveSyncService:
     def _drive_service(self, interactive: bool):
         if not self.configured:
             raise GoogleDriveSyncError("먼저 Google OAuth JSON 파일을 연결하세요.")
+        if sys.platform not in {'win32', 'darwin'}:
+            raise GoogleDriveSyncError("이 환경의 로컬 자격증명 보호 저장소를 사용할 수 없습니다.")
         try:
             from google.auth.transport.requests import Request
             from google.oauth2.credentials import Credentials
@@ -350,10 +355,12 @@ class GoogleDriveSyncService:
         credentials = None
         if self._token_path.is_file():
             try:
-                raw = _unprotect(base64.b64decode(self._token_path.read_text(encoding="utf-8")))
+                raw = _unprotect(base64.b64decode(self._token_path.read_text(encoding="utf-8")), path=self._token_path)
                 credentials = Credentials.from_authorized_user_info(json.loads(raw.decode("utf-8")), self.SCOPES)
                 if not credentials.has_scopes(self.SCOPES):
                     credentials = None
+            except LocalSecretUnavailable:
+                raise GoogleDriveSyncError("기존 Google 로그인 정보를 보호 저장소에서 열 수 없습니다.") from None
             except Exception:
                 self._token_path.unlink(missing_ok=True)
         if credentials and credentials.expired and credentials.refresh_token:
@@ -369,8 +376,8 @@ class GoogleDriveSyncService:
             except Exception as error:
                 raise GoogleDriveSyncError(f"Google 로그인에 실패했습니다: {error}") from error
         try:
-            encoded = base64.b64encode(_protect(credentials.to_json().encode("utf-8"))).decode("ascii")
-            self._token_path.write_text(encoded, encoding="utf-8")
+            encoded = base64.b64encode(_protect(credentials.to_json().encode("utf-8"), path=self._token_path)).decode("ascii")
+            _write_protected_text(self._token_path, encoded)
         except OSError as error:
             raise GoogleDriveSyncError("Google 로그인 정보를 안전하게 저장하지 못했습니다.") from error
         return build("drive", "v3", credentials=credentials, cache_discovery=False)

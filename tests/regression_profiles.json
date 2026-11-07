@@ -70,6 +70,7 @@
         "tests.unit.test_forward_report",
         "tests.unit.test_research_process",
         "tests.unit.test_research_dialog",
+        "tests.unit.test_observation_archive",
         "tests.unit.test_candidate_monitor",
         "tests.unit.test_candidate_alerts",
         "tests.unit.test_central_database_codec",
@@ -616,5 +617,5 @@
       "tests.unit.test_operation_context"
     ]
   },
-  "core_order_sha256": "66449E0216559944855F18FC8C1B2811B41B97C3139940F76E7C4232CC44833B"
+  "core_order_sha256": "82f0eab6f1c4322cd1913e96cc1bd2c459d0ae76eb2b279b60f754353d9edf1e"
 }

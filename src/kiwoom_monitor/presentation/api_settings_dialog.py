@@ -230,6 +230,9 @@ class ApiSettingsDialog(QDialog):
                     action.triggered.connect(lambda checked=False, selected=provider: self._open_nas_provider_credentials(selected))
                 self._nas_provider_button.setMenu(provider_menu)
                 layout.addRow(self._nas_provider_button)
+                self._tr_local_note = QLabel("분봉·시장 조회 TR 연결 선택은 등록된 계좌 프로필을 사용하는 개인 서버에서 지원합니다.")
+                self._tr_local_note.setWordWrap(True)
+                layout.addRow(self._tr_local_note)
             layout.addRow("장애 대응", self._local_fallback)
             layout.addRow("데이터 검증", self._parallel_validation)
             if not query_only:
@@ -342,6 +345,7 @@ class ApiSettingsDialog(QDialog):
             self._nas_credentials_button.setEnabled(personal)
             self._nas_real_credentials_button.setEnabled(personal)
             self._nas_provider_button.setEnabled(personal)
+            self._tr_local_note.setVisible(mode == "local_server")
 
     def _open_nas_credentials(self):
         if self._query_only:

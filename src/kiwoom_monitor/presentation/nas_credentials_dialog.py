@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer, Slot
-from PySide6.QtWidgets import QDialog, QFormLayout, QComboBox, QLineEdit, QPushButton, QLabel, QCheckBox, QDialogButtonBox, QMessageBox, QInputDialog
+from PySide6.QtWidgets import QDialog, QFormLayout, QComboBox, QLineEdit, QPushButton, QLabel, QCheckBox, QDialogButtonBox, QMessageBox, QInputDialog, QGroupBox
 
 from kiwoom_monitor.infrastructure.central_credentials_client import CentralCredentialsClient
 from .settings_request_worker import SettingsRequestWorker
@@ -86,6 +86,37 @@ class NasCredentialsDialog(QDialog):
         self._connection_status = QLabel(); self._connection_status.setWordWrap(True)
         layout.addRow(self._connection_status)
         self._connection_status.setVisible(self._real)
+        self._tr_settings = None
+        self._tr_targets = []
+        self._tr_loading = False
+        if not self._global:
+            self._tr_reload = QPushButton("분봉·시장 조회 TR 연결 불러오기")
+            self._tr_reload.clicked.connect(self._load_tr_connections)
+            layout.addRow(self._tr_reload)
+            self._tr_group = QGroupBox("분봉·시장 조회 TR 연결")
+            tr_layout = QFormLayout(self._tr_group)
+            self._tr_mode = QComboBox()
+            self._tr_mode.addItem("통합 · 매매 기준 계좌 연결 공유", "integrated")
+            self._tr_mode.addItem("분리 · 시장 조회 계좌 선택", "separated")
+            self._tr_execution = QComboBox()
+            self._tr_data = QComboBox()
+            for name, widget in (("연결 방식", self._tr_mode), ("매매 기준 계좌", self._tr_execution),
+                                 ("시장 조회 계좌", self._tr_data)):
+                tr_layout.addRow(name, widget)
+                widget.currentIndexChanged.connect(self._refresh)
+            self._tr_realtime = QLabel("실시간 0B 공통 입력: 확인 중")
+            self._tr_realtime.setWordWrap(True)
+            tr_layout.addRow(self._tr_realtime)
+            help_text = QLabel("분봉 등 시장 조회 TR의 연결만 바꿉니다. 실행 중인 주문이나 자동매매 계좌는 이동하지 않습니다.")
+            help_text.setWordWrap(True)
+            tr_layout.addRow(help_text)
+            self._tr_status = QLabel(); self._tr_status.setWordWrap(True)
+            tr_layout.addRow(self._tr_status)
+            self._tr_apply = QPushButton("TR 연결 적용")
+            self._tr_apply.clicked.connect(self._save_tr_connections)
+            tr_layout.addRow(self._tr_apply)
+            layout.addRow(self._tr_group)
+            self._tr_group.hide()
         self._reload_button = QPushButton("상태 다시 확인"); self._reload_button.clicked.connect(self._reload)
         layout.addRow(self._reload_button)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close); buttons.rejected.connect(self.reject)
@@ -167,6 +198,81 @@ class NasCredentialsDialog(QDialog):
         self._monitor.setEnabled(settings); self._orders.setEnabled(settings and self._monitor.isChecked() and not self._real)
         self._settings_button.setEnabled(settings)
         self._reload_button.setEnabled(not busy)
+        if not self._global:
+            self._tr_reload.setEnabled(not busy and not pending)
+            edit = self._tr_settings is not None and not busy and not pending
+            separate = self._tr_mode.currentData() == "separated"
+            self._tr_mode.setEnabled(edit)
+            self._tr_execution.setEnabled(edit)
+            self._tr_data.setEnabled(edit and separate)
+            self._tr_apply.setEnabled(edit and self._tr_execution.currentData() is not None
+                                      and (not separate or self._tr_data.currentData() is not None))
+
+    def _load_tr_connections(self):
+        self._tr_group.show()
+        self._tr_settings = None
+        self._tr_loading = True
+        self._tr_status.setText("저장된 연결을 확인하는 중…")
+        self._run(self._client.load_tr_connections, self._tr_loaded, "TR 연결 확인 중…")
+
+    @Slot(object)
+    def _tr_loaded(self, result):
+        self._worker = None
+        self._tr_loading = False
+        if self._closed:
+            return
+        document = result["settings"]
+        if "targets" in result:
+            self._tr_targets = result["targets"]
+        for combo, selected in ((self._tr_execution, document["execution_target"]),
+                                (self._tr_data, document["data_target"])):
+            combo.blockSignals(True)
+            combo.clear()
+            for target, label in self._tr_targets:
+                environment = "모의" if target["scope"]["environment"] == "mock" else "실전"
+                combo.addItem(f"{label} · {environment}", target)
+            combo.setCurrentIndex(next((i for i in range(combo.count()) if combo.itemData(i) == selected), -1))
+            combo.blockSignals(False)
+        self._tr_mode.setCurrentIndex(self._tr_mode.findData(document["mode"]))
+        realtime = result["realtime_market"]
+        profile = realtime["credential_profile_id"]
+        label = next((name for target, name in self._tr_targets if target["credential_profile_id"] == profile), profile)
+        environment = {"real": "실전", "mock": "모의"}.get(realtime["environment"])
+        self._tr_realtime.setText("실시간 0B 공통 입력: " + " · ".join(filter(None, (label, environment)))
+                                  if label or environment else "실시간 0B 공통 입력: 확인되지 않음")
+        applied = result["applied_revision"]
+        status = result["status"]
+        message = {
+            "legacy": "기존 연결 사용 중 · 별도 TR 설정 없음",
+            "unavailable": "이 서버에서 TR 연결을 설정할 수 없습니다.",
+            "applying": "TR 연결 적용 중",
+            "waiting_for_profile": "저장됨 · 계좌 연결 대기",
+            "recovery_required": "저장된 설정과 적용 상태를 다시 확인하세요.",
+            "applied": f"저장·적용 완료 · 버전 {applied}",
+        }[status]
+        if document["revision"] and applied is None:
+            message += f" · 저장 버전 {document['revision']}"
+        if result["effective_mode"] == "integrated" and document["mode"] == "separated":
+            message += " · 같은 계좌이므로 연결과 TR 한도를 공유합니다."
+        if result["execution_ready"] is False:
+            message += " · 매매 기준 계좌 연결 확인 필요"
+        self._tr_status.setText(message)
+        self._status.setText("TR 연결 설정 확인 완료")
+        self._tr_settings = document if status not in {"unavailable", "applying"} else None
+        self._refresh()
+
+    def _save_tr_connections(self):
+        if self._tr_settings is None or not self._tr_apply.isEnabled():
+            return
+        mode = self._tr_mode.currentData()
+        execution = self._tr_execution.currentData()
+        data = execution if mode == "integrated" else self._tr_data.currentData()
+        values = {"mode": mode, "execution_target": execution, "data_target": data}
+        revision = self._tr_settings["revision"]
+        self._tr_settings = None  # A lost response requires a fresh read before another CAS.
+        self._tr_loading = True
+        self._tr_status.setText("TR 연결을 저장하고 적용하는 중…")
+        self._run(lambda: self._client.update_tr_connections(values, revision), self._tr_loaded, "TR 연결 적용 중…")
 
     def _run(self, task, handler, message):
         if self._worker is not None or self._closed: return
@@ -433,6 +539,9 @@ class NasCredentialsDialog(QDialog):
         self._worker = None
         if self._closed: return
         self._status.setText(message)
+        if self._tr_loading:
+            self._tr_loading = False
+            self._tr_status.setText("TR 연결 상태를 다시 불러오세요. " + message)
         self._refresh()
         if self._client.pending_profile and self._client.operation_id:
             self._poll_failures += 1

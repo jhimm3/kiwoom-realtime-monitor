@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | AR 실제 전환 | 자료 선별·인계, 확정 설치물 검증, 운영 전환과 복귀 | [AR 세부 체크리스트](docs/architecture/app-target-20261023.md#v1-detailed-checklist)의 원본·대상·기준시각과 각 승인 조건 |
 | 승인 12절 개발 | 돌파·종가베팅·신규주·낙주·DD·MICRO 연구/Shadow와 UI·API·일지·원계획 복구, 라이브러리 비교 | 개발5/5·대표11/11 로컬 수락. [최종 S12-01~05 로드맵과 근거](docs/architecture/section12-development-roadmap-20261105.md#s12-final-development-acceptance)를 따른다. 실제 주문·운영 NAS/권한 이전·T0·push는 별도 |
+| 정본 비운영 후속 | 실제 연구 자식 격리, Darwin OS 경계, 선택 자료 보관, 현재 설치 후보, 시장/매매 TR 선택 | [N01~07 범위·검증·남은 조건](docs/architecture/canonical-offline-followup-20261107.md). 소프트웨어/격리 판정과 OS 설치·실제 운영은 분리 |
 | 연구·Shadow 개발 | 0B 실시간 입력, 연구의 필요한 봉 자료와 당시 가용성, 판단의 독립 검증 | [실시간·연구 입력 계약](docs/workstreams/realtime-entry.md)과 [네 운용군 목표](docs/architecture/app-target-20261023.md#12-연구노트-기반-네-운용군의-목표-설계)을 적용. 미정 매매 정책과 실전 권한은 별도 판단 |
 | 실행 위치 확대 | Windows·macOS·Linux 공통 엔진, 로컬 원본과 NAS 장후 보관 | [단계별 전환 기준](docs/architecture/app-target-20261023.md#portable-execution-target)에 따른 해당 OS·전송 검증과 승인 |
 | 기능별 후속 | R3에서 이관한 실패·사용 제한과 독립 기능 개발 | [기능별 후속](docs/OPEN_ITEMS.md) 및 변경 범위의 F 계약과 관련 검증 |

@@ -133,6 +133,60 @@ def _save_real_account_event(cursor, binding, event_type, event, received_at, se
     return json.loads(serialized)
 
 
+def _load_tr_connection_settings(cursor, p):
+    from kiwoom_monitor.domain.credential_contract import tr_connection_settings
+    cursor.execute("SELECT document_json FROM central_documents WHERE collection='server_tr_connection_settings' "
+                   "AND owner='global' AND document_key='settings'", ())
+    row = cursor.fetchone()
+    if row is None:
+        return {"mode": "separated", "execution_target": None, "data_target": None, "revision": 0}
+    try:
+        value = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        result = tr_connection_settings(value, stored=True)
+        if result["revision"] == 0:
+            raise ValueError
+        return result
+    except (ValueError, TypeError, KeyError):
+        raise ValueError("TR_CONNECTION_SETTINGS_RECOVERY_REQUIRED") from None
+
+
+def _save_tr_connection_settings(cursor, value, expected_revision, p):
+    from kiwoom_monitor.domain.credential_contract import tr_connection_settings
+    value = tr_connection_settings(value)
+    if type(expected_revision) is not int or not 0 <= expected_revision < 2**63:
+        raise ValueError("TR_CONNECTION_SETTINGS_INVALID")
+    current = _load_tr_connection_settings(cursor, p)
+    if current["revision"] != expected_revision:
+        raise ValueError("TR_CONNECTION_SETTINGS_REVISION_CONFLICT")
+    execution, data = value["execution_target"], value["data_target"]
+    for target in ((execution,) if execution == data else (execution, data)):
+        scope = _verified_settings_scope(cursor, target["scope"], p)
+        cursor.execute(f"SELECT provider,environment,lifecycle_state FROM central_credential_profiles WHERE profile_id={p}",
+                       (target["credential_profile_id"],))
+        profile = cursor.fetchone()
+        if profile is None or tuple(profile) != ("kiwoom_" + scope["environment"], scope["environment"], "active"):
+            raise ValueError("TR_CONNECTION_PROFILE_UNAVAILABLE")
+        cursor.execute(f"SELECT account_ref,binding_revision FROM central_account_binding_revisions "
+                       f"WHERE credential_profile_id={p} AND broker={p} AND environment={p} "
+                       "ORDER BY binding_revision DESC LIMIT 1",
+                       (target["credential_profile_id"], scope["broker"], scope["environment"]))
+        binding = cursor.fetchone()
+        if binding is None or tuple(binding) != (scope["account_ref"], target["binding_revision"]):
+            raise ValueError("ACCOUNT_CONTEXT_MISMATCH")
+        if _load_account_settings(cursor, scope, p)["active_profile_id"] != target["credential_profile_id"]:
+            raise ValueError("TR_CONNECTION_PROFILE_UNAVAILABLE")
+    if all(current[name] == value[name] for name in value):
+        return current
+    if expected_revision == 2**63 - 1:
+        raise ValueError("TR_CONNECTION_SETTINGS_REVISION_EXHAUSTED")
+    document = {**value, "revision": expected_revision + 1}
+    cursor.execute("INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
+                   f"VALUES({','.join([p] * 5)}) ON CONFLICT(collection,owner,document_key) "
+                   "DO UPDATE SET updated_at=excluded.updated_at, document_json=excluded.document_json",
+                   ("server_tr_connection_settings", "global", "settings", time(), json.dumps(document)))
+    return document
+
+
 def _load_market_profile_settings(cursor: Any, p: str) -> dict[str, Any]:
     """Role policy is independent of UI account selection and legacy query routing."""
     import re
@@ -274,6 +328,15 @@ def _save_account_settings(cursor: Any, value: dict[str, Any], expected_revision
 
 
 class SQLiteAccountSettingsStoreMixin:
+    def load_tr_connection_settings(self):
+        with self._lock, self._connection() as connection:
+            return _load_tr_connection_settings(connection.cursor(), "?")
+
+    def save_tr_connection_settings(self, value, *, expected_revision):
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return _save_tr_connection_settings(connection.cursor(), value, expected_revision, "?")
+
     def load_account_settings(self, scope: dict[str, str]) -> dict[str, Any]:
         with self._lock, self._connection() as connection:
             return _load_account_settings(connection.cursor(), scope, "?")
@@ -308,6 +371,21 @@ class SQLiteAccountSettingsStoreMixin:
 
 
 class PostgresAccountSettingsStoreMixin:
+    def load_tr_connection_settings(self):
+        from .postgres_access import DBWriterContext, open_observed_connection
+        reader = DBWriterContext(writer_family="read.account", writer_kind="tr_connection_settings",
+                                 operation="load_tr_connection_settings", access_mode="read")
+        with open_observed_connection(self._connect, reader) as connection, connection.cursor() as cursor:
+            return _load_tr_connection_settings(cursor, "%s")
+
+    def save_tr_connection_settings(self, value, *, expected_revision):
+        from .postgres_access import DBWriterContext, open_observed_connection
+        writer = DBWriterContext(writer_family="account.settings", writer_kind="tr_connection_settings_save",
+                                 operation="save_tr_connection_settings", rows_attempted=1)
+        with open_observed_connection(self._connect, writer) as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("credential-activation",))
+            return _save_tr_connection_settings(cursor, value, expected_revision, "%s")
+
     def load_account_settings(self, scope: dict[str, str]) -> dict[str, Any]:
         from .postgres_access import DBWriterContext, open_observed_connection
 

@@ -1,12 +1,18 @@
 from __future__ import annotations
+import ctypes
+import errno
 import hashlib
 import json
+import struct
 import sys
 import tempfile
 import unittest
 from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
+from unittest.mock import Mock
+from types import SimpleNamespace
+from kiwoom_monitor.application import research_resources as resources
 
 from kiwoom_monitor.application.research_resources import (
     ResearchResourceGuard, ResearchResourceLimits, ResearchResourceBlocked, current_rss_bytes,
@@ -34,6 +40,44 @@ class ResearchResourcesTests(unittest.TestCase):
             self.assertGreater(current_rss_bytes(), 0)
         self.assertIs(first, _windows_rss_api())
         self.assertEqual(_windows_rss_api.cache_info().misses, 1)
+
+    def test_darwin_rss_reads_resident_bytes_with_cached_fixed_width_binding(self):
+        # Darwin proc_taskinfo: six uint64 values followed by twelve int32s.
+        raw = struct.pack('=6Q12i', 1 << 40, 123_456_789, *([0] * 16))
+
+        def query(pid, flavor, argument, buffer, size):
+            self.assertEqual((resources.os.getpid(), 4, 0, 96), (pid, flavor, argument, size))
+            ctypes.memmove(buffer, raw, len(raw))
+            return len(raw)
+
+        native = Mock(side_effect=query)
+        resources._darwin_rss_api.cache_clear()
+        try:
+            with patch.object(resources.sys, 'platform', 'darwin'), patch.object(
+                    resources.ctypes, 'CDLL', return_value=SimpleNamespace(proc_pidinfo=native)) as load:
+                self.assertEqual(123_456_789, current_rss_bytes())
+                self.assertEqual(123_456_789, current_rss_bytes())
+            load.assert_called_once_with('/usr/lib/libproc.dylib', use_errno=True)
+            self.assertEqual(ctypes.c_int, native.restype)
+            self.assertEqual([ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int], native.argtypes)
+        finally:
+            resources._darwin_rss_api.cache_clear()
+
+    def test_darwin_rss_incomplete_and_denied_reads_keep_resource_blocked(self):
+        def query(*_arguments):
+            ctypes.set_errno(errno.EPERM)
+            return returned[0]
+
+        resources._darwin_rss_api.cache_clear()
+        try:
+            with patch.object(resources.sys, 'platform', 'darwin'), patch.object(
+                    resources.ctypes, 'CDLL', return_value=SimpleNamespace(proc_pidinfo=Mock(side_effect=query))):
+                for count in (0, 95):
+                    returned = [count]
+                    with self.subTest(returned=count), self.assertRaisesRegex(ResearchResourceBlocked, 'unavailable'):
+                        ResearchResourceGuard(ResearchResourceLimits()).check()
+        finally:
+            resources._darwin_rss_api.cache_clear()
 
     def test_limits_and_missing_rss_fail_closed(self):
         for kwargs in ({'memory_mb': 127}, {'cpu_duty_percent': 0}, {'batch_seconds': 1}):

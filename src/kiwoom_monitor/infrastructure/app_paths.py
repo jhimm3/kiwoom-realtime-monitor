@@ -48,15 +48,26 @@ class AppPaths:
 
     @property
     def account_binding_path(self) -> Path:
-        """현재 Windows 사용자에게만 복호화되는 검증 계좌 binding mirror."""
+        """현재 사용자에게만 복호화되는 검증 계좌 binding mirror."""
         return self.data_dir / "account-bindings.dat"
+
+    @staticmethod
+    def user_state_root() -> Path:
+        if sys.platform == 'darwin':
+            return Path.home() / 'Library' / 'Application Support' / 'KiwoomMonitor'
+        if sys.platform.startswith('linux'):
+            state_root = Path(os.environ.get('XDG_DATA_HOME', ''))
+            if not state_root.is_absolute():
+                state_root = Path.home() / '.local' / 'share'
+            return state_root / 'KiwoomMonitor'
+        return Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData' / 'Local')) / 'KiwoomMonitor'
 
     @classmethod
     def for_current_user(cls) -> "AppPaths":
         """Resolve/create the default folders without importing personal data.
 
         A source/editable checkout keeps its project data. Installed wheels and
-        frozen desktops use the existing writable Windows user-data default.
+        frozen desktops use the platform's writable user-data directory.
         Explicit desktop preparation belongs inside the root restore lease.
         """
         frozen = getattr(sys, "frozen", False)
@@ -70,8 +81,7 @@ class AppPaths:
         if source_checkout:
             base_dir = app_root / "data"
         else:
-            local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-            base_dir = local_app_data / "KiwoomMonitor" / "data"
+            base_dir = cls.user_state_root() / "data"
         log_dir = base_dir / "logs"
         base_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)

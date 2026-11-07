@@ -57,6 +57,47 @@ class FakeRankingLoader:
 
 
 class MainWindowTest(unittest.TestCase):
+    def test_journal_unknown_identity_preserves_owner_and_blocks_duplicate_start(self) -> None:
+        module = 'kiwoom_monitor.presentation.main_window'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'journal_process.pid'
+            identity = {'pid': 42, 'start_token': 'darwin:1793678400:123456'}
+            path.write_text(json.dumps(identity), encoding='ascii')
+            window = SimpleNamespace(
+                _query_only=False, _journal_process_manager=Mock(is_running=False),
+                _journal_process_path=path, _journal_database_path=root / 'journal.sqlite3',
+                _monitor_database_path=root / 'monitor.sqlite3',
+                _journal_command_path=root / 'journal_command.json', _send_journal_command=Mock(),
+            )
+            with patch(f'{module}.process_identity_state', return_value='unknown'), patch(f'{module}.os.kill') as kill:
+                MainWindow._ensure_journal_process(window)
+                MainWindow._stop_stale_journal_process(window)
+                window._journal_process_manager.start.assert_not_called()
+                window._send_journal_command.assert_not_called()
+                kill.assert_not_called()
+                self.assertEqual(identity, json.loads(path.read_text(encoding='ascii')))
+
+            with patch(f'{module}.process_identity_state', side_effect=['running', 'unknown']), \
+                 patch(f'{module}.time.sleep'), patch(f'{module}.os.kill') as kill:
+                MainWindow._stop_stale_journal_process(window)
+                window._send_journal_command.assert_called_once_with(action='shutdown')
+                kill.assert_not_called()
+                self.assertEqual(identity, json.loads(path.read_text(encoding='ascii')))
+
+            with patch(f'{module}.process_identity_state', return_value='exited'):
+                MainWindow._stop_stale_journal_process(window)
+                self.assertFalse(path.exists())
+                MainWindow._ensure_journal_process(window)
+                window._journal_process_manager.start.assert_called_once()
+
+            path.write_text('42', encoding='ascii')
+            with patch(f'{module}.process_identity_state') as probe, patch(f'{module}.os.kill') as kill:
+                MainWindow._stop_stale_journal_process(window)
+                probe.assert_not_called()
+                kill.assert_not_called()
+                self.assertFalse(path.exists())
+
     def test_explicit_full_native_window_keeps_all_local_owners_under_selected_root(self) -> None:
         from qt_settings_test_support import wait_until
         from kiwoom_monitor.infrastructure.app_paths import AppPaths

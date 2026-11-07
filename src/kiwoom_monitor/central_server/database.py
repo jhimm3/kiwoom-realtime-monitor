@@ -119,6 +119,10 @@ from kiwoom_monitor.central_server.database_research_export import (
     PostgresResearchExportStoreMixin,
     SQLiteResearchExportStoreMixin,
 )
+from kiwoom_monitor.central_server.database_observation_archive import (
+    PostgresObservationArchiveStoreMixin,
+    SQLiteObservationArchiveStoreMixin,
+)
 from kiwoom_monitor.central_server.database_historical_news import (
     SQLiteHistoricalNewsStoreMixin, PostgresHistoricalNewsStoreMixin,
     _historical_market_source_page,
@@ -317,6 +321,8 @@ class QueryStore(QueryCacheStore, Protocol):
     def save_account_settings(self, value: dict[str, Any], *, expected_revision: int) -> dict[str, Any]: ...
     def load_market_profile_settings(self) -> dict[str, Any]: ...
     def save_market_profile_settings(self, value: dict[str, Any], *, expected_revision: int) -> dict[str, Any]: ...
+    def load_tr_connection_settings(self) -> dict[str, Any]: ...
+    def save_tr_connection_settings(self, value: dict[str, Any], *, expected_revision: int) -> dict[str, Any]: ...
     def load_credential_activations(self, profile_id: str) -> list[dict[str, Any]]: ...
     def initialize(self) -> None: ...
     def save_realtime_snapshots(self, values: list[dict[str, Any]]) -> None: ...
@@ -538,6 +544,7 @@ class SQLiteQueryStore(
     SQLiteRealtimeSnapshotStoreMixin,
     SQLiteMarketEventStoreMixin,
     SQLiteResearchExportStoreMixin,
+    SQLiteObservationArchiveStoreMixin,
     SQLiteDocumentStoreMixin,
     SQLiteTop20StatisticsStoreMixin,
     SQLiteObservationReaderStoreMixin,
@@ -659,6 +666,7 @@ class PostgresQueryStore(
     PostgresRealtimeSnapshotStoreMixin,
     PostgresMarketEventStoreMixin,
     PostgresResearchExportStoreMixin,
+    PostgresObservationArchiveStoreMixin,
     PostgresDocumentStoreMixin,
     PostgresTop20StatisticsStoreMixin,
     PostgresObservationReaderStoreMixin,

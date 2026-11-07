@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -18,8 +18,8 @@ class KiwoomSettingsError(ValueError):
 
 @dataclass(frozen=True)
 class KiwoomSettings:
-    app_key: str
-    secret_key: str
+    app_key: str = field(repr=False)
+    secret_key: str = field(repr=False)
     environment: str
 
     @property

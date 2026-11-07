@@ -36,6 +36,136 @@ class FakeClient:
 
 
 class CentralRestBrokerTests(unittest.TestCase):
+    def test_selected_transport_closed_during_admission_never_reopens_account_broker(self):
+        from kiwoom_monitor.central_server.rest_broker import BrokerCredentialBusyError
+
+        async def scenario(stage):
+            source_client, account_client = FakeClient(), FakeClient()
+            source = CentralRestBroker(source_client)
+            target = CentralRestBroker(account_client, allowed_endpoints=MOCK_ACCOUNT_ENDPOINTS)
+            current = [(target, "bound-account:revision-1")]
+            source.set_market_transport_provider(lambda: current[0])
+            await target.start()
+            entered, release = asyncio.Event(), asyncio.Event()
+            original = target._request if stage == "before-start" else target.start
+
+            async def delayed(*args, **kwargs):
+                if stage == "before-start":
+                    entered.set()
+                    await release.wait()
+                    return await original(*args, **kwargs)
+                result = await original(*args, **kwargs)
+                entered.set()
+                await release.wait()
+                return result
+
+            selected = None
+            try:
+                attribute = "_request" if stage == "before-start" else "start"
+                with patch.object(target, attribute, side_effect=delayed):
+                    selected = asyncio.create_task(source.request("ka10080", "/api/dostk/chart", {}))
+                    await asyncio.wait_for(entered.wait(), 2)
+                    withdrawn = stage == "withdrawn-before-guard"
+                    if withdrawn:
+                        current[0] = None
+                    else:
+                        await target.close()
+                    release.set()
+                    error = "TR_CONNECTION_PROFILE_CHANGED" if withdrawn else "TR_CONNECTION_PROFILE_NOT_READY"
+                    with self.assertRaisesRegex(BrokerCredentialBusyError, error):
+                        await asyncio.wait_for(selected, 2)
+                if not withdrawn:
+                    self.assertIsNone(target._worker)
+                self.assertEqual([], account_client.calls)
+                self.assertEqual([], source_client.calls)
+            finally:
+                release.set()
+                if selected is not None:
+                    await asyncio.gather(selected, return_exceptions=True)
+                # A broken admission can leave a stranded job; clear that test
+                # fixture before closing the original source waiter.
+                if target._worker is None:
+                    for entry in tuple(target._inflight.values()):
+                        if not entry.future.done():
+                            entry.future.set_exception(RuntimeError("test closed account"))
+                await source.close()
+                await target.close()
+
+        for stage in ("before-start", "before-guard", "withdrawn-before-guard"):
+            with self.subTest(stage=stage):
+                asyncio.run(scenario(stage))
+
+    def test_selected_transport_switch_joins_market_recording_and_fences_persistent_cache(self):
+        from kiwoom_monitor.central_server.rest_broker import BrokerCredentialBusyError
+
+        class Store:
+            def __init__(self):
+                self.values = {}
+
+            def load_query(self, key):
+                return self.values.get(key)
+
+            def save_query(self, key, api_id, expires_at, value):
+                self.values[key] = value
+
+        async def scenario():
+            original, execution, data = FakeClient(), FakeClient(), FakeClient()
+            execution_broker = CentralRestBroker(execution, allowed_endpoints=MOCK_ACCOUNT_ENDPOINTS)
+            data_broker = CentralRestBroker(data, allowed_endpoints=MOCK_ACCOUNT_ENDPOINTS)
+            entered, release = threading.Event(), threading.Event()
+            store, recorded = Store(), []
+
+            def record(api_id, body, payload):
+                entered.set()
+                self.assertTrue(release.wait(5))
+                recorded.append(payload)
+
+            source = CentralRestBroker(original, store, record)
+            current = [(data_broker, "data:binding-1:settings-1")]
+            source.set_market_transport_provider(lambda: current[0])
+            first = change = None
+            try:
+                first = asyncio.create_task(source.request("ka10081", "/api/dostk/chart", {"stk_cd": "005930"}))
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                committed = asyncio.Event()
+
+                async def apply():
+                    self.assertEqual(1, len(recorded))
+                    current[0] = execution_broker, "execution:binding-1:settings-2"
+                    committed.set()
+
+                change = asyncio.create_task(source.change_market_transport(apply))
+                for _ in range(20):
+                    if source._market_transport_paused:
+                        break
+                    await asyncio.sleep(0)
+                self.assertTrue(source._market_transport_paused)
+                self.assertFalse(committed.is_set())
+                with self.assertRaisesRegex(BrokerCredentialBusyError, "TR_CONNECTION_CHANGE_IN_PROGRESS"):
+                    await source.request("ka10081", "/api/dostk/chart", {"stk_cd": "000660"})
+                await execution_broker.request("kt00007", "/api/dostk/acnt", {})
+                self.assertFalse(execution_broker._credential_paused)
+                release.set()
+                self.assertTrue((await first).recording_succeeded)
+                await change
+                self.assertTrue(committed.is_set())
+                source._cache.clear()  # Exercise the prior route's persisted cache key.
+                next_result = await source.request("ka10081", "/api/dostk/chart", {"stk_cd": "005930"})
+                self.assertFalse(next_result.cache_hit)
+                self.assertEqual(2, len(store.values))
+                self.assertEqual(["ka10081"], [call[0] for call in data.calls])
+                self.assertEqual(["kt00007", "ka10081"], [call[0] for call in execution.calls])
+                self.assertEqual([], original.calls)
+                self.assertEqual({}, data_broker._cache)
+            finally:
+                release.set()
+                await asyncio.gather(*(task for task in (first, change) if task is not None), return_exceptions=True)
+                await source.close()
+                await data_broker.close()
+                await execution_broker.close()
+
+        asyncio.run(scenario())
+
     def test_basic_cache_lookup_crossing_0700_does_not_restamp_an_old_response(self) -> None:
         class Store:
             def __init__(self):

@@ -3331,6 +3331,29 @@
         "tmp/s12-selected-current-v5-final-01/handoff.json",
         "tmp/s12-05-selective-install/v5-handoff.json"
       ]
+    },
+    {
+      "id": "N03-N07-offline-archive-and-tr-settings-20261107",
+      "reason": "N03 장후 원본의 내구 저장과 첫 수락 영수증; N07 사용자가 선택하는 TR 계좌 역할의 revision CAS.",
+      "connection": "기존 SQLite/PG transaction과 계좌 활성화 잠금 재사용. archive grant가 없는 기본 조립은 DDL과 라우트를 추가하지 않는다. 저장 설정은 명시 GET/PUT과 기동에서만 읽고, 시장조회는 현재 owner와 credential 세대를 RAM에서 검사한다. 기존 0B·Risk·원주문 owner에는 신규 SQL을 추가하지 않는다.",
+      "validation": "새 SQL 구문 사이트의 상한이다. 실제 실행은 분기별로 다르다. PostgresAccountSettingsStoreMixin.save_tr_connection_settings: 명시 PUT: 기존 자격증명 활성화 잠금과 직렬화; SQLiteAccountSettingsStoreMixin.save_tr_connection_settings: 명시 PUT: 기존 연결의 BEGIN IMMEDIATE; _load_tr_connection_settings: owner 준비/설정 GET과 PUT 내부 읽기, 시장조회 hot path는 현재 문서 재사용; _save_tr_connection_settings: 명시 PUT: 대상별 profile와 binding 확인, 변경 시 CAS document upsert 1회; PostgresObservationArchiveStoreMixin.prepare_observation_archive: grant 설정된 수신기 기동의 선택 table DDL; SQLiteObservationArchiveStoreMixin.prepare_observation_archive: grant 설정된 file receiver 기동의 선택 table DDL; _accept_batch: 선택 POST: 첫 영수증 재조회, 새 배치에만 순번 조회와 BLOB 저장; _begin_postgres_archive: 선택 DDL/POST에서 isolation·sync commit·fsync·stream lock 검증; _begin_sqlite_archive: 선택 DDL/POST에서 WAL·FULL·BEGIN IMMEDIATE 확인; _load_batch: grant에 맞는 GET 1회, receipt 요청은 원본 BLOB을 읽지 않음. 실제 4종 원행 round-trip, PostgreSQL rollback/동시 수락, TR native CAS와 분리 wire는 별도 현재 소스 검사로 확인.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_account_settings.py|PostgresAccountSettingsStoreMixin.save_tr_connection_settings|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_account_settings.py|SQLiteAccountSettingsStoreMixin.save_tr_connection_settings|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_account_settings.py|_load_tr_connection_settings|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_account_settings.py|_save_tr_connection_settings|cursor.execute": 3,
+        "db|src/kiwoom_monitor/central_server/database_observation_archive.py|PostgresObservationArchiveStoreMixin.prepare_observation_archive|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_observation_archive.py|SQLiteObservationArchiveStoreMixin.prepare_observation_archive|connection.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_observation_archive.py|_accept_batch|cursor.execute": 3,
+        "db|src/kiwoom_monitor/central_server/database_observation_archive.py|_begin_postgres_archive|cursor.execute": 4,
+        "db|src/kiwoom_monitor/central_server/database_observation_archive.py|_begin_sqlite_archive|connection.execute": 4,
+        "db|src/kiwoom_monitor/central_server/database_observation_archive.py|_load_batch|cursor.execute": 1
+      },
+      "evidence": [
+        "docs/architecture/canonical-offline-followup-20261107.md",
+        "tmp/canonical-offline-20261107/architecture-first.json",
+        "tmp/canonical-offline-20261107/final-source.json"
+      ]
     }
   ]
 }

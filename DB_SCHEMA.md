@@ -1,5 +1,9 @@
 > **스키마 적용 범위.** 아래 DDL·저장 계약은 구현 판본별 근거다. 운영 PostgreSQL 카탈로그와 선별 이전 대상은 별도로 대조한다. 원자료의 의미·판본·관계를 보존하고 빈 설치와 실제 선별 이전을 따로 수락한다. [관련 계약](docs/architecture/app-target-20261023.md#1112-데이터-보존과-db-구조-재설계--2026-10-24).
 
+**관측 보관과 TR 설정(2026-11-07).** 보관 grant가 있을 때만 `central_observation_archive_batches`를 준비한다. 기본 운영 스키마 판본을 올리지 않는다. `(source_stream,batch_id)`를 기본키로, `(source_stream,receipt_sequence)`를 유일하게 보존한다. `content_sha256`·`receipt_json`·원본 `batch_body`(SQLite BLOB, PostgreSQL BYTEA)를 같은 트랜잭션으로 기록한다. SQLite는 파일 기반 WAL/FULL, PostgreSQL은 fsync ON과 해당 트랜잭션의 synchronous_commit ON을 확인한다. 첫 영수증의 시각과 수신 순번은 원자료의 관측·가용 시각/판본/원천 순번을 대체하지 않는다.
+
+TR 설정은 기존 `central_documents`의 `server_tr_connection_settings/global/settings` 한 문서를 사용한다. 저장 전 문서 부재는 판본 0이며 기존 연결을 유지한다. native CAS는 최신 계좌 binding·활성 자격증명 참조를 확인해 비밀을 제외한 역할 설정을 저장한다. 시장조회 실행은 메모리의 적용 판본과 현재 연결을 사용한다. 원주문과 계좌 설정·권한 원장은 이 저장으로 변경하지 않는다. [API](API_CONTRACT.md).
+
 **S12-05 매매일지 schema 13(2026-11-06).** 기존 SQLite `journal_execution_event_projections`에 nullable `member_spec_id`를 추가한다. v12 자료의 원본·물리 체결 identity·내용 hash·계획 JSON·커서·시각을 바꾸지 않고, 기존 행은 null로 유지한다. 같은 물리 체결의 다른 멤버 재귀속은 페이지 transaction 전체를 거절한다. 새 설치와 v12 재개방은 같은 열을 사용한다. 중앙 PostgreSQL DDL은 이 일지 확장 때문에 바꾸지 않는다. 중앙의 기존 불변 문서에는 선택한 계좌 구성/실행 순서, 버전이 구분된 멤버 복구, 그룹의 명세별 재개 영수증을 저장한다. 실계좌·운영 자료 이전/DDL 적용은 실행하지 않는다.
 
 v2 명시 구성은 원래 입장 참조와 새 진입 명세를 분리한다. 원 단일 명세의 주문·상세 체결·승인 hash와 `current` checkpoint 좌표는 보존한다. 현재 계좌 귀속과 공통 원금 대조에 필요한 멤버·FIFO는 원입장/승인과 실제 FILL을 검증한 읽기 view로 복원하며 원 head에 추정값을 저장하지 않는다. 명시 v3 돌파의 독립 셋업 재진입은 기존 불변 문서 저장에 단일 셋업 claim을 추가하고 v1/v2 계약을 유지한다.
