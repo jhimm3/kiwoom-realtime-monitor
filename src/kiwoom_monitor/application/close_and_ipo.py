@@ -25,7 +25,6 @@ from kiwoom_monitor.domain.market_data_contract import (
     ListingEvidence,
     ListingEvidenceStatus,
     ListingPhase,
-    ListingType,
     select_listing_evidence,
 )
 
@@ -295,7 +294,7 @@ def _entry(policy, bar, history, calendar, listings, day, session, start, cut) -
         listing_refs = tuple(row.evidence_id for row in selected.evidence)
         if selected.status is not ListingEvidenceStatus.AVAILABLE:
             return CloseIpoDecision("WAIT", 0, f"listing_{selected.status.value}", evidence_refs=listing_refs)
-        if selected.evidence[0].listing_type is not ListingType.IPO or selected.phase not in policy.listing_phases:
+        if not selected.supports_ipo_strategy or selected.phase not in policy.listing_phases:
             return CloseIpoDecision("WAIT", 0, "listing_type_or_phase_unsupported", evidence_refs=listing_refs)
         listing_phase = selected.phase
 

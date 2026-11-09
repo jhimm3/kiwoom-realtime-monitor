@@ -70,10 +70,21 @@ class CandidateAlertTests(unittest.TestCase):
                 "trigger_revision_id": "bar<5>", "trigger_close": 900, "failure_price": 890, "target_price": 945,
             },
         }
+        opening_adverse = _event("panic-adverse", 5) | {
+            "strategy_id": "panic_rebound", "strategy_variant": "P1", "panic_entry_setup": panic["panic_entry_setup"],
+            "material_news": {"panic_prior_session": {"status": "OBSERVED", "events": [
+                {"source_ref": "https://kind.krx.co.kr/common/disclsviewer.do?method=search&acptno=20260911000001"},
+            ]}},
+        }
+        opening_unknown = opening_adverse | {
+            "event_id": "panic-unknown", "accepted_sequence": 6,
+            "material_news": {"panic_prior_session": {"status": "UNKNOWN", "events": []}},
+        }
         with patch("kiwoom_monitor.presentation.candidate_monitor_dialog.QSettings", return_value=MemorySettings()):
             dialog = CandidateMonitorDialog(FakeClient())
             try:
-                dialog._apply_page({"initial_sync": True, "events": [close, ipo, legacy, panic]})
+                dialog._apply_page({"initial_sync": True, "events": [close, ipo, legacy, panic,
+                                                                     opening_adverse, opening_unknown]})
                 close_cell, ipo_cell, legacy_cell, panic_cell = (dialog._table.item(row, 6) for row in range(4))
                 self.assertEqual(close_cell.text(), legacy_cell.text())
                 self.assertIn("2026-09-15 10:00:00 KST", close_cell.toolTip())
@@ -86,6 +97,11 @@ class CandidateAlertTests(unittest.TestCase):
                 self.assertIn("bar&lt;5&gt;", panic_cell.toolTip())
                 self.assertIn("실패선 · 890원", panic_cell.toolTip())
                 self.assertIn("반등 목표가 · 945원", panic_cell.toolTip())
+                self.assertNotIn("장후 공식 악재", panic_cell.toolTip())
+                adverse_tooltip = dialog._table.item(4, 6).toolTip()
+                self.assertIn("개장까지 확인한 직전 거래일 장후 공식 악재 · 1건", adverse_tooltip)
+                self.assertIn("method=search&amp;acptno=20260911000001", adverse_tooltip)
+                self.assertIn("장후 공식 악재 · 미확인", dialog._table.item(5, 6).toolTip())
 
                 tooltip = close_cell.toolTip()
                 dialog._apply_page({"status_only": True, "events": [close | {"status": "EXPIRED"}]})

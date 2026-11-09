@@ -10,7 +10,6 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 from urllib.error import HTTPError
-from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 from kiwoom_monitor.application.news_analysis import assess_stock_news
@@ -21,9 +20,10 @@ from kiwoom_monitor.infrastructure.naver_stock_market_news_source import (
 
 from kiwoom_monitor.infrastructure.news_source_documents import article_marker, page_items
 
+from .news_sources import automatic_news_open, automatic_news_wait, load_news_stock_catalog, news_resume_at
+
 
 LOGGER = logging.getLogger(__name__)
-KST = ZoneInfo("Asia/Seoul")
 
 
 def _source_id(source: str, target_date: str) -> str:
@@ -56,6 +56,7 @@ class MarketFeedNewsCollector:
         self._enabled = bool(enabled)
         self._endpoints = dict(endpoints or ENDPOINT)
         self._excluded = processing_excluded_providers
+        self._morning_completed: dict[str, str] = {}
         self._closing = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
@@ -83,25 +84,35 @@ class MarketFeedNewsCollector:
         if not self._enabled or self._workload_paused("news_market_feed"):
             return
         current = as_kst(now or self._now())
-        dates = [current.date().isoformat()]
-        if current.hour < 2:
-            dates.append((current.date() - timedelta(days=1)).isoformat())
-        for target_date in dates:
+        if not automatic_news_open(current):
+            return
+        yesterday = (current.date() - timedelta(days=1)).isoformat()
+        for target_date in (yesterday, current.date().isoformat()):
+            morning_cut = news_resume_at(current) if target_date == yesterday else None
             for source in SOURCES:
                 if self._closing.is_set() or not self._enabled or self._workload_paused("news_market_feed"):
                     return
                 try:
-                    await self._collect(source, target_date)
+                    if morning_cut is not None and self._morning_completed.get(source) == yesterday:
+                        continue
+                    completed = await self._collect(source, target_date, morning_cut=morning_cut)
+                    if morning_cut is not None and completed:
+                        self._morning_completed[source] = yesterday
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     LOGGER.exception("네이버 증권 %s %s 뉴스 목록 수집 실패", source, target_date)
 
-    async def _collect(self, source: str, target_date: str) -> None:
+    async def _collect(self, source: str, target_date: str, *, morning_cut: datetime | None = None) -> bool:
         source_id = _source_id(source, target_date)
         cursor = await asyncio.to_thread(self._store.load_news_source_cursor, source_id) or {}
+        if morning_cut is not None and float(cursor.get("last_success") or 0) >= morning_cut.timestamp():
+            return True
+        resume = morning_cut or news_resume_at(self._now())
+        if float(cursor.get("checked_at") or 0) < resume.timestamp():
+            cursor = {**cursor, "next_start": 1, "pending_published_at": None, "pending_identity": ""}
         if float(cursor.get("next_schedule_at") or 0) > self._now().timestamp():
-            return
+            return False
         page_number = max(1, int(cursor.get("next_start") or 1))
         old_marker = (str(cursor.get("cursor_published_at") or ""), str(cursor.get("cursor_identity") or ""))
         pending = (str(cursor.get("pending_published_at") or ""), str(cursor.get("pending_identity") or ""))
@@ -110,6 +121,7 @@ class MarketFeedNewsCollector:
         catalog = await asyncio.to_thread(self._catalog)
         pages_this_run = 0
         while (page_number <= 300 and pages_this_run < 10 and not self._closing.is_set()
+               and automatic_news_open(self._now())
                and self._enabled and not self._workload_paused("news_market_feed")):
             try:
                 for attempt in range(3):
@@ -144,7 +156,7 @@ class MarketFeedNewsCollector:
                 capped = page_number == 300
                 completed = reached or exhausted or repeat or capped
                 truncated = repeat or capped
-                promoted = pending if completed else old_marker
+                promoted = pending if completed and not truncated else old_marker
                 accepted = await asyncio.to_thread(
                     page_items, items, catalog, self._excluded, retain_market_articles=True,
                 )
@@ -160,7 +172,7 @@ class MarketFeedNewsCollector:
                     "pending_identity": "" if completed else pending[1],
                     "next_start": 1 if completed else page_number + 1,
                     "next_schedule_at": now + self._poll_seconds if completed else now,
-                    "last_success": now if completed else cursor.get("last_success"),
+                    "last_success": now if completed and not truncated else cursor.get("last_success"),
                     "document": {"target_date": target_date, "source": source,
                                  "raw_items": len(page.articles), "invalid_items": page.invalid_count,
                                  "older_date_items": page.older_count,
@@ -170,7 +182,7 @@ class MarketFeedNewsCollector:
                     "items": accepted,
                 })
                 if completed:
-                    return
+                    return not truncated
                 page_number += 1
                 pages_this_run += 1
                 await asyncio.sleep(0.7)
@@ -191,12 +203,10 @@ class MarketFeedNewsCollector:
                     "document": {"target_date": target_date, "source": source}, "items": [],
                 })
                 raise
+        return False
 
     def _catalog(self) -> tuple[tuple[str, str], ...]:
-        rows = self._store.load_documents("stock_catalog", "krx", 10_000)
-        return tuple((str(doc.get("code") or ""), str(doc.get("name") or ""))
-                     for row in rows if isinstance(doc := row.get("document"), dict)
-                     if doc.get("code") and doc.get("name"))
+        return load_news_stock_catalog(self._store, self._now().date().isoformat())
 
     async def _loop(self) -> None:
         while not self._closing.is_set():
@@ -207,6 +217,6 @@ class MarketFeedNewsCollector:
             except Exception:
                 LOGGER.exception("네이버 증권 시장 뉴스 수집 주기 실패")
             try:
-                await asyncio.wait_for(self._closing.wait(), timeout=60)
+                await asyncio.wait_for(self._closing.wait(), timeout=automatic_news_wait(self._now(), 60))
             except TimeoutError:
                 pass

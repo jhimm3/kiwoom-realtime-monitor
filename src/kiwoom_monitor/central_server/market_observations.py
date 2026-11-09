@@ -31,7 +31,7 @@ from kiwoom_monitor.domain.market_data_contract import (
 
 
 
-def closing_auction_price_observation(tick, quote):
+def closing_auction_price_observation(tick, quote, *, window=None):
     """Retain an actual acknowledged KRX trade at the scheduled auction close, without constructing a bar."""
     if quote is None or tick.market != 'KRX':
         return None
@@ -44,7 +44,8 @@ def closing_auction_price_observation(tick, quote):
         traded_at = at.replace(hour=int(raw[:2]), minute=int(raw[2:4]), second=int(raw[4:]), microsecond=0)
     except ValueError:
         return None
-    window = session_window_at(traded_at - timedelta(seconds=KRX_AUCTION_RANDOM_END_SECONDS + 1), venue='KRX')
+    if window is None:
+        window = session_window_at(traded_at - timedelta(seconds=KRX_AUCTION_RANDOM_END_SECONDS + 1), venue='KRX')
     if (window.session is not MarketSession.KRX_CLOSING_AUCTION
             or not 0 <= (traded_at - window.ends_at).total_seconds() <= KRX_AUCTION_RANDOM_END_SECONDS
             or traded_at > at or quote.get('durable') is not False or quote.get('market_status') != 'TRADABLE'

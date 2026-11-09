@@ -676,7 +676,8 @@ class AppControllerTests(unittest.TestCase):
     def test_daily_high_finished_signal_preserves_cleanup_first_fallback_and_guards(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        now = as_kst(datetime(2026, 10, 6, 20, 10))
+        now = as_kst(datetime(2026, 10, 6, 19, 59))
+        clock = [now]
         target = now.date()
         codes = ("OK", "RETRY", "UNCONFIRMED")
         for fundamentals_started, nxt_started in ((True, False), (False, True), (False, False)):
@@ -706,7 +707,7 @@ class AppControllerTests(unittest.TestCase):
                     window.activate_startup()
                     self.windows.append(window)
                     controller = window._app_controller
-                    controller.ranking_loader = SimpleNamespace(server_now=lambda: now)
+                    controller.ranking_loader = SimpleNamespace(server_now=lambda: clock[0])
                     window._daily_bar_repository = SimpleNamespace(
                         mark_finalized=lambda requested, day: effects.append(("finalized", requested, day)),
                         mark_unconfirmed=lambda code, day, missing, attempts: effects.append(
@@ -741,9 +742,10 @@ class AppControllerTests(unittest.TestCase):
                         self.assertEqual(expected_phases, phases)
                         self.assertEqual(now + timedelta(minutes=5), window._finalization_retry_after[(target, "RETRY")])
 
-                        for boundary in ("close", "reload", "priority"):
+                        for boundary in ("close", "reload", "priority", "night"):
                             with self.subTest(boundary=boundary):
                                 prime()
+                                clock[0] = now.replace(hour=20, minute=5) if boundary == "night" else now
                                 controller._closing = boundary == "close"
                                 controller._api_reloading = boundary == "reload"
                                 if boundary in {"reload", "priority"}:
@@ -758,6 +760,7 @@ class AppControllerTests(unittest.TestCase):
                                     self.assertEqual(expected_phases, phases)
                                     self.assertEqual(1, len(observations))
                                 finally:
+                                    clock[0] = now
                                     controller._closing = False
                                     controller._api_reloading = False
                                     controller.ranking_execution.end_priority_preparation()
@@ -767,6 +770,29 @@ class AppControllerTests(unittest.TestCase):
                     window.close()
                     self.wait_until(controller.request_close)
                     self.assertTrue(window.close())
+
+    def test_direct_nxt_catalog_is_scheduled_before_open_and_flags_expire_next_day(self):
+        from kiwoom_monitor.application.stock_enrichment import nxt_catalog_refresh_due
+
+        controller, _, state = self.ranking_controller([], now=datetime(2026, 11, 9, 6, 59, 59), nas=False)
+        controller._nxt_catalog_due = nxt_catalog_refresh_due
+        with patch.object(controller.ranking, "start"), patch.object(controller.nxt_eligibility, "start") as prepare:
+            controller.request_ranking()
+            prepare.assert_not_called()
+            state.now = datetime(2026, 11, 9, 7)
+            controller.request_ranking()
+            prepare.assert_called_once_with(())
+            controller.nxt_checked_codes.add("005930")
+            controller.nxt_enabled_codes.add("005930")
+            state.now = datetime(2026, 11, 10, 9)
+            controller.request_ranking()
+            self.assertEqual(2, prepare.call_count)
+            prepare.assert_called_with(())
+            self.assertEqual(set(), controller.nxt_checked_codes)
+            self.assertEqual(set(), controller.nxt_enabled_codes)
+            state.now = datetime(2026, 11, 10, 20)
+            controller.request_ranking()
+            self.assertEqual(2, prepare.call_count)
 
     def test_ranking_signal_applies_before_nas_history_subscription_and_secondary(self):
         events = []
@@ -802,6 +828,35 @@ class AppControllerTests(unittest.TestCase):
             self.assertEqual(("005930",), events[3][1][0])
             self.assertEqual(codes, events[3][2]["followup_codes"])
             self.assertEqual(("prepare", codes), events[4])
+
+    def test_night_ranking_updates_view_without_waking_followups(self):
+        events = []
+        controller, _, state = self.ranking_controller(events, now=datetime(2026, 10, 6, 19, 59, 30))
+        codes = ("005930", "000660")
+        with patch.object(controller.realtime, "start", return_value=True) as start:
+            controller.ranking.completed.emit(self.stocks(*codes))
+            old_timer, = controller._followup_timers
+            for moment in (datetime(2026, 10, 6, 20), datetime(2026, 10, 7, 0), datetime(2026, 10, 7, 7)):
+                state.now = moment
+                events.clear()
+                controller.ranking.completed.emit(self.stocks(*codes))
+                controller.realtime.subscription_ready.emit(codes)
+                controller.nxt_eligibility.finished.emit()
+                controller.minute_history.finished.emit(codes, False)
+                controller.start_fundamentals_phase(codes)
+                self.assertEqual([("apply", codes)], events)
+                self.assertFalse(controller.ranking_preparation_timer.isActive())
+                self.assertEqual({old_timer}, controller._followup_timers)
+            old_timer.timeout.emit()
+            self.assertEqual([("apply", codes)], events)
+            controller.minute_history.finished.emit(codes, True)
+            self.assertEqual(("daily", codes, True), events[-1])
+            start.assert_called_once()
+            events.clear()
+            state.now = datetime(2026, 10, 7, 8)
+            controller.ranking.completed.emit(self.stocks(*codes))
+            controller.realtime.subscription_ready.emit(codes)
+            self.assertIn(("prepare", codes), events)
 
     def test_direct_partial_retries_but_stored_partial_waits_and_modal_keeps_latest(self):
         events = []
@@ -918,20 +973,23 @@ class AppControllerTests(unittest.TestCase):
             self.windows.append(window)
             controller = window._app_controller
             controller.ranking_loader = SimpleNamespace(server_now=lambda: datetime(2026, 10, 6, 10, 0))
-            codes = ("005930", "000660")
+            codes = ("005930", "0161M0")
+            visible = ("005930", "069500", "0161M0")
             observations = []
             def subscribed(active, nxt, **kwargs):
-                observations.append(tuple(window._table.item(i, 1).data(Qt.ItemDataRole.UserRole)
-                                          for i in range(window._table.rowCount())))
+                observations.append((tuple(active), tuple(window._table.item(i, 1).data(Qt.ItemDataRole.UserRole)
+                                          for i in range(window._table.rowCount()))))
                 return True
-            stocks = tuple(SimpleNamespace(code=code, name=code, rank=i+1, change_rate="1.0")
-                           for i, code in enumerate(codes))
+            stocks = tuple(SimpleNamespace(code=code, name=code, rank=i+1, change_rate="1.0",
+                                           enrich=code in codes, current_price=1200)
+                           for i, code in enumerate(visible))
             with patch.object(controller.realtime, "start", side_effect=subscribed):
                 controller.ranking.completed.emit(stocks)
-            self.assertEqual([codes], observations)
+            self.assertEqual([(codes, visible)], observations)
             self.assertEqual(codes, controller.ranked_codes)
+            self.assertEqual("1,200", window._table.item(1, 5).text())
             # Display order can change without changing the applied ranking snapshot.
-            window._row_by_code = {"000660": 0, "005930": 1}
+            window._row_by_code = {"0161M0": 0, "069500": 1, "005930": 2}
             with patch.object(controller, "start_secondary_loading") as secondary:
                 controller.realtime.subscription_ready.emit(codes)
                 controller.realtime.subscription_ready.emit(codes)
@@ -4422,6 +4480,7 @@ class AppControllerTests(unittest.TestCase):
             database.initialize()
             events = []
             with patch.object(MainWindow, "_open_api_settings"), \
+                    patch.object(AppController, "ranking_now", return_value=datetime(2026, 11, 9, 9)), \
                     patch.object(MainWindow, "_start_daily_krx_catalog_sync", side_effect=lambda: events.append("catalog")), \
                     patch.object(AppController, "start_realtime_subscription", side_effect=lambda codes: events.append(("subscribe", codes))), \
                     patch.object(AppController, "start_realtime_followups", side_effect=lambda codes: events.append(("followups", codes))):

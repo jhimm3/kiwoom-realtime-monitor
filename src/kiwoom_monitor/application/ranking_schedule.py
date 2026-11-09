@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta
 from enum import Enum
+
+from kiwoom_monitor.domain.time_basis import as_kst
 
 
 @dataclass(frozen=True)
@@ -36,10 +38,14 @@ class RankingChangeSummary:
     unchanged: bool
 
 
+def ranking_history_due(value: datetime) -> bool:
+    """Persist ranking history only from 08:00 to 20:00 KST."""
+    return time(8) <= as_kst(value).time() < time(20)
+
+
 def ranking_snapshot_archive_due(value: datetime) -> bool:
-    """Archive standalone ka00198 rankings from 07:55 through 08:05 KST."""
-    local = value.astimezone(timezone(timedelta(hours=9))) if value.tzinfo else value
-    return time(7, 55) <= local.time() < time(8, 6)
+    """Archive standalone ka00198 rankings from 08:00 through 08:05 KST."""
+    return time(8) <= as_kst(value).time() < time(8, 6)
 
 
 def summarize_ranking_changes(

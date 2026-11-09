@@ -180,7 +180,7 @@ class PanicFinalPublicationTests(unittest.TestCase):
 
 
 def prepare_panic_native(case, variant='P0', native_factory=None, *, stopped='continue_original_plan/v1', ready_http=False,
-                         defer_admission=False):
+                         defer_admission=False, venue='KRX'):
     from unittest.mock import patch
     from kiwoom_monitor.application.market_session_schedule import KST
     from kiwoom_monitor.application.mock_automation_specification import build_mock_automation_publication_documents, publish_ready_mock_automation_spec
@@ -193,7 +193,7 @@ def prepare_panic_native(case, variant='P0', native_factory=None, *, stopped='co
         mock_automation_spec_from_dict, stage_revision_from_dict,
     )
     from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
-    from tests.unit.test_mock_automation_specification import _FakeBrokerTransport, PROFILE_ID
+    from tests.unit.test_mock_automation_specification import native_test_transport, PROFILE_ID
     ctx = prepare_panic_final(case, variant, native_factory=native_factory)
     ctx.research_parameters = deepcopy(ctx.parameters)
     ctx.research_event = deepcopy(ctx.events[0])
@@ -236,7 +236,8 @@ def prepare_panic_native(case, variant='P0', native_factory=None, *, stopped='co
             'maximum_concurrent_strategies', 'maximum_concurrent_positions', 'maximum_capital_won',
             'maximum_daily_loss_won', 'maximum_data_gap_seconds', 'maximum_submission_unknown_count',
             'maximum_reconnect_count', 'maximum_balance_mismatch_count')},
-        execution_plan_mode=PANIC_NATIVE_PLAN_MODE, panic_execution_policy=PanicMockExecutionPolicy(100, 500, stopped))
+        execution_plan_mode=PANIC_NATIVE_PLAN_MODE, panic_execution_policy=PanicMockExecutionPolicy(100, 500, stopped),
+        supported_venue=venue)
     ctx.spec = mock_automation_spec_from_dict(documents['operating_spec'])
     case.assertEqual(ctx.spec, mock_automation_spec_from_dict(ctx.spec.to_dict()))
     case.assertNotIn('panic_execution_policy', ctx.inputs.spec.to_dict())
@@ -270,8 +271,10 @@ def prepare_panic_native(case, variant='P0', native_factory=None, *, stopped='co
             case.assertEqual(('READY', changed), (readiness.status.value, actual))
     case.enterContext(patch.object(ctx.store, '_execution_wall_now', lambda: ctx.clock[0], create=True))
     ctx.execution = ExecutionRepository(ctx.store)
-    ctx.transport = _FakeBrokerTransport(lambda: ctx.clock[0])
-    ctx.runtime = ExecutionRuntime(OrderLifecycle(ctx.execution, ctx.transport, now_provider=lambda: ctx.clock[0]), ctx.execution,
+    ctx.transport = native_test_transport(venue, lambda: ctx.clock[0])
+    ctx.route_options = {'local_automation_order_rejection': lambda _intent, _now: None} if venue == 'NXT' else {}
+    ctx.runtime = ExecutionRuntime(OrderLifecycle(ctx.execution, ctx.transport, now_provider=lambda: ctx.clock[0],
+                                                  **ctx.route_options), ctx.execution,
         account_ref=ctx.spec.account_scope.account_ref, run_id=execution_run_id_for_spec(ctx.spec.spec_id),
         owner_token='panic-native-test', now_provider=lambda: ctx.clock[0])
     case.addCleanup(ctx.runtime.stop)
@@ -281,6 +284,8 @@ def prepare_panic_native(case, variant='P0', native_factory=None, *, stopped='co
     ctx.revision = 0
     ctx.quote = dict(price_won=ctx.event['signal_reference_price'], available_at=ctx.clock[0],
         input_ref='collector-trade:panic-forward-entry', durable=False, market_status='TRADABLE')
+    if venue == 'NXT':
+        ctx.quote['venue'] = venue
     if not defer_admission:
         refresh_panic_cut(ctx, {})
     return ctx
@@ -400,6 +405,7 @@ def verify_panic_native_cycle(case, variant='P0', native_factory=None):
 def verify_panic_native_claim_fences(case, native_factory=None):
     from unittest.mock import patch
     from kiwoom_monitor.application.panic_mock_execution import PANIC_ENTRY_COLLECTION, PANIC_EXIT_COLLECTION, panic_exit_key
+    from tests.unit.test_news_material import recorded_filing
     ctx = prepare_panic_native(case, native_factory=native_factory)
     submit = ctx.runtime.submit_automation_intent
     for boundary in ('settings', 'entry-proof'):
@@ -424,8 +430,21 @@ def verify_panic_native_claim_fences(case, native_factory=None):
         case.assertEqual((), ctx.runtime.load_active_intents())
         collection, owner, key, original = originals[0]
         ctx.store.upsert_documents(collection, [{'owner': owner, 'key': key, 'document': original}])
+    def record_filing(ref, **kwargs):
+        document = recorded_filing(ref, ctx.clock[0].isoformat(), **kwargs)
+        ctx.store.upsert_documents("news_contract_filing", [
+            {"owner": ctx.event["symbol"], "key": ref, "document": document},
+        ])
+
+    record_filing("new-contract-termination")
+    with case.assertRaisesRegex(RuntimeError, "PANIC_OFFICIAL_ADVERSE_EVENT"):
+        panic_entry(ctx)
+    case.assertEqual([], ctx.transport.calls)
+    case.assertEqual((), ctx.runtime.load_active_intents())
+    record_filing("termination-revoked", parent="new-contract-termination", outcome="TERMINATION_REVOKED")
     _, buy, _ = panic_entry(ctx)
     head = fill_panic_entry(case, ctx, buy)
+    record_filing("other-contract-termination")
     original = []
     def change_exit(intent, account, **kwargs):
         row = ctx.repository.load_panic_exit_evidence(ctx.runtime.account_ref, panic_exit_key(head.plan))
@@ -533,13 +552,13 @@ class PanicNativePlanTests(unittest.TestCase):
         verify_panic_stopped_management(self, stopped='reconcile_only/v1')
 
 
-async def panic_management_context(case, native_factory=None, variant='P0', *, empty=False):
+async def panic_management_context(case, native_factory=None, variant='P0', *, empty=False, venue='KRX'):
     from unittest.mock import patch
     from tests.unit.test_close_order_management import BrokerBook
     from kiwoom_monitor.central_server.execution_runtime import ManualMockOrderGateway
     from kiwoom_monitor.central_server.mock_account_monitor import MockAccountMonitor
     from kiwoom_monitor.domain.order_contract import BrokerSubmission, OrderState
-    ctx = prepare_panic_native(case, variant, native_factory)
+    ctx = prepare_panic_native(case, variant, native_factory, venue=venue)
     if not empty:
         _, ctx.buy, _ = panic_entry(ctx)
         ctx.clock[0] += timedelta(seconds=10)
@@ -764,6 +783,7 @@ async def assemble_panic_runner(case, ctx):
     supervisor = MockAutomationSupervisor(ctx.store, SimpleNamespace(bundle=lambda _: ctx.bundle,
         require_execution_settings=require_settings), poll_seconds=3600,
         price_source=lambda symbol: ctx.current_quote if symbol == ctx.event['symbol'] else None,
+        nxt_price_source=lambda symbol: ctx.current_quote if symbol == ctx.event['symbol'] else None,
         now_provider=lambda: ctx.clock[0])
     case.addAsyncCleanup(supervisor.close)
     await supervisor.activate(credential_profile_id=PROFILE_ID, account_ref=ctx.runtime.account_ref,
@@ -779,7 +799,7 @@ async def assemble_panic_runner(case, ctx):
 
 
 async def verify_panic_runner(case, native_factory=None, *, variant='P0', kind='failure', zero_fill=False,
-                              after_partial_fill=None):
+                              after_partial_fill=None, venue='KRX'):
     import asyncio
     from unittest.mock import patch
     from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
@@ -788,7 +808,7 @@ async def verify_panic_runner(case, native_factory=None, *, variant='P0', kind='
     from kiwoom_monitor.domain.order_contract import BrokerFill, OrderSide, OrderState
     from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
     from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository
-    ctx = await panic_management_context(case, native_factory, variant, empty=True)
+    ctx = await panic_management_context(case, native_factory, variant, empty=True, venue=venue)
     # Explicit long fake lease covers compressed minute arrivals; no production limit changes.
     supervisor, runner = await assemble_panic_runner(case, ctx)
     ctx.runtime.start(lease_seconds=3600, new_orders_enabled=False)
@@ -898,7 +918,8 @@ async def verify_panic_runner(case, native_factory=None, *, variant='P0', kind='
         ctx.store.initialize(); case.addCleanup(ctx.store.close)
         case.enterContext(patch.object(ctx.store, '_execution_wall_now', lambda: ctx.clock[0], create=True))
         ctx.execution, ctx.repository = ExecutionRepository(ctx.store), ForwardEvaluationRepository(ctx.store)
-        ctx.runtime = ExecutionRuntime(OrderLifecycle(ctx.execution, ctx.transport, now_provider=lambda: ctx.clock[0]),
+        ctx.runtime = ExecutionRuntime(OrderLifecycle(ctx.execution, ctx.transport, now_provider=lambda: ctx.clock[0],
+                                                       **ctx.route_options),
             ctx.execution, account_ref=buy.intent.account_ref, run_id=buy.intent.run_id, owner_token=f'panic-runner-restored-{at.date()}',
             now_provider=lambda: ctx.clock[0])
         case.addCleanup(ctx.runtime.stop); ctx.runtime.start(new_orders_enabled=False)
@@ -961,6 +982,9 @@ async def verify_panic_runner(case, native_factory=None, *, variant='P0', kind='
 
 
 class PanicRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nxt_panic_uses_native_plan_and_recovers_actual_late_fill(self):
+        await verify_panic_runner(self, venue='NXT')
+
     async def test_p0_first_failure_survives_rebound_unknown_cancel_late_fill_and_reopen(self):
         await verify_panic_runner(self)
 

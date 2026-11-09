@@ -5,7 +5,7 @@ from __future__ import annotations
 from kiwoom_monitor.domain.simulation_contract import (
     COST_MODEL_VERSION, COST_MODEL_DECIMAL_VERSION, EXECUTION_MODEL_VERSION,
     SAME_BAR_PATH_VERSION, SimulationCostModel, SimulationExecutionConfig, _aware_datetime,
-    COMPLETED_CLOSE_EXECUTION_VERSION,
+    COMPLETED_CLOSE_EXECUTION_VERSION, fee_won as _fee_won,
 )
 
 import hashlib
@@ -1062,8 +1062,7 @@ class PaperExecutionEngine:
             )
         price = _slipped_price(bar.open, pending.side, cost.slippage_bps)
         notional = price * pending.quantity
-        commission = _fee_won(notional, cost.commission_bps)
-        tax = _fee_won(notional, cost.sell_tax_bps) if pending.side == "SELL" else 0
+        commission, tax = cost.fees_won(notional, sell=pending.side == "SELL")
         if pending.side == "BUY":
             required = notional + commission
             if (required > self.portfolio.cash_won - pending.cash_buffer_won
@@ -1173,8 +1172,7 @@ class PaperExecutionEngine:
         assert position is not None and cost is not None
         quantity = min(quantity, position.quantity)
         notional = price * quantity
-        commission = _fee_won(notional, cost.commission_bps)
-        tax = _fee_won(notional, cost.sell_tax_bps)
+        commission, tax = cost.fees_won(notional, sell=True)
         proceeds = notional - commission - tax
         notional_basis = position.entry_notional * quantity // position.quantity
         entry_basis = notional_basis + (
@@ -1303,10 +1301,6 @@ def estimate_buy_cash_won(
     price = _slipped_price(reference_price, "BUY", cost.slippage_bps)
     notional = price * quantity
     return notional + _fee_won(notional, cost.commission_bps)
-
-
-def _fee_won(notional: int, rate_bps: int | Decimal) -> int:
-    return int((Decimal(notional) * rate_bps / 10_000).to_integral_value(rounding=ROUND_DOWN))
 
 
 def _slipped_price(price: int, side: str, slippage_bps: int | Decimal) -> int:

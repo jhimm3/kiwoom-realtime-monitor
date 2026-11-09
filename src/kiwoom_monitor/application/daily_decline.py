@@ -5,12 +5,16 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, timedelta
-from typing import Iterable, Literal, Mapping
+from decimal import Decimal, DecimalException
+from math import ceil, floor
+from typing import Callable, Iterable, Literal, Mapping
 
 from kiwoom_monitor.application.market_session_schedule import (
     MarketPhase, MarketSession, SessionSupport, SessionWindow, TradingDayEvidence,
     decode_strategy_references, trading_day_as_of,
 )
+from kiwoom_monitor.application.news_material import MaterialNews
+from kiwoom_monitor.domain.simulation_contract import default_research_cost_model
 from kiwoom_monitor.domain.time_basis import KST
 
 
@@ -18,11 +22,21 @@ BPS = 10_000
 
 
 @dataclass(frozen=True)
-class DailyDeclineSpec:
+class DailyDeclineSignalPolicy:
     lookback_sessions: int
     minimum_decline_bps: int
     minimum_relative_decline_bps: int
     minimum_volatility_multiple_bps: int
+
+    def __post_init__(self) -> None:
+        positive = (self.lookback_sessions, self.minimum_decline_bps, self.minimum_volatility_multiple_bps)
+        if (any(type(value) is not int or value <= 0 for value in positive)
+                or type(self.minimum_relative_decline_bps) is not int or self.minimum_relative_decline_bps < 0):
+            raise ValueError("invalid DD signal limits")
+
+
+@dataclass(frozen=True)
+class DailyDeclineSpec(DailyDeclineSignalPolicy):
     budget_won: int
     tranche_weights_bps: tuple[int, ...]
     tranche_drop_units_bps: tuple[int, ...]
@@ -30,12 +44,9 @@ class DailyDeclineSpec:
     require_intact_catalyst: bool
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         weights, offsets = self.tranche_weights_bps, self.tranche_drop_units_bps
-        positive = (self.lookback_sessions, self.minimum_decline_bps,
-                    self.minimum_volatility_multiple_bps, self.budget_won, self.max_hold_sessions)
-        if (any(type(value) is not int or value <= 0 for value in positive)
-                or type(self.minimum_relative_decline_bps) is not int
-                or self.minimum_relative_decline_bps < 0
+        if (any(type(value) is not int or value <= 0 for value in (self.budget_won, self.max_hold_sessions))
                 or type(self.require_intact_catalyst) is not bool):
             raise ValueError("invalid DD research limits")
         if (not weights or len(weights) != len(offsets)
@@ -75,10 +86,30 @@ class DailyDeclineCatalyst:
     evidence_id: str
 
 
+def _decode_material_news(document: Mapping[str, object]) -> tuple[str, MaterialNews] | None:
+    if "material_news" not in document:
+        return None
+    raw = document["material_news"]
+    if (not isinstance(raw, Mapping) or set(raw) != {"event_ref", "revisions"} or "catalyst" in document
+            or not isinstance(raw["event_ref"], str) or not raw["event_ref"].strip()):
+        raise ValueError("DD material news requires one original event and cannot mix catalyst proofs")
+    return raw["event_ref"], MaterialNews.from_documents(raw["revisions"])
+
+
+def _material_catalyst(material: tuple[str, MaterialNews], symbol: str, cut: datetime) -> DailyDeclineCatalyst | None:
+    event_ref, timeline = material
+    for root, current, effect, _ in timeline.as_of(symbol, cut):
+        if root == event_ref:
+            state = "DAMAGED" if effect in {"DAMAGED", "FUNDAMENTAL_ADVERSE"} else "INTACT" if effect == "INTACT" else "UNKNOWN"
+            return DailyDeclineCatalyst(state,
+                                        current.available_at, current.ref)
+    return None
+
+
 @dataclass(frozen=True)
 class DailyDeclineSetup:
     plan_id: str
-    spec: DailyDeclineSpec
+    spec: DailyDeclineSignalPolicy
     symbol: str
     venue: str
     signal_day: date
@@ -112,7 +143,9 @@ class DailyDeclineSetupResult:
         return document
 
 
-def decode_daily_decline_setup_inputs(document: Mapping[str, object], policy: Mapping[str, object]) -> dict:
+def decode_daily_decline_setup_inputs(
+    document: Mapping[str, object], policy: Mapping[str, object], *, signal_only: bool = False,
+) -> dict:
     """Read the same explicit setup inputs for frozen research and native Shadow."""
     def proof(name, proof_type, *dates):
         raw = document.get(name)
@@ -129,15 +162,20 @@ def decode_daily_decline_setup_inputs(document: Mapping[str, object], policy: Ma
                 or not symbol.isalnum() or venue != "KRX"):
             raise ValueError("DD native setup requires a scoped KRX stock code")
         policy = dict(policy)
-        for name in ("tranche_weights_bps", "tranche_drop_units_bps"):
-            policy[name] = tuple(policy[name])
+        if signal_only:
+            spec = DailyDeclineSignalPolicy(**policy)
+        else:
+            for name in ("tranche_weights_bps", "tranche_drop_units_bps"):
+                policy[name] = tuple(policy[name])
+            spec = DailyDeclineSpec(**policy)
         calendar, _ = decode_strategy_references(document["strategy_references"])
         return dict(
-            spec=DailyDeclineSpec(**policy), symbol=symbol, venue=venue,
+            spec=spec, symbol=symbol, venue=venue,
             signal_day=date.fromisoformat(document["signal_day"]), calendar=calendar,
             basis=proof("basis", DailyDeclineBasis, "first_day", "last_day"),
             benchmark=proof("benchmark", DailyDeclineBenchmark, "trading_date"),
             catalyst=proof("catalyst", DailyDeclineCatalyst),
+            **({"material_news": _decode_material_news(document)} if "material_news" in document else {}),
         )
     except (KeyError, TypeError) as error:
         raise ValueError("invalid DD native setup proof or policy") from error
@@ -154,6 +192,51 @@ def _visible(available_at: datetime, evidence_id: str, cut: datetime) -> bool:
 def _identity(prefix: str, values: object) -> str:
     encoded = json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
     return f"{prefix}-{hashlib.sha256(encoded).hexdigest()}"
+
+
+def daily_decline_index_benchmark(
+    snapshot: Mapping[str, object] | None, *, market: str, previous_day: date,
+    signal_day: date, signal_closed_at: datetime, cut: datetime,
+) -> DailyDeclineBenchmark | None:
+    """Use the two exact closes from an existing ka20006 after-close snapshot."""
+    if snapshot is None or market not in {"kospi", "kosdaq"}:
+        return None
+    signal_key = signal_day.strftime("%Y%m%d")
+    payload, saved_at = snapshot.get("payload"), snapshot.get("saved_at")
+    if (snapshot.get("subject") != f"{signal_key}:{market}" or snapshot.get("snapshot_key") != signal_key
+            or not isinstance(payload, Mapping) or payload.get("market") != market
+            or payload.get("as_of") != signal_day.isoformat() or type(saved_at) not in (int, float)):
+        return None
+    try:
+        available = datetime.fromtimestamp(saved_at, KST)
+    except (ValueError, OverflowError, OSError):
+        return None
+    rows = payload.get("daily")
+    if not signal_closed_at <= available <= cut or not isinstance(rows, list):
+        return None
+    previous_key = previous_day.strftime("%Y%m%d")
+    closes = {}
+    for row in rows:
+        if not isinstance(row, Mapping) or row.get("dt") not in (previous_key, signal_key):
+            continue
+        key = row["dt"]
+        try:
+            close = abs(Decimal(str(row.get("cur_prc", "")).strip().replace(",", "")))
+        except DecimalException:
+            return None
+        if not close.is_finite() or close <= 0 or (key in closes and closes[key] != close):
+            return None
+        closes[key] = close
+    if previous_key not in closes or signal_key not in closes:
+        return None
+    previous, current = closes[previous_key], closes[signal_key]
+    try:
+        return_bps = floor((current - previous) * BPS / previous)
+    except DecimalException:
+        return None
+    evidence_id = _identity("dd-ka20006", (market, previous_key, signal_key,
+                                           str(previous), str(current), available.isoformat()))
+    return DailyDeclineBenchmark("KRX", signal_day, available, evidence_id, return_bps)
 
 
 def _catalyst_state(catalyst: DailyDeclineCatalyst | None, cut: datetime):
@@ -217,7 +300,7 @@ def _daily_window(observations: Iterable[Mapping[str, object]], symbol: str, ven
 
 
 def select_daily_decline_setup(
-    observations: Iterable[Mapping[str, object]], *, spec: DailyDeclineSpec,
+    observations: Iterable[Mapping[str, object]], *, spec: DailyDeclineSignalPolicy,
     symbol: str, venue: str, signal_day: date, prior_days: Iterable[date], cut: datetime,
     basis: DailyDeclineBasis | None, benchmark: DailyDeclineBenchmark | None,
     catalyst: DailyDeclineCatalyst | None = None,
@@ -260,7 +343,7 @@ def select_daily_decline_setup(
             or drawdown * volatility_base * BPS < spec.minimum_volatility_multiple_bps * prior_high * volatility):
         return DailyDeclineSetupResult("NOT_QUALIFIED", "decline_threshold_not_met")
     catalyst_state, catalyst_refs = _catalyst_state(catalyst, cut)
-    if spec.require_intact_catalyst and catalyst_state != "INTACT":
+    if isinstance(spec, DailyDeclineSpec) and spec.require_intact_catalyst and catalyst_state != "INTACT":
         status = "UNKNOWN" if catalyst_state == "UNKNOWN" else "NOT_QUALIFIED"
         return DailyDeclineSetupResult(status, "intact_catalyst_unconfirmed")
     evidence_ids = (*revisions, basis.evidence_id, benchmark.evidence_id, *catalyst_refs, *session_evidence_ids)
@@ -272,10 +355,12 @@ def select_daily_decline_setup(
 
 
 def evaluate_daily_decline_shadow(
-    observations: Iterable[Mapping[str, object]], *, spec: DailyDeclineSpec, symbol: str,
+    observations: Iterable[Mapping[str, object]], *, spec: DailyDeclineSignalPolicy, symbol: str,
     venue: str, signal_day: date, cut: datetime, calendar: Iterable[TradingDayEvidence],
     basis: DailyDeclineBasis | None, benchmark: DailyDeclineBenchmark | None,
     catalyst: DailyDeclineCatalyst | None = None,
+    material_news: tuple[str, MaterialNews] | None = None,
+    benchmark_for_session: Callable[[date, datetime], DailyDeclineBenchmark | None] | None = None,
 ) -> DailyDeclineSetupResult:
     """Evaluate a setup using native daily revisions and an admitted calendar window."""
     if not _aware(cut):
@@ -303,6 +388,10 @@ def evaluate_daily_decline_shadow(
             return DailyDeclineSetupResult("UNKNOWN", "session_window_unverified")
         current -= timedelta(days=1)
     prior_days = tuple(sorted(day for day in closes if day < signal_day))
+    if benchmark_for_session is not None:
+        benchmark = benchmark_for_session(prior_days[-1], closes[signal_day])
+    if material_news is not None:
+        catalyst = _material_catalyst(material_news, symbol, cut)
     return select_daily_decline_setup(
         observations, spec=spec, symbol=symbol, venue=venue, signal_day=signal_day,
         prior_days=prior_days, cut=cut, basis=basis, benchmark=benchmark, catalyst=catalyst,
@@ -396,6 +485,8 @@ def propose_daily_decline_action(
     catalyst: DailyDeclineCatalyst | None = None,
 ) -> DailyDeclineAction:
     """Propose an action from one raw observation. Price movement never creates a fill."""
+    if not isinstance(setup.spec, DailyDeclineSpec):
+        raise ValueError("DD order actions require a separate execution policy")
     if state.plan_id and state.plan_id != setup.plan_id:
         raise ValueError("DD state belongs to a different plan")
     if not _aware(cut):
@@ -624,6 +715,9 @@ def replay_daily_decline(scenario: Mapping[str, object], policy: Mapping[str, ob
         basis = _scenario_reference(DailyDeclineBasis, scenario.get("basis"), "first_day", "last_day")
         benchmark = _scenario_reference(DailyDeclineBenchmark, scenario.get("benchmark"), "trading_date")
         catalyst = _scenario_reference(DailyDeclineCatalyst, scenario.get("catalyst"))
+        material = _decode_material_news(scenario)
+        if material is not None:
+            catalyst = _material_catalyst(material, symbol, cut)
         protection = _scenario_reference(DailyDeclineProtection, scenario.get("protection"))
         events = scenario["events"]
         daily_revisions = scenario["daily_revisions"]
@@ -661,6 +755,9 @@ def replay_daily_decline(scenario: Mapping[str, object], policy: Mapping[str, ob
 
     state = DailyDeclineState()
     proposals, accepted, decisions = {}, {}, []
+    research_cost = default_research_cost_model()
+    default_provenance = {"source_kind": research_cost.rate_basis, "source_ref": research_cost.source,
+                          "source_version": research_cost.version}
     last_receipt = cut
     for row in events:
         checkpoint()
@@ -683,17 +780,27 @@ def replay_daily_decline(scenario: Mapping[str, object], policy: Mapping[str, ob
                 windows = tuple(window for window in day.sessions if window.permits("continuous_trade")) if day else ()
                 window = next((window for window in windows if window.starts_at <= observed < window.ends_at), None)
                 tradable = row["tradable"] if window is not None else None
-                quote = DailyDeclineQuote(symbol, venue, observed, available, row["price_won"],
-                                         row["buy_unit_cost_won"], len(sessions) if day else 0,
+                price = row["price_won"]
+                default_unit = "buy_unit_cost_won" not in row and type(price) is int and price > 0
+                unit_cost = (price + ceil(Decimal(price) * research_cost.commission_bps / BPS)
+                             if default_unit else row.get("buy_unit_cost_won"))
+                quote = DailyDeclineQuote(symbol, venue, observed, available, price,
+                                         unit_cost, len(sessions) if day else 0,
                                          row["session_end"] and window is not None and window == windows[-1],
                                          tradable, quote_ref)
+                current_catalyst = (_material_catalyst(material, symbol, available) if material is not None
+                                    else _scenario_reference(DailyDeclineCatalyst, row.get("catalyst")))
                 action = (propose_daily_decline_action(setup, state, quote, cut=available, protection=protection,
-                          catalyst=_scenario_reference(DailyDeclineCatalyst, row.get("catalyst")))
+                          catalyst=current_catalyst)
                           if setup is not None else DailyDeclineAction("NONE", "setup_not_qualified", ""))
                 proposals[quote_ref] = action
                 event.update(quote_ref=quote_ref, observed_at=observed.isoformat(), raw_price_won=quote.price_won,
                              tradable=tradable, action=_scenario_action(action),
                              calendar_revision_ids=[day.revision_id for day in days])
+                if material is not None:
+                    event['material_catalyst_state'], event['material_evidence_refs'] = _catalyst_state(current_catalyst, available)
+                if default_unit and action.kind == "BUY":
+                    event["cost_provenance"] = default_provenance
             elif kind == "ACCEPT":
                 order_ref, quote_ref = row["order_ref"], row["quote_ref"]
                 action = proposals[quote_ref]
@@ -712,8 +819,12 @@ def replay_daily_decline(scenario: Mapping[str, object], policy: Mapping[str, ob
                 elapsed = sum(bool(day.sessions and day.sessions[0].starts_at <= available) for day in sessions)
                 if type(row["session_index"]) is not int or not 1 <= row["session_index"] <= elapsed:
                     raise ValueError("DD fill requires an observed trading session")
-                fill = DailyDeclineFill(row["fill_id"], order.action_id, row["quantity"],
-                                        row["price_won"], row["fee_won"], row["session_index"])
+                quantity, price = row["quantity"], row["price_won"]
+                fee = row.get("fee_won")
+                if "fee_won" not in row and type(quantity) is int and type(price) is int:
+                    fee = sum(research_cost.fees_won(quantity * price, sell=order.kind == "SELL"))
+                    event["cost_provenance"] = default_provenance
+                fill = DailyDeclineFill(row["fill_id"], order.action_id, quantity, price, fee, row["session_index"])
                 state = apply_daily_decline_fill(state, fill)
                 event.update(order_ref=order_ref, fill_id=fill.fill_id, quantity=fill.quantity,
                              price_won=fill.price_won, fee_won=fill.fee_won, session_index=fill.session_index)
@@ -730,7 +841,7 @@ def replay_daily_decline(scenario: Mapping[str, object], policy: Mapping[str, ob
             if field in row:
                 if not isinstance(row[field], Mapping):
                     raise ValueError('DD receipt provenance must be an object')
-                event[field] = dict(row[field])
+                event.setdefault(field, dict(row[field]))
         decisions.append(event)
     checkpoint()
 
@@ -742,9 +853,12 @@ def replay_daily_decline(scenario: Mapping[str, object], policy: Mapping[str, ob
         "budget_exceeded": state.spent_won + state.reserved_won > spec.budget_won,
         "pending_action_id": state.pending_action_id, "exit_reason": state.exit_reason,
         "fill_count": len(state.fills), "sell_proceeds_won": sell_proceeds,
+        "total_cost_won": sum(fill.fee_won for fill in state.fills),
         "realized_pnl_won": sell_proceeds - state.spent_won if closed else None,
     }
     return {"version": "dd-research-result/v1", "setup": setup_document, "events": decisions, "summary": summary,
+            **({'default_cost_model': research_cost.to_dict()} if any(
+                row.get('cost_provenance') == default_provenance for row in decisions) else {}),
             **({'state': json.loads(json.dumps(asdict(state), default=lambda value: value.isoformat()))}
                if include_state else {})}
 
@@ -765,7 +879,8 @@ def replay_frozen_daily_decline(observations, descriptor, policy, setup_result, 
     scenario = {key: descriptor[key] for key in ('symbol', 'venue', 'signal_day', 'cut', 'basis', 'benchmark')}
     scenario.update(version='dd-synthetic-evidence/v1', daily_revisions=observations, prior_days=[],
         calendar=descriptor['strategy_references']['calendar'], events=execution['events'],
-        protection=execution.get('protection'), catalyst=descriptor.get('catalyst'))
+        protection=execution.get('protection'),
+        **{key: descriptor[key] for key in ('catalyst', 'material_news') if key in descriptor})
     result = replay_daily_decline(scenario, policy, checkpoint=checkpoint, setup_result=setup_result, include_state=True)
     missing = []
     def has_source(value):
@@ -778,7 +893,9 @@ def replay_frozen_daily_decline(observations, descriptor, policy, setup_result, 
     for row in execution['events']:
         if row.get('kind') == 'QUOTE' and not has_source(row.get('provenance')):
             missing.append('raw_quote_source:' + row['evidence_id'])
-        if row.get('kind') == 'FILL' and not has_source(row.get('cost_provenance')):
+    fills = [row for row in result['events'] if row['kind'] == 'FILL']
+    for row in fills:
+        if not has_source(row.get('cost_provenance')):
             missing.append('fill_cost_source:' + row['fill_id'])
     return {**result, 'source_kind': 'frozen_research_evidence',
         'execution_evidence': dict(execution),
@@ -786,5 +903,4 @@ def replay_frozen_daily_decline(observations, descriptor, policy, setup_result, 
                              'native_confirmation': False}, 'order_authorized': False,
         'evidence_provenance': {'execution': dict(provenance), 'raw_protection': execution.get('protection'),
             'raw_protection_source': execution.get('protection_provenance'),
-            'fill_costs': {row['fill_id']: dict(row.get('cost_provenance', {}))
-                          for row in execution['events'] if row.get('kind') == 'FILL'}}}
+            'fill_costs': {row['fill_id']: dict(row.get('cost_provenance', {})) for row in fills}}}

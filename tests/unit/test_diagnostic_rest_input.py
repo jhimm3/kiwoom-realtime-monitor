@@ -80,6 +80,9 @@ class Store:
     def load_documents(self, *args):
         return self.documents
 
+    def load_dataset_snapshots(self, *args):
+        return []
+
     def replace_documents(self, collection, values):
         self.effects.append(("replace_documents", operation_identity()))
         self.documents = [{"key": row["key"], "document": row["document"]} for row in values]

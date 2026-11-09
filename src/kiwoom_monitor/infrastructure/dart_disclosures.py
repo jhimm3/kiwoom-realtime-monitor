@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import kst_wall_now, kst_now
+from kiwoom_monitor.domain.time_basis import KST, kst_wall_now, kst_now
 
 import io
 import json
@@ -55,29 +55,19 @@ class DartDisclosureClient:
                 "CREDENTIAL_VALIDATION_FAILED")
         raise DartCredentialValidationError(code)
 
-    def search(self, stock_code: str, stock_name: str, *, days: int = 30) -> tuple[StockNewsItem, ...]:
-        if not self._api_key:
-            return ()
-        corp_code = self._corp_codes().get(stock_code[:6])
-        if not corp_code:
-            return ()
-        today = kst_wall_now().date()
-        query = urlencode({
-            "crtfc_key": self._api_key, "corp_code": corp_code,
-            "bgn_de": (today - timedelta(days=days)).strftime("%Y%m%d"),
-            "end_de": today.strftime("%Y%m%d"), "page_count": 30,
-        })
-        payload = self._json(f"https://opendart.fss.or.kr/api/list.json?{query}")
-        if str(payload.get("status", "000")) not in {"000", "013"}:
-            raise ValueError(f"DART 조회 실패: {payload.get('message', payload.get('status'))}")
+    def search(self, stock_code: str, stock_name: str, *, days: int = 30,
+               begin: date | None = None, end: date | None = None) -> tuple[StockNewsItem, ...]:
+        end = end or kst_wall_now().date()
+        bounded = begin is not None
+        begin = begin or end - timedelta(days=days)
         results: list[StockNewsItem] = []
-        for raw in payload.get("list", ()) or ():
+        for raw in self.list_disclosures(stock_code, begin, end, require_company=bounded):
             receipt = str(raw.get("rcept_no", ""))
             title = str(raw.get("report_nm", "공시"))
             description = f"{stock_name} 공식 공시 · 제출인 {raw.get('flr_nm', '')}"
             date_text = str(raw.get("rcept_dt", ""))
             try:
-                published = datetime.strptime(date_text, "%Y%m%d").astimezone()
+                published = datetime.strptime(date_text, "%Y%m%d").replace(tzinfo=KST)
             except ValueError:
                 published = None
             link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}"
@@ -86,13 +76,15 @@ class DartDisclosureClient:
 
     def list_disclosures(
         self, stock_code: str, begin: date, end: date,
-        *, disclosure_type: str = "",
+        *, disclosure_type: str = "", require_company: bool = False,
     ) -> tuple[dict[str, object], ...]:
         """Return complete raw DART list rows for one listed company and date range."""
         if not self._api_key or end < begin:
             return ()
         corp_code = self._corp_codes().get(stock_code[:6])
         if not corp_code:
+            if require_company:
+                raise ValueError("DART company identity is unavailable")
             return ()
         page = 1
         results: list[dict[str, object]] = []

@@ -1765,9 +1765,9 @@ class JournalWindow(QMainWindow):
     def _open_detached_charts(self) -> None:
         if self._detached_chart_window is None:
             self._detached_chart_window = DetachedChartWindow(self._journal_settings, self)
-            self._detached_chart_window.set_stock_choices(self._repo.load_monitor_stock_catalog(self._monitor_db))
             self._detached_chart_window.source_changed.connect(self._detached_source_changed)
             self._detached_chart_window.chart_state_changed.connect(self._detached_chart_state_changed)
+        self._detached_chart_window.set_stock_choices(self._repo.load_monitor_stock_catalog(self._monitor_db))
         source_id = self._history_source_id()
         if source_id:
             self._detached_chart_window.set_shared_chart_state(

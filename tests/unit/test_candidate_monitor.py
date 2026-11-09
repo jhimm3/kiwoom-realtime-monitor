@@ -84,6 +84,15 @@ class FakeStore:
         self.checkpoints = {}
         self.decisions = []
         self.candidates = []
+        self.contract_filings = []
+
+    def load_documents(self, collection, owner):
+        return [{"document": row} for row in self.contract_filings
+                if collection == "news_contract_filing" and row["symbol"] == owner]
+
+    def load_strategy_material_inputs(self, symbol, cut):
+        return {"articles": [], "originals": [],
+                "filings": [row["document"] for row in self.load_documents("news_contract_filing", symbol)]}
 
     def load_observation_revisions(self, *_args, **_kwargs):
         return []
@@ -160,11 +169,14 @@ class CandidateMonitorTests(unittest.TestCase):
                         [event] = store.candidates
                         self.assertEqual(policy.variant, event["strategy_variant"])
                         self.assertTrue({proof.revision for proof in proofs} <= set(event["input_revision_refs"]))
+                        self.assertEqual("UNKNOWN", event["material_news"]["status"])
+                        self.assertEqual(event["material_news"], store.decisions[-1]["material_news"])
 
     def test_section12_close_and_ipo_use_only_calendar_and_listing_available_at_cut(self):
         from kiwoom_monitor.application.section12_minute_research import (
             CLOSE_FAMILY, IPO_BREAKOUT_FAMILY, IPO_CLOSE_FAMILY, MINUTE_SHADOW_VERSION,
         )
+        from kiwoom_monitor.domain.market_data_contract import ListingType
         from tests.unit.test_close_and_ipo import CloseAndIpoTests
 
         fixture = CloseAndIpoTests()
@@ -184,39 +196,51 @@ class CandidateMonitorTests(unittest.TestCase):
                 "available_at": frame.available_at, "value_kind": "actual", "completeness": "complete",
                 "origin": "realtime", "source_id": "kiwoom-websocket-0B", "payload": payload,
             })
-        for family, policy, blocked in (
-            (CLOSE_FAMILY, fixture.close, False),
-            (CLOSE_FAMILY, fixture.close, True),
-            (IPO_CLOSE_FAMILY, fixture.ipo_close, False),
-            (IPO_CLOSE_FAMILY, fixture.ipo_close, True),
-            (IPO_BREAKOUT_FAMILY, fixture.ipo_breakout, False),
-            (IPO_BREAKOUT_FAMILY, fixture.ipo_breakout, True),
-        ):
-            with self.subTest(family=family, missing_evidence=blocked):
-                calendar = fixture.calendar[:-1] if blocked and family == CLOSE_FAMILY else fixture.calendar
-                listing = asdict(fixture.listing)
-                if blocked:
-                    listing["available_at"] = datetime.fromisoformat(fixture.signal.available_at) + timedelta(seconds=1)
+        cases = [(CLOSE_FAMILY, fixture.close, None, False, ""),
+                 (CLOSE_FAMILY, fixture.close, None, False, "close_or_next_open_evidence_unavailable")]
+        for family, policy in ((IPO_CLOSE_FAMILY, fixture.ipo_close), (IPO_BREAKOUT_FAMILY, fixture.ipo_breakout)):
+            cases.extend((family, policy, listing_type, dynamic, reason) for listing_type, dynamic, reason in (
+                (ListingType.IPO, False, ""),
+                (ListingType.IPO, False, "listing_unknown"),
+                (ListingType.KONEX_TO_KOSDAQ, True, ""),
+                (ListingType.KONEX_TO_KOSDAQ, True, "listing_unknown"),
+                (ListingType.TRANSFER, False, "listing_type_or_phase_unsupported"),
+                (ListingType.TRANSFER, True, "listing_type_or_phase_unsupported"),
+                (ListingType.RELISTING, True, "listing_type_or_phase_unsupported"),
+            ))
+        for family, policy, listing_type, listing_source, reason in cases:
+            with self.subTest(family=family, listing_type=listing_type, reason=reason, listing_source=listing_source):
+                calendar = fixture.calendar[:-1] if reason and family == CLOSE_FAMILY else fixture.calendar
+                cut = datetime.fromisoformat(fixture.signal.available_at)
+                listing = fixture.listing
+                if listing_type is not None:
+                    listing = replace(listing, listing_type=listing_type)
+                if reason == "listing_unknown":
+                    listing = replace(listing, available_at=cut + timedelta(seconds=1))
                 config = {
                     "version": MINUTE_SHADOW_VERSION, "family": family, "signal_valid_seconds": 30,
                     "symbols": ["123456"],
                     "strategy": {"capital_won": 100_000, "policy": asdict(policy)},
                     "references": {"version": "strategy-reference/v1",
-                                   "calendar": [asdict(day) for day in calendar], "listings": [listing]},
+                                   "calendar": [asdict(day) for day in calendar],
+                                   "listings": [] if listing_source else [asdict(listing)]},
                 }
                 store = FakeStore(rows)
                 monitor = CandidateMonitor.from_json(
                     store, json.dumps(config, default=lambda value: value.isoformat()), poll_seconds=2,
-                    universe_max_age_seconds=180,
+                    universe_max_age_seconds=180, now_provider=lambda: cut,
                 )
+                if listing_source:
+                    monitor.set_listing_evidence_source(lambda _symbol, _cutoff: (listing,))
                 monitor.run_once()
                 monitor.run_once()
                 signal = [value for value in store.candidates if value["signal_reference_price"] == fixture.signal.close]
-                self.assertEqual(0 if blocked else 1, len(signal), monitor.quality)
+                self.assertEqual(0 if reason else 1, len(signal), monitor.quality)
                 self.assertEqual("explicit_symbols", monitor.quality["candidate_universe_scope"])
-                if not blocked:
+                if not reason:
                     self.assertEqual(policy.variant, signal[0]["strategy_variant"])
                     self.assertIn(fixture.signal.revision_id, signal[0]["input_revision_refs"])
+                    self.assertEqual(cut, datetime.fromisoformat(signal[0]["material_news"]["cut"]))
                     if family != CLOSE_FAMILY:
                         self.assertIn(fixture.listing.evidence_id, signal[0]["input_revision_refs"])
                         setup = signal[0]["close_ipo_entry_setup"]
@@ -224,8 +248,12 @@ class CandidateMonitorTests(unittest.TestCase):
                         self.assertEqual([fixture.listing.evidence_id], setup["listing_refs"])
                         self.assertEqual(fixture.tuesday.isoformat() if family == IPO_CLOSE_FAMILY else None,
                                          setup["next_date"])
+                        self.assertTrue(monitor.ipo_listing_basis_current(signal[0]))
+                        if listing_source:
+                            # Even the same saved reference cannot authorize a now-ineligible type.
+                            listing = replace(listing, listing_type=ListingType.RELISTING)
+                            self.assertFalse(monitor.ipo_listing_basis_current(signal[0]))
                 else:
-                    reason = "close_or_next_open_evidence_unavailable" if family == CLOSE_FAMILY else "listing_unknown"
                     self.assertEqual(reason, monitor.quality["reason"])
 
     def test_close_shadow_readback_preserves_original_next_session_after_restart(self):
@@ -327,8 +355,134 @@ class CandidateMonitorTests(unittest.TestCase):
             self.assertEqual(old["event_id"], event["event_id"])
             self.assertNotIn("close_ipo_entry_setup", event)
 
-    def test_section12_panic_confirmation_restores_armed_cut_and_rejects_partial_correction(self):
+    def test_section12_panic_opening_adverse_evidence_reaches_native_candidate_readback(self):
+        from datetime import time
+        from types import SimpleNamespace
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from kiwoom_monitor.application.news_material import RECORDED_CONTRACT_FILINGS
         from kiwoom_monitor.application.section12_minute_research import MINUTE_SHADOW_VERSION, PANIC_FAMILY
+        from kiwoom_monitor.central_server.krx_calendar_evidence import KrxCalendarEvidence
+        from kiwoom_monitor.central_server.news_jobs import NewsJobRunner
+        from kiwoom_monitor.central_server.research_read_routes import create_research_read_router
+        from tests.unit.test_news_material import _dart
+        from tests.unit.test_news_observation_history import _article
+
+        def at(day, hour, minute, second=0):
+            return datetime.fromisoformat(f"2026-09-{day}T{hour:02d}:{minute:02d}:{second:02d}+09:00")
+
+        opens_at = at(14, 9, 0)
+        cut = at(14, 9, 5, 2)
+        clock = [at(14, 7, 0)]
+        source = "https://inc.krx.co.kr/attach/obk/dyn/noti/test.pdf"
+        schedule = time(9), time(15, 30)
+        facts = {at(day, 0, 0).date(): (schedule if day in (11, 14) else None, source)
+                 for day in range(11, 15)}
+        config = {
+            "version": MINUTE_SHADOW_VERSION, "family": PANIC_FAMILY, "symbols": ["005930"],
+            "signal_valid_seconds": 30,
+            "strategy": {"capital_won": 100_000, "quantity": 1, "news_proofs": [{
+                "symbol": "005930", "source": "fixture-reviewed-news", "assessment_id": "assessment",
+                "revision": "assessment-r1", "effective_at": at(14, 9, 2).isoformat(),
+                "available_at": at(14, 9, 3).isoformat(), "disposition": "supported_nonfundamental",
+                "evidence_refs": ["article-r1", "rule-r1"],
+            }], "policy": {
+                "variant": "P1", "lookback_minutes": 3, "decline_bps": 1000, "minimum_turnover_won": 3_000_000,
+                "max_input_age_seconds": 10, "rebound_target_bps": 500, "max_hold_minutes": 5,
+            }},
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "panic-opening.sqlite3"
+            with closing(SQLiteQueryStore(path, now_provider=lambda: clock[0])) as store:
+                store.initialize()
+                provider = SimpleNamespace(load=lambda _first, _last, *, as_of: facts)
+                calendar = KrxCalendarEvidence(store, provider, lambda: clock[0])
+                calendar.refresh(clock[0])
+                filings = {}
+
+                async def receive_filings():
+                    runner = NewsJobRunner(store, now_provider=lambda: clock[0],
+                                           filing_fetcher=lambda url, **_options: filings[url])
+                    try:
+                        for number, title, heading, effective, available in (
+                            (1, "횡령ㆍ배임혐의발생", "횡령ㆍ배임혐의발생", at(11, 17, 0), at(14, 7, 1)),
+                            (2, "영업정지", "영업정지", at(11, 15, 29), at(14, 7, 2)),
+                            (3, "부도발생", "조회공시 답변", at(11, 19, 0), at(14, 7, 3)),
+                            (4, "회생절차개시결정", "회생절차개시결정", at(11, 18, 0), at(14, 9, 1)),
+                        ):
+                            clock[0] = available
+                            url = _dart(number)
+                            item = _article(title)[0]
+                            item["key"] = url
+                            item["document"].update(identity=url, link=url, original_link=url,
+                                                    published_at=effective.isoformat())
+                            store.upsert_documents("news_article", [item])
+                            filings[url] = {
+                                "filing_url": url, "document_url": url.replace("/dsaf001/main.do", "/report/viewer.do"),
+                                "filing_html": f"<h2>{heading}</h2><table><tr><td>{number}</td></tr></table>",
+                                "original_filing_url": "",
+                            }
+                            self.assertEqual(1, await runner.run_once(preferred_stage="BODY"))
+                    finally:
+                        await runner.close()
+
+                asyncio.run(receive_filings())
+                ref = "dart:20260911000001"
+                filing = store.load_document(RECORDED_CONTRACT_FILINGS, "005930", ref)["document"]
+                clock[0] = cut
+                monitor = CandidateMonitor.from_json(store, json.dumps(config), poll_seconds=2,
+                                                     universe_max_age_seconds=600, now_provider=lambda: clock[0])
+                self.assertTrue(monitor.needs_krx_calendar())
+                monitor.set_krx_calendar_source(calendar.as_of)
+                monitor.run_once()
+                for index, price in enumerate((1000, 990, 980, 900, 910)):
+                    key = {"trading_date": "2026-09-14", "minute": f"09:{index:02d}",
+                           "code": "005930", "market": "KRX"}
+                    store.save_minute_bars([{
+                        **key, "open": price, "high": price, "low": price, "close": price,
+                        "volume": 100, "trade_value_million_won": 1,
+                        "updated_at": at(14, 9, index).timestamp(), "operation_id": f"write-{index}",
+                    }])
+                    store.finalize_minute_bars([{
+                        **key, "available_at": at(14, 9, index + 1, 2).timestamp(), "capture_quality": "complete",
+                        "finalization_source": "timer", "operation_id": f"finalize-{index}",
+                    }])
+                self.assertEqual(5, monitor.run_once())
+                self.assertEqual("panic_next_completed_close_recovered", monitor.quality["reason"])
+
+            with closing(SQLiteQueryStore(path)) as reopened:
+                app = FastAPI()
+                app.include_router(create_research_read_router(
+                    reopened, lambda: None, lambda: None, now_provider=lambda: cut,
+                ))
+                with TestClient(app) as client:
+                    response = client.get("/api/v1/research/candidates")
+                self.assertEqual(200, response.status_code)
+                event, = response.json()["events"]
+                prior = event["material_news"]["panic_prior_session"]
+                self.assertEqual(("OBSERVED", at(11, 15, 30).isoformat(), opens_at.isoformat()),
+                                 (prior["status"], prior["previous_close"], prior["opens_at"]))
+                expected_days = [at(day, 0, 0).date() for day in (11, 14)]
+                self.assertEqual([row.revision_id for day in expected_days for row in calendar.as_of(cut)
+                                  if row.trading_date == day], prior["calendar_refs"])
+                adverse, = prior["events"]
+                self.assertEqual((ref, _dart(1), filing["body_ref"], at(14, 7, 1).isoformat()),
+                                 (adverse["revision_ref"], adverse["source_ref"], adverse["body_ref"],
+                                  adverse["available_at"]))
+                self.assertEqual(["panic_next_completed_close_recovered"], event["decision_reasons"])
+                self.assertNotIn(ref, event["input_revision_refs"])
+                with reopened._connection() as connection:
+                    decision, = connection.execute("SELECT document_json FROM central_shadow_decisions WHERE decision_id=?",
+                                                   (event["decision_id"],)).fetchone()
+                self.assertEqual(prior, json.loads(decision)["material_news"]["panic_prior_session"])
+
+    def test_section12_panic_confirmation_restores_armed_cut_and_rejects_partial_correction(self):
+        from kiwoom_monitor.application.minute_order_management import frozen_minute_candidate
+        from kiwoom_monitor.application.section12_minute_research import MINUTE_SHADOW_VERSION, PANIC_FAMILY
+        from tests.unit.test_news_material import recorded_filing
 
         proof = {
             "symbol": "005930", "source": "fixture-reviewed-news", "assessment_id": "assessment",
@@ -348,9 +502,17 @@ class CandidateMonitorTests(unittest.TestCase):
             row = _bar(index + 2, index, price, price, day="2026-09-14")
             rows.append({**row, "origin": "realtime", "source_id": "kiwoom-websocket-0B"})
 
-        for partial in (False, True):
-            with self.subTest(partial=partial):
+        for partial, material in ((False, ""), (True, ""), (False, "TERMS_ONLY"),
+                                  (False, "TERMINATION_REVOKED"), (False, "late_revocation")):
+            with self.subTest(partial=partial, material=material):
                 store = FakeStore(rows[:-1])
+                if material:
+                    store.contract_filings.extend([
+                        recorded_filing("termination", "2026-09-14T09:02:30+09:00"),
+                        recorded_filing("amendment", "2026-09-14T09:06:00+09:00" if material == "late_revocation"
+                                        else "2026-09-14T09:04:40+09:00", parent="termination",
+                                        outcome="TERMINATION_REVOKED" if material == "late_revocation" else material),
+                    ])
 
                 def monitor():
                     return CandidateMonitor.from_json(store, json.dumps(config), poll_seconds=2,
@@ -374,11 +536,18 @@ class CandidateMonitorTests(unittest.TestCase):
                 store.observations.append({**rows[-1], "accepted_sequence": 7})
                 with patch.object(store, "save_shadow_evaluation", wraps=store.save_shadow_evaluation) as writes:
                     restarted.run_once()
-                reason = "panic_trigger_revised_or_unproven" if partial else "panic_next_completed_close_recovered"
+                blocked = material in {"TERMS_ONLY", "late_revocation"}
+                reason = "panic_trigger_revised_or_unproven" if partial else (
+                    "panic_fundamental_adverse" if blocked else "panic_next_completed_close_recovered")
                 self.assertEqual((reason,), store.decisions[-1]["reasons"])
+                if not partial and material:
+                    fact, = store.decisions[-1]["material_news"]["events"]
+                    self.assertEqual("FUNDAMENTAL_ADVERSE" if blocked else "INTACT", fact["effect"])
+                    self.assertEqual("termination" if material == "late_revocation" else "amendment",
+                                     fact["revision_ref"])
                 self.assertNotIn("panic_armed", store.checkpoints[first.monitor_id])
-                self.assertEqual(0 if partial else 1, len(store.candidates))
-                if not partial:
+                self.assertEqual(0 if partial or blocked else 1, len(store.candidates))
+                if not partial and not blocked:
                     self.assertEqual(("panic_rebound", "P1"), (store.candidates[0]["strategy_id"],
                                                                 store.candidates[0]["strategy_variant"]))
                     self.assertIn("assessment-r1", store.candidates[0]["input_revision_refs"])
@@ -402,6 +571,15 @@ class CandidateMonitorTests(unittest.TestCase):
                             event, = reopened.load_shadow_candidates()["events"]
                             self.assertEqual((original["event_id"], original["snapshot_id"], setup),
                                              (event["event_id"], event["snapshot_id"], event["panic_entry_setup"]))
+                            changed_view = {"material_news": {"status": "UNKNOWN"}}
+                            self.assertEqual(frozen_minute_candidate(event),
+                                             frozen_minute_candidate({**event, **changed_view}))
+                            reopened.save_shadow_evaluation(monitor_id, {**decision, **changed_view},
+                                                            {**original, **changed_view}, expiry)
+                            self.assertEqual(event, reopened.load_shadow_candidates()["events"][0])
+                            with reopened._connection() as connection:
+                                saved = connection.execute("SELECT document_json FROM central_shadow_decisions").fetchone()
+                            self.assertEqual(json.loads(json.dumps(decision)), json.loads(saved[0]))
                         with closing(SQLiteQueryStore(Path(directory) / "older-candidate.sqlite3")) as previous:
                             previous.initialize()
                             old = {key: value for key, value in original.items() if key != "panic_entry_setup"}

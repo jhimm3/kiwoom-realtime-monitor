@@ -40,6 +40,296 @@ class _AI(CentralAIService):
 
 
 class NewsJobRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_kind_timed_halt_flows_from_accepted_body_to_micro_and_buy_checks(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from kiwoom_monitor.central_server.market_events import MarketEventService
+        from kiwoom_monitor.central_server.research_read_routes import create_research_read_router
+
+        symbol = "484870"
+        source = "https://kind.krx.co.kr/external/2026/06/12/000372/20260612000682/99808.htm"
+        accepted = datetime.fromisoformat("2026-06-12T11:07:00+09:00")
+        clock = [accepted]
+        html = ("<table><tr><td>1. 종목명</td><td>주식회사 엠앤씨솔루션 주권</td></tr>"
+                "<tr><td>3. 매매거래정지 일시</td><td>2026-06-12</td><td>11:06</td></tr>"
+                "<tr><td>4. 매매거래정지 해제일시</td><td>2026-06-12</td><td>11:36</td></tr></table>")
+        filing = {"filing_url": source, "document_url": source, "filing_html": html, "original_filing_url": ""}
+        correction = source.replace("20260612000682", "20260612000683")
+        filings = {source: filing, correction: {**filing, "filing_url": correction,
+                                                "document_url": correction, "original_filing_url": source}}
+        with closing(SQLiteQueryStore(Path(":memory:"), now_provider=lambda: clock[0])) as store:
+            store.initialize()
+            runner = NewsJobRunner(store, now_provider=lambda: clock[0], filing_fetcher=lambda url, **_kw: filings[url])
+            self.addAsyncCleanup(runner.close)
+
+            async def accept(url, title):
+                item = _article(title)[0]
+                item.update(owner=symbol, key=url)
+                item["document"].update(stock_code=symbol, stock_name="엠앤씨솔루션", identity=url,
+                                        link=url, original_link=url, published_at=clock[0].isoformat())
+                store.upsert_documents("news_article", [item])
+                self.assertEqual(1, await runner.run_once(preferred_stage="BODY"))
+
+            await accept(source, "[엠앤씨솔루션] 매매거래정지 및 정지해제(중요내용공시)")
+
+            app = FastAPI()
+            app.include_router(create_research_read_router(store, lambda: None, lambda: None, now_provider=lambda: clock[0]))
+            service = MarketEventService(None, store, now_provider=lambda: clock[0])
+            self.addAsyncCleanup(service.close)
+            with TestClient(app) as client:
+                def micro(venue="KRX", code=symbol):
+                    result = client.get("/api/v1/research/micro-inputs", params={
+                        "symbol": code, "venue": venue, "variant": "BOOK_SCALP",
+                    }).json()
+                    self.assertFalse(result["order_authorized"])
+                    self.assertIn("native_instrument_tradability", result["missing_inputs"])
+                    return result["market_state_evidence"]["kind_halt_resume"]
+
+                clock[0] = accepted.replace(second=0, minute=6)
+                self.assertEqual("UNKNOWN", micro()["state"])
+                self.assertIsNone(service.automation_buy_market_rejection(symbol, clock[0]))
+                clock[0] = accepted
+                halt = micro()
+                self.assertEqual(("HALTED", source, accepted.isoformat()),
+                                 (halt["state"], halt["source_ref"], halt["available_at"]))
+                self.assertEqual("kind_trading_halt", service.automation_buy_market_rejection(symbol, clock[0]))
+                self.assertEqual("UNKNOWN", micro("NXT")["state"])
+                self.assertEqual("UNKNOWN", micro(code="005930")["state"])
+                clock[0] = accepted.replace(minute=36)
+                self.assertEqual("RESUME_TIME_REACHED", micro()["state"])
+                self.assertEqual("kind_halt_requires_new_observation",
+                                 service.automation_buy_market_rejection(symbol, accepted))
+                self.assertIsNone(service.automation_buy_market_rejection(symbol, clock[0]))
+                clock[0] = accepted.replace(minute=12)
+                await accept(correction, "[기재정정] 매매거래정지 및 정지해제(중요내용공시)")
+                self.assertEqual({"state": "UNKNOWN", "reason": "kind_notice_changed_or_unresolved"}, micro())
+            await runner.close()
+
+    def test_kind_toc_recovery_targets_only_unstored_terminal_failures(self):
+        from datetime import timedelta
+
+        from kiwoom_monitor.central_server.news_jobs import official_filing_body_result
+        from kiwoom_monitor.infrastructure.official_news_filing import KIND_DOCUMENT_UNVERIFIED
+        from scripts.recover_kind_toc_filings import recover
+
+        now = datetime.fromisoformat("2026-10-22T07:00:00+09:00")
+        root = "https://kind.krx.co.kr"
+        body = "<h2>부도발생</h2><table><tr><td>공시 본문</td></tr></table>"
+        pages, reads = {}, []
+
+        def filing(number, *, toc=True, wrong_doc=False):
+            receipt = f"2026102100{number:04d}"
+            doc = f"2026102101{number:04d}"
+            viewer = f"{root}/common/disclsviewer.do?method=search&acptno={receipt}"
+            contents = f"{root}/common/disclsviewer.do?method=searchContents&docNo={doc}"
+            target = f"{root}/external/2026/10/21/{receipt[-6:]}/{doc}/11301.htm"
+            index = target.replace(".htm", "_toc.htm") if toc else ""
+            selected = target.replace(doc, "20261021999999") if wrong_doc else target
+            pages.update({viewer: f'<option value="{doc}|main" selected="selected">부도발생</option>',
+                          contents: f"parent.setPath('{index}','{selected}');", target: body})
+            return viewer, target
+
+        def read(url):
+            reads.append(url)
+            return pages[url]
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recovery.sqlite3"
+            with closing(SQLiteQueryStore(path, now_provider=lambda: now)) as store:
+                store.initialize()
+
+                def seed(url, *, error=KIND_DOCUMENT_UNVERIFIED, archive=None, leave_pending=False):
+                    nonlocal now
+                    item = _article("부도발생")[0]
+                    item["key"] = url
+                    item["document"].update(identity=url, link=url, original_link=url,
+                                            published_at="2026-10-21T17:00:00+09:00")
+                    store.upsert_documents("news_article", [item])
+                    for attempt in range(1, 4):
+                        job, = store.claim_news_jobs(now=now.timestamp(), preferred_stage="BODY")
+                        self.assertEqual(("BODY", attempt), (job["stage"], job["attempts"]))
+                        if archive:
+                            result = official_filing_body_result(
+                                {"filing_url": url, "document_url": archive, "original_filing_url": "", "filing_html": body},
+                                job["payload"], now.timestamp(),
+                            )
+                        else:
+                            now += timedelta(seconds=10)
+                            result = {"stage": "BODY", "error": error, "next_retry_at": now.timestamp()}
+                        receipt = store.accept_news_job_result(job["job_key"], result, attempts=attempt)
+                        if archive or leave_pending:
+                            break
+                    self.assertEqual("completed" if archive else "pending" if leave_pending else "failed", receipt["state"])
+                    return job
+
+                repair, target = filing(1)
+                failed = seed(repair)
+                alternative = repair.replace("method=search&acptno=", "acptno=") + "&method=search"
+                seed(alternative)
+                plain, plain_target = filing(2, toc=False)
+                seed(plain)
+                bad, bad_target = filing(3, wrong_doc=True)
+                seed(bad)
+                ignored, ignored_target = filing(4)
+                seed(ignored, error="HTTP timeout")
+                saved_view, saved_target = filing(5)
+                seed(saved_view)
+                seed(saved_target, archive=saved_target)
+                seed("https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20261021000009")
+                pending, pending_target = filing(6)
+                seed(pending, leave_pending=True)
+                before, = store.load_news_history("body", target=failed["article_revision_id"])
+
+                with closing(sqlite3.connect(path)) as db:
+                    report = recover(db, read=read, now_provider=lambda: now)
+                    self.assertCountEqual(["recovered", "already_saved", "already_saved", "toc_not_confirmed", "unresolved"],
+                                          [row["status"] for row in report])
+                    self.assertEqual(1, reads.count(target))
+                    self.assertTrue({plain_target, bad_target, ignored, ignored_target, saved_target, pending, pending_target}
+                                    .isdisjoint(reads))
+                    self.assertEqual({"COMPLETED": 2, "FAILED": 6, "PENDING": 1}, dict(db.execute(
+                        "SELECT state,count(*) FROM central_news_jobs WHERE stage='BODY' GROUP BY state",
+                    )))
+                    reads.clear()
+                    self.assertNotIn("recovered", {row["status"] for row in recover(db, read=read, now_provider=lambda: now)})
+                    self.assertTrue({repair, target, saved_target}.isdisjoint(reads))
+                archived = store.load_documents("news_official_filing", "005930")
+                self.assertEqual({target, saved_target}, {row["document"]["document_url"] for row in archived})
+                recovered = next(row["document"] for row in archived if row["document"]["document_url"] == target)
+                history = store.load_news_history("body", target=recovered["article_revision_id"])
+                self.assertEqual(["fulltext", "failed"], [row["status"] for row in history])
+                self.assertEqual("failed", before["status"])
+
+    async def test_official_adverse_events_reach_panic_and_dd_only_after_matching_body_is_saved(self):
+        from kiwoom_monitor.application.daily_decline import _material_catalyst
+        from kiwoom_monitor.application.news_material import (
+            RECORDED_CONTRACT_FILINGS, received_strategy_material, recorded_contract_material,
+        )
+        from kiwoom_monitor.application.panic_rebound import material_panic_proofs
+        from tests.unit.test_news_material import _at, _dart
+
+        examples = (
+            ("횡령ㆍ배임혐의발생", "횡령ㆍ배임혐의발생", "embezzlement_breach_allegation"),
+            ("주요사항보고서(회생절차개시신청)", "회생절차 개시신청", "rehabilitation_filed"),
+            ("회생절차개시결정", "회생절차개시결정", "rehabilitation_opened"),
+            ("주요사항보고서(부도발생)", "부도발생", "default"),
+            ("영업정지", "영업정지", "business_suspension"),
+            ("영업정지", "조회공시 답변", None),
+            ("횡령ㆍ배임혐의 진행사항", "횡령ㆍ배임혐의 진행사항", None),
+            ("[정정] 영업정지", "영업정지", None),
+            ("주주총회소집결의", "주주총회소집결의", None),
+        )
+        clock = [datetime.fromisoformat(_at(2))]
+        with tempfile.TemporaryDirectory() as directory, closing(SQLiteQueryStore(
+            Path(directory) / "adverse.sqlite3", now_provider=lambda: clock[0],
+        )) as store:
+            store.initialize()
+            for number, (title, heading, expected) in enumerate(examples, 1):
+                with self.subTest(title=title, heading=heading):
+                    url = _dart(number)
+                    item = _article(title)[0]
+                    item["key"] = url
+                    item["document"].update(identity=url, link=url, original_link=url, published_at=_at(1))
+                    store.upsert_documents("news_article", [item])
+                    filing = {"filing_url": url, "document_url": url.replace("/dsaf001/main.do", "/report/viewer.do"),
+                              "filing_html": f"<h2><P>{heading}</h2></P><table><tr><td>공시 본문</td></tr></table>",
+                              "original_filing_url": ""}
+                    runner = NewsJobRunner(store, now_provider=lambda: clock[0], filing_fetcher=lambda *_a, **_kw: filing)
+                    self.assertEqual(1, await runner.run_once(preferred_stage="BODY"))
+                    ref = "dart:" + url.split("=")[1]
+                    row = store.load_document(RECORDED_CONTRACT_FILINGS, "005930", ref)
+                    if expected is None:
+                        self.assertIsNone(row)
+                        continue
+                    self.assertEqual(expected, row["document"]["event_kind"])
+                    before = datetime.fromisoformat(_at(1))
+                    self.assertEqual((), recorded_contract_material((row["document"],), before).chains)
+                    material = recorded_contract_material((row["document"],), clock[0])
+                    self.assertEqual("DAMAGED", _material_catalyst((ref, material), "005930", clock[0]).state)
+                    proof, = material_panic_proofs(material, "005930", clock[0])
+                    self.assertEqual("fundamental_adverse", proof.disposition)
+            self.assertEqual(len(examples), len(store.load_documents("news_official_filing", "005930")))
+            _, context = received_strategy_material(
+                "005930", clock[0], **store.load_strategy_material_inputs("005930", clock[0]),
+            )
+            ordinary, = [item for item in context["events"] if item["title"] == "주주총회소집결의"]
+            self.assertEqual(("CONFIRMED", "UNKNOWN"), (ordinary["stage"], ordinary["effect"]))
+            unverified, = [item for item in context["recent_reports"] if item["source_ref"] == _dart(6)]
+            self.assertEqual(("REPORT", "UNKNOWN", _at(2)), (
+                unverified["stage"], unverified["effect"], unverified["original_received_at"],
+            ))
+
+    async def test_official_body_is_archived_once_and_changes_strategy_state_only_after_acceptance(self):
+        from kiwoom_monitor.application.daily_decline import _material_catalyst
+        from kiwoom_monitor.application.news_material import RECORDED_CONTRACT_FILINGS, received_strategy_material
+        from kiwoom_monitor.application.panic_rebound import material_panic_proofs
+        from tests.unit.test_news_material import _at, _dart
+
+        original, corrected = _dart(1), _dart(2)
+        clock = [datetime.fromisoformat(_at(1))]
+        html = {
+            original: "<table><tr><td>해지금액</td><td>1,000</td></tr></table>",
+            corrected: ("<table><tr><th>정정항목</th><th>정정전</th><th>정정후</th></tr>"
+                        "<tr><td>계약 상태</td><td>해지</td><td>계약 해지 자체를 철회하였습니다.</td></tr></table>"),
+        }
+
+        def fetch(url, **_options):
+            clock[0] = datetime.fromisoformat(_at(2 if url == original else 6))
+            number = url.split("=")[1]
+            return {"filing_url": url, "document_url": f"https://dart.fss.or.kr/report/viewer.do?rcpNo={number}",
+                    "filing_html": html[url], "original_filing_url": original if url == corrected else ""}
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "official-filing.sqlite3"
+            with closing(SQLiteQueryStore(path, now_provider=lambda: clock[0])) as store:
+                store.initialize()
+                runner = NewsJobRunner(store, now_provider=lambda: clock[0], filing_fetcher=fetch,
+                                       fetcher=lambda *a, **kw: self.fail("portal article used for official filing"))
+                report = _article("삼성전자 공급계약 관련 보도")[0]
+                report["key"] = "https://press.invalid/story"
+                report["document"].update(identity=report["key"], link=report["key"], original_link=report["key"],
+                                          published_at=_at(0))
+                for url, title in ((original, "단일판매ㆍ공급계약해지"), (corrected, "[기재정정]단일판매ㆍ공급계약해지")):
+                    item = _article(title)[0]
+                    item["key"] = url
+                    item["document"].update(identity=url, link="https://portal.invalid/summary",
+                                            original_link=url, published_at=_at(1))
+                    store.upsert_documents("news_article", [item])
+                    self.assertEqual(1, await runner.run_once(preferred_stage="BODY"))
+                    store.upsert_documents("news_article", [item])
+                clock[0] = datetime.fromisoformat(_at(7))
+                store.upsert_documents("news_article", [report, {
+                    **report, "owner": "000660", "key": "https://press.invalid/other",
+                }])
+                await runner.close()
+            with closing(SQLiteQueryStore(path, now_provider=lambda: clock[0])) as reopened:
+                archived = [row["document"] for row in reopened.load_documents("news_official_filing", "005930")]
+                self.assertEqual(html, {row["filing_url"]: row["filing_html"] for row in archived})
+                self.assertEqual({_at(2), _at(6)}, {row["available_at"] for row in archived})
+                rows = [row["document"] for row in reopened.load_documents(RECORDED_CONTRACT_FILINGS, "005930")]
+                self.assertEqual(2, len(rows))
+                event = "dart:20260911000001"
+                for minute, state, blocked in ((5, "DAMAGED", True), (6, "INTACT", False), (7, "INTACT", False)):
+                    cut = datetime.fromisoformat(_at(minute))
+                    material, context = received_strategy_material(
+                        "005930", cut, **reopened.load_strategy_material_inputs("005930", cut),
+                    )
+                    self.assertEqual(state, _material_catalyst((event, material), "005930", cut).state)
+                    self.assertEqual(blocked, bool(material_panic_proofs(material, "005930", cut)))
+                    observed, = context["events"]
+                    self.assertEqual(original if blocked else corrected, observed["source_ref"])
+                    self.assertEqual(_at(2 if blocked else 6), observed["available_at"])
+                    self.assertEqual("FUNDAMENTAL_ADVERSE" if blocked else "INTACT", observed["effect"])
+                    if blocked:
+                        pending, = context["recent_reports"]
+                        self.assertEqual(("REPORT", "UNKNOWN", corrected),
+                                         (pending["stage"], pending["effect"], pending["source_ref"]))
+                    elif minute == 7:
+                        pending, = context["recent_reports"]
+                        self.assertEqual((report["key"], _at(7)), (pending["source_ref"], pending["available_at"]))
+                    else:
+                        self.assertEqual([], context["recent_reports"])
+
     async def test_reclaimed_attempt_cannot_be_finished_or_retried_by_old_runner(self) -> None:
         for old_fails in (False, True):
             for new_finished in (False, True):

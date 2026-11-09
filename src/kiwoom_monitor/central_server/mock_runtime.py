@@ -21,7 +21,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.account_identity import (
     KiwoomAccountIdentityReader, account_identity_fingerprint,
 )
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import KiwoomMockAccountReader
-from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import make_mock_transport
+from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import LocalAutomationOrderTransport, make_mock_transport
 from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
 from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository
 
@@ -91,11 +91,13 @@ class MockCredentialOwner:
 
     def __init__(self, store: Any, vault: Any, *, hmac_key: bytes,
                  legacy_bundle: Any = None, legacy_monitor_enabled: bool = False, on_change: Any = None,
-                 now_provider: Callable[[], datetime] | None = None, capture_scope=None):
+                 now_provider: Callable[[], datetime] | None = None, capture_scope=None,
+                 buy_vi_rejection: Callable[[str, datetime], str | None] | None = None):
         from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
         self.store, self.vault, self.hmac_key = store, vault, hmac_key
         self._now_provider = now_provider
         self._capture_scope = capture_scope
+        self._buy_vi_rejection = buy_vi_rejection
         self._legacy_monitor_enabled = legacy_monitor_enabled
         self._bundles: dict[str, MockAccountBundle] = {}
         self._contexts = {"nas-mock-default": legacy_bundle} if legacy_bundle is not None else {}
@@ -357,6 +359,7 @@ class MockCredentialOwner:
                 read_limiter=getattr(self, '_slots', None), runtime_mode=MockAccountRuntimeMode.AUTOMATIC,
                 automation_context=automation, now_provider=getattr(self, '_now_provider', None),
                 capture_scope=getattr(self, '_capture_scope', None), selected_management_context=context,
+                buy_vi_rejection=getattr(self, '_buy_vi_rejection', None),
                 selected_management_owner=manager_current, runtime_owner_token=token)
             self._contexts[credential_profile_id] = candidate
             try:
@@ -689,7 +692,7 @@ class MockCredentialOwner:
             identity_hmac_key=self.hmac_key, order_transport_enabled=configuration["mock_order_enabled"],
             client=plan.client, broker=plan.broker, identity=plan.identity, binding=binding,
             require_initial_read=True, read_limiter=self._slots, now_provider=self._now_provider,
-            capture_scope=self._capture_scope,
+            capture_scope=self._capture_scope, buy_vi_rejection=self._buy_vi_rejection,
             runtime_mode=MockAccountRuntimeMode.AUTOMATIC if context is not None else MockAccountRuntimeMode.MANUAL,
             automation_context=context)
         self._contexts[profile_id] = bundle  # Retain failed committed transport for explicit recovery.
@@ -734,7 +737,8 @@ class MockCredentialOwner:
                 identity_hmac_key=self.hmac_key, order_transport_enabled=previous.gateway is not None,
                 client=plan.client, broker=plan.broker, identity=previous._identity, binding=previous.binding,
                 require_initial_read=True, read_limiter=self._slots, now_provider=self._now_provider,
-                capture_scope=self._capture_scope, runtime_mode=previous.runtime_mode,
+                capture_scope=self._capture_scope, buy_vi_rejection=self._buy_vi_rejection,
+                runtime_mode=previous.runtime_mode,
                 automation_context=previous.automation_context)
             try:
                 if plan.previous_monitor_enabled:
@@ -864,6 +868,7 @@ class MockCredentialOwner:
                 order_transport_enabled=saved["mock_order_enabled"], client=old.client, broker=old.broker,
                 identity=old._identity, binding=old.binding, require_initial_read=True, read_limiter=self._slots,
                 now_provider=self._now_provider, capture_scope=self._capture_scope,
+                buy_vi_rejection=self._buy_vi_rejection,
                 runtime_mode=MockAccountRuntimeMode.MANUAL if selected_management else old.runtime_mode,
                 automation_context=None if selected_management else old.automation_context)
             self._contexts[profile_id] = new
@@ -976,6 +981,7 @@ class MockCredentialOwner:
                 automation_context=automation_context,
                 now_provider=self._now_provider,
                 capture_scope=self._capture_scope,
+                buy_vi_rejection=self._buy_vi_rejection,
             )
             self._contexts[profile_id] = new
             new.set_position_order_observation_account(self._position_order_observation_account)
@@ -1022,6 +1028,9 @@ class MockAccountBundle:
         selected_management_context=None,
         selected_management_owner=None,
         runtime_owner_token: str | None = None,
+        buy_vi_rejection: Callable[[str, datetime], str | None] | None = None,
+        local_automation_peer=None,
+        local_automation_order_rejection=None,
     ) -> None:
         from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
 
@@ -1082,11 +1091,20 @@ class MockAccountBundle:
             self.repository.bind_selected_management_context(management, current_owner=selected_management_owner)
         now = ((lambda: as_kst(now_provider())) if now_provider is not None
                else (lambda: as_kst(self.client.server_now())))
-        transport = make_mock_transport(self.client, now_provider=now) if order_transport_enabled else None
+        if (local_automation_peer is None) != (local_automation_order_rejection is None):
+            raise ValueError('local automation requires both a fake peer and market evidence')
+        if local_automation_peer is not None:
+            if not order_transport_enabled or runtime_mode is not MockAccountRuntimeMode.AUTOMATIC:
+                raise ValueError('fake order peer requires an automatic test runtime')
+            transport = LocalAutomationOrderTransport(local_automation_peer, now_provider=now)
+        else:
+            transport = make_mock_transport(self.client, now_provider=now) if order_transport_enabled else None
         self.runtime = ExecutionRuntime(
-            OrderLifecycle(self.repository, transport, now_provider=now), self.repository,
+            OrderLifecycle(self.repository, transport, now_provider=now,
+                           local_automation_order_rejection=local_automation_order_rejection), self.repository,
             account_ref=account_ref, run_id=run_id, owner_token=runtime_owner_token or uuid.uuid4().hex,
             now_provider=now if now_provider is not None else (lambda: datetime.now(KST)),
+            buy_vi_rejection=buy_vi_rejection,
         )
         if runtime_mode is MockAccountRuntimeMode.AUTOMATIC:
             self.runtime.set_new_orders_enabled(False)

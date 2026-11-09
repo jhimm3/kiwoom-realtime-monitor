@@ -59,25 +59,34 @@ class MarketEventContractTests(unittest.TestCase):
     def test_micro_vi_clock_rejects_missing_malformed_or_unconfirmed_raw_evidence(self) -> None:
         cut = datetime.fromisoformat("2026-09-11T09:18:00+09:00")
         received = datetime.fromisoformat("2026-09-11T09:17:02+09:00").timestamp()
-        for raw, kind, trading_date, reason in (
-            ({"9068": "2", "1223": "091501"}, "RELEASED", cut.date(), "invalid_event_clock"),
-            ({"9068": "1", "1224": "091701"}, "ACTIVATED", cut.date(), "invalid_event_clock"),
-            ({"9068": "2", "1224": "091761"}, "RELEASED", cut.date(), "invalid_event_clock"),
-            ({"9068": "2", "1224": "91701"}, "RELEASED", cut.date(), "invalid_event_clock"),
-            ({"9068": "2", "1224": "０９１７０１"}, "RELEASED", cut.date(), "invalid_event_clock"),
-            ({"9068": "1", "1224": "091701"}, "RELEASED", cut.date(), "unconfirmed_event_kind"),
-            ({"9068": "2", "1224": "091701"}, "RELEASED", None, "unconfirmed_trading_date"),
-            ({"9068": "2", "1224": "091701"}, "RELEASED", cut.date() - timedelta(days=1), "unconfirmed_trading_date"),
-            ({"9068": "2", "1224": "091703"}, "RELEASED", cut.date(), "event_after_receipt"),
+        for raw, trading_date, reason in (
+            ({"9068": "2", "1224": "091701"}, cut.date(), "unconfirmed_vi_trigger"),
+            ({"9068": "2", "1223": "091561"}, cut.date(), "unconfirmed_vi_trigger"),
+            ({"9068": "2", "1223": "91501"}, cut.date(), "unconfirmed_vi_trigger"),
+            ({"9068": "2", "1223": "０９１５０１"}, cut.date(), "unconfirmed_vi_trigger"),
+            ({"9068": "2", "1223": "091703"}, cut.date(), "unconfirmed_vi_trigger"),
+            ({"9068": "9", "1223": "091501"}, cut.date(), "unconfirmed_vi_trigger"),
+            ({"9068": "2", "1223": "091501"}, None, "unconfirmed_trading_date"),
+            ({"9068": "2", "1223": "091501"}, cut.date() - timedelta(days=1), "unconfirmed_trading_date"),
         ):
-            with self.subTest(raw=raw, kind=kind, trading_date=trading_date):
+            with self.subTest(raw=raw, trading_date=trading_date):
                 projection = project_vi_clock({
-                    "source": "kiwoom-websocket-1h", "event_kind": kind,
+                    "source": "kiwoom-websocket-1h", "event_kind": "RELEASED",
                     "effective_at": "2026-09-11T09:15:01", "raw_values": raw,
                     "received_at": received, "available_at": received,
                 }, trading_date=trading_date, decision_at=cut)
                 self.assertEqual((None, None, None, reason),
                                  (projection.observed_at, projection.available_at, projection.fid, projection.reason))
+        for category, release, expected in (("2", None, "ACTIVATED"), ("2", "091761", "ACTIVATED"),
+                                            ("2", "091703", "ACTIVATED"), ("4", "091701", "EXTENDED")):
+            with self.subTest(category=category, release=release):
+                projection = project_vi_clock({
+                    "source": "kiwoom-websocket-1h", "event_kind": "RELEASED",
+                    "raw_values": {"9068": category, "1223": "091501", "1224": release},
+                    "received_at": received, "available_at": received,
+                }, trading_date=cut.date(), decision_at=cut)
+                self.assertEqual((expected, "1223", "2026-09-11T09:15:01+09:00"),
+                                 (projection.kind, projection.fid, projection.observed_at.isoformat()))
 
     def test_micro_vi_clock_does_not_substitute_historical_sources_or_invalid_receipts(self) -> None:
         cut = datetime.fromisoformat("2026-09-11T09:18:00+09:00")
@@ -172,19 +181,52 @@ class MarketEventServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service._backfill_vi()
         self.assertEqual(1, len(self.store.load_market_event_history("vi", code="000660")))
 
+    async def test_automation_vi_uses_the_wire_release_clock_and_isolates_cycles_and_venues(self):
+        socket = _Socket()
+        check = self.service.automation_buy_vi_rejection
+        received = self.now[0]
+
+        async def frame(code, trigger, release="000000", category="2"):
+            await self.service.handle_ws_message({"trnm": "REAL", "data": [{"type": "1h", "values": {
+                "9001": code, "9068": category, "1223": trigger, "1224": release,
+            }}]}, socket)
+
+        await frame("005930", "095500")
+        await frame("005930_AL", "095500")
+        await frame("005930_NX", "095500", "095730")
+        await frame("000660_NX", "095500")
+        self.assertEqual("vi_active", check("005930", received))
+        self.assertIsNone(check("000660", received))
+        await frame("005930", "095500", "095730")
+        self.assertEqual("vi_active", check("005930", received))  # Unmatched integrated event.
+        await frame("005930_AL", "095500", "095730")
+        await frame("005930", "095500")  # A delayed duplicate must not reopen this cycle.
+        self.assertEqual("vi_requires_new_observation", check("005930", received))
+        self.assertIsNone(check("005930", received + timedelta(milliseconds=1)))
+
+        await frame("005930", "095900", "100500", category="4")
+        await frame("005930", "095500", "095730")
+        self.assertEqual("vi_active", check("005930", received))
+        self.now[0] += timedelta(minutes=6)
+        self.assertEqual("vi_active", check("005930", self.now[0]))  # A clock alone cannot release it.
+        await frame("005930", "095900", "100500", category="3")
+        self.assertIsNone(check("005930", self.now[0] + timedelta(milliseconds=1)))
+        self.assertEqual([], self.broker.calls)
+
     async def test_micro_vi_clock_projects_release_without_rewriting_native_receipt(self) -> None:
         self.now[0] = datetime.fromisoformat("2026-09-11T09:17:09+09:00")
         trading_date = self.now[0].date()
-        values = {"9001": "A005930", "9068": "1", "1225": "1", "1221": "+75000",
-                  "1223": "091501", "1224": "091701", "1490": "1", "9081": "KRX"}
+        values = {"9001": "A005930", "9068": "2", "1225": "1", "1221": "+75000",
+                  "1223": "091501", "1224": "000000", "1490": "1", "9081": "KRX"}
         await self.service.handle_ws_message({"trnm": "REAL", "data": [
-            {"type": "1h", "values": values}, {"type": "1h", "values": values | {"9068": "2"}},
+            {"type": "1h", "values": values}, {"type": "1h", "values": values | {"1224": "091701"}},
         ]}, _Socket())
         await self.service.close()
         rows = self.store.load_market_event_history("vi", code="005930")
         receipts = deepcopy(rows)
-        by_kind = {row["event_kind"]: row for row in rows}
+        by_kind = {("ACTIVATED" if row["raw_values"]["1224"] == "000000" else "RELEASED"): row for row in rows}
         released = by_kind["RELEASED"]
+        self.assertEqual(["RELEASED", "RELEASED"], [row["event_kind"] for row in rows])
         self.assertEqual("2026-09-11T09:15:01", released["effective_at"])
         self.assertEqual(self.now[0].timestamp(), released["received_at"])
         self.assertEqual(self.now[0].timestamp(), released["available_at"])
@@ -197,7 +239,8 @@ class MarketEventServiceTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(kind=kind):
                 projected = project_vi_clock(by_kind[kind], trading_date=trading_date,
                                              decision_at=self.now[0].astimezone(timezone.utc))
-                self.assertEqual("micro-vi-clock/v1", projected.version)
+                self.assertEqual("micro-vi-clock/v2", projected.version)
+                self.assertEqual(kind, projected.kind)
                 self.assertEqual((fid, f"2026-09-11T{expected}+09:00", self.now[0], ""),
                                  (projected.fid, projected.observed_at.isoformat(), projected.available_at, projected.reason))
         self.assertEqual(receipts, rows)

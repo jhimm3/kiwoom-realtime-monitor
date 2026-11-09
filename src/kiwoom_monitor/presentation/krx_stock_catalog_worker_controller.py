@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 
 from PySide6.QtCore import QObject
 
@@ -36,6 +37,7 @@ class KrxStockCatalogWorkerController(QObject):
         failed: Callable[[str], None],
         history_failed: Callable[[str], None],
         finished: Callable[[], None] | None = None,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> bool:
         if self.is_running:
             return True
@@ -45,6 +47,8 @@ class KrxStockCatalogWorkerController(QObject):
             failed("KRX 종목 카탈로그 작업 구성이 올바르지 않습니다. 프로그램을 다시 실행해 주세요.")
             worker.deleteLater()
             return False
+        if now_provider is not None:
+            worker.set_now_provider(now_provider)
         worker.completed.connect(completed)
         worker.failed.connect(failed)
         worker.history_failed.connect(history_failed)

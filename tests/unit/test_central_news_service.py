@@ -5,12 +5,14 @@ import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from kiwoom_monitor.application.news_analysis import NewsAssessment
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.news_service import CentralNewsService
 from kiwoom_monitor.infrastructure.naver_news import StockNewsItem
 from kiwoom_monitor.infrastructure.naver_stock_news import StockNewsBatch
+from kiwoom_monitor.domain.time_basis import kst_now
 
 
 class _NewsClient:
@@ -156,6 +158,11 @@ class _TracingNewsStore(SQLiteQueryStore):
 
 
 class CentralNewsServiceTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        trading_cut = kst_now().replace(hour=10, minute=5, second=0, microsecond=0)
+        self.enterContext(patch("kiwoom_monitor.central_server.news_service.kst_now",
+                                return_value=trading_cut))
+
     async def test_stored_pages_are_bounded_and_do_not_call_provider(self) -> None:
         store = _Store()
         for index in sorted(range(1, 451), key=lambda value: str(value)):
@@ -300,7 +307,7 @@ class CentralNewsServiceTests(unittest.IsolatedAsyncioTestCase):
         items = await service.search("005930", "삼성전자", datetime(2026, 9, 21, tzinfo=UTC))
 
         self.assertEqual(1, client.calls)
-        self.assertEqual(datetime(2026, 9, 23, 8, tzinfo=UTC), client.since_values[0])
+        self.assertEqual(datetime(2026, 9, 21, tzinfo=UTC), client.since_values[0])
         self.assertEqual(["https://o/stored"], [item["original_link"] for item in items])
         self.assertEqual("수주·계약", items[0]["category"])
 
@@ -598,6 +605,94 @@ class CentralNewsRefreshPersistenceTests(unittest.IsolatedAsyncioTestCase):
             }],
         })
 
+    async def test_morning_backfill_keeps_provider_cutoffs_separate_and_retains_held_stock(self) -> None:
+        from types import SimpleNamespace
+        from kiwoom_monitor.central_server.news_service import load_held_news_codes
+        from kiwoom_monitor.infrastructure.dart_disclosures import DartDisclosureClient
+        from urllib.parse import parse_qs, urlsplit
+
+        self.now = datetime.fromisoformat("2026-10-21T06:59:00+09:00")
+        previous = datetime.fromisoformat("2026-10-20T19:50:00+09:00")
+        binding = SimpleNamespace(scope=SimpleNamespace(account_ref="active-real"),
+                                  binding_revision=2, credential_profile_id="active-profile")
+        for owner, positions, revision in (("active-real", {"000660": 2, "068270": 0}, 2),
+                                           ("inactive-real", {"051910": 5}, 1)):
+            self.store.upsert_documents("real_account_recovery", [{
+                "owner": f"kiwoom:real:{owner}", "key": "balance", "document": {
+                    "binding_revision": revision, "credential_profile_id": "active-profile",
+                    "received_at": previous.isoformat(),
+                    "recovery": {"account": {"as_of": previous.isoformat(), "positions": positions}},
+                },
+            }])
+        self.store.save_execution_account_snapshot({
+            "snapshot_id": "mock-holdings", "environment": "mock", "account_ref": "active-mock",
+            "as_of": previous.isoformat(), "received_at": previous.isoformat(), "positions": {"051910": 1},
+        })
+        newer = (previous + timedelta(minutes=1)).astimezone(UTC).isoformat()
+        self.store.save_execution_account_snapshot({
+            "snapshot_id": "mock-holdings-newer", "environment": "mock", "account_ref": "active-mock",
+            "as_of": newer, "received_at": newer, "positions": {"035420": 1},
+        })
+        self.store.save_dataset_snapshot("top20_membership", "krx", previous.isoformat(),
+                                         {"items": [{"stk_cd": "005930", "stk_nm": "삼성전자"}]})
+        self.store.save_dataset_snapshot("nxt_eligibility_catalog", "2026-10-21", "2026-10-21", {
+            "flags": {}, "stocks": {"000660": ["SK하이닉스", "KOSPI"], "0147B0": ["래블업", "KOSDAQ"]},
+        })
+        self.store.upsert_documents("stock_catalog", [
+            {"owner": "krx", "key": "035420", "document": {"name": "NAVER"}},
+        ])
+        self.store.upsert_documents("news_sync", [{
+            "owner": "000660", "key": "latest", "document": {
+                "checked_at": previous.isoformat(), "naver_success_at": previous.isoformat(),
+                "site_next_page": 5, "site_checked_at": previous.isoformat(), "site_coverage_complete": False,
+            },
+        }])
+        naver_calls, dart_calls = [], []
+
+        def naver(name, *, since):
+            naver_calls.append((name, since))
+            if name == "SK하이닉스" and self.now.minute == 0:
+                raise OSError("fixture NAVER failure")
+            return ()
+
+        def dart_response(url):
+            query = parse_qs(urlsplit(url).query)
+            dart_calls.append((query["corp_code"][0], query["bgn_de"][0], query["end_de"][0]))
+            return {"status": "013"}
+
+        async def held(cut):
+            return load_held_news_codes(self.store, [binding], {"active-mock"}, cut)
+
+        dart = DartDisclosureClient("fixture-key", Path(self.directory.name) / "unused.json")
+        dart._corp_codes = lambda: {"000660": "00000001", "035420": "00000002", "005930": "00000003"}
+        dart._json = dart_response
+        site = _StockSiteClient()
+        service = CentralNewsService(SimpleNamespace(search=naver), self.store, dart,
+                                     query_set_enabled=False, read_only_search=True, naver_stock_enabled=True,
+                                     stock_client=site, held_news_codes=held, now_provider=lambda: self.now)
+        service.set_ai_service(self.ai)
+        self.store.upsert_documents("news_automation_settings", [{
+            "owner": "000660", "key": "current", "document": {"provider": "gemini", "auto_analyze": True},
+        }])
+        self.assertEqual(0, await service.refresh_once())
+        self.assertEqual(([], [], []), (naver_calls, dart_calls, site.calls))
+        self.now += timedelta(minutes=1)
+        self.assertEqual(3, await service.refresh_once())
+        self.assertEqual({"SK하이닉스", "NAVER", "삼성전자"}, {name for name, _ in naver_calls})
+        self.assertEqual(1, next(call[3] for call in site.calls if call[0] == "000660"))
+        row = self.store.load_documents("news_sync", "000660", 1)[0]["document"]
+        self.assertEqual(previous.isoformat(), row["naver_success_at"])
+        self.assertFalse(row["naver_coverage_complete"])
+        self.assertEqual(self.now.isoformat(), row["dart_success_at"])
+        self.assertIn(("00000001", "20261020", "20261021"), dart_calls)
+        naver_calls.clear()
+        self.now += timedelta(hours=1, minutes=5)
+        self.assertEqual(2, await service.refresh_once())
+        self.assertEqual({"SK하이닉스", "NAVER"}, {name for name, _ in naver_calls})
+        self.assertIn(("SK하이닉스", previous - timedelta(minutes=2)), naver_calls)
+        self.assertIn(("00000001", "20261021", "20261021"), dart_calls)
+        self.assertEqual([], self.ai.calls)
+
     async def test_refresh_uses_accepted_owner_after_repeated_source_with_one_native_read(self) -> None:
         client = _NewsClient(self.now, title="삼성전자 공급계약 A 체결")
         service = self._service(client)
@@ -680,7 +775,9 @@ class CentralNewsRefreshPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual({"owner": 2, "confirmed": 1}, self.store.publication_reads())
         self.assertEqual([], self.ai.calls)
-        self.assertEqual([], self.store.load_documents("news_sync", "005930"))
+        state = self.store.load_documents("news_sync", "005930")[0]["document"]
+        self.assertFalse(state["naver_coverage_complete"])
+        self.assertNotIn("naver_success_at", state)
         self._watch("000001", "빈 종목")
         with self.assertLogs("kiwoom_monitor.central_server.news_service", level="ERROR") as logged:
             self.assertEqual(1, await service.refresh_once())

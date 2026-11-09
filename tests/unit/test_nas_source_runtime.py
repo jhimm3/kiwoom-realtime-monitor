@@ -42,7 +42,8 @@ class SourceRuntimeTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b"")
         for name in ("kiwoom_monitor/domain/research_contract.py",
-                     "kiwoom_monitor/domain/market_data_contract.py", "kiwoom_monitor/central_server/config.py"):
+                     "kiwoom_monitor/domain/market_data_contract.py", "kiwoom_monitor/domain/time_basis.py",
+                     "kiwoom_monitor/central_server/config.py"):
             shutil.copyfile(source / name, receiver / name)
         child = (
             "import json,sys;sys.path.insert(0,sys.argv[1]);"

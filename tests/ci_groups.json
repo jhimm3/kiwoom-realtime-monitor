@@ -29,6 +29,7 @@
     "tests.unit.test_breakout_theme_research",
     "tests.unit.test_account_risk_research",
     "tests.unit.test_daily_decline",
+    "tests.unit.test_news_material",
     "tests.unit.test_micro_execution_evidence",
     "tests.unit.test_panic_rebound",
     "tests.unit.test_live_0b_minute_transition",

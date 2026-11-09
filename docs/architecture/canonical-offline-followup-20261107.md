@@ -35,7 +35,19 @@ S12 개발5/5·대표11/11과 이전 소스의 관련 Windows1328·격리 Postgr
 
 `python -m kiwoom_monitor.observation_archive`의 `prepare` → `send` → `restore`를 사용한다. `prepare --kind`에는 ranking, minute_bar, daily_bar, top20_membership 중 하나와 시각 범위를 명시한다. 기존 고정 공개 자료의 원본과 manifest를 그대로 보관하며, 부분·미확인·원천 순번·판본을 재해석하지 않는다. 보관할 배치의 수락 영수증은 native 저장을 마친 뒤 반환된다. 요청 응답을 잃어도 보류 배치와 원본은 유지하고 동일 ID의 첫 영수증을 확인한 후 재사용한다. 원본을 삭제하거나 장중 저장을 원격으로 보내지 않는다.
 
-수신기에서 기존 일반/연구 권한과 별개인 `MONITOR_SERVER_OBSERVATION_ARCHIVE_GRANTS_JSON`을 명시한 경우에만 활성화한다. stream별 bearer와 내용 hash를 대조한다. 배치의 전체 UTF-8 JSON 상한은 32 MiB이고 초과 시 저장하지 않는다. 자료 종류와 고정 범위를 더 작게 나눌 수 있으며 이후 정정은 후속 cut에 남긴다. 자동 스케줄, 보관 대상/기간, 운영 grant·NAS 배포는 여기서 확정하지 않았다. 주문·계좌 자료 전송과 권한 인계는 별도다. [4종 구현·원행 검증](../../tmp/canonical-offline-20261107/archive/REPORT.md).
+수신기에서 기존 일반/연구 권한과 별개인 `MONITOR_SERVER_OBSERVATION_ARCHIVE_GRANTS_JSON`을 명시한 경우에만 활성화한다. stream별 bearer와 내용 hash를 대조한다. 배치의 전체 UTF-8 JSON 상한은 32 MiB이고 초과 시 저장하지 않는다. 수동 보관은 자료 종류와 범위를 나눌 수 있다. 운영 grant·NAS 배포, 자료 보관 기간, 주문·계좌 자료 전송과 권한 인계는 별도다. [4종 수동 보관·원행 검증](../../tmp/canonical-offline-20261107/archive/REPORT.md).
+
+<a id="program-flow-after-close-archive"></a>
+
+### 프로그램매매와 시장 관측 장후 자동 보관
+
+실행 PC의 파일 SQLite에서 당일 KST 20:05 이후 TOP20 장후 보완이 성공하면 대기 중인 `0W` 저장을 마치고 `program_flow`를 읽는다. 해당 거래일의 스냅샷은 `0W`, `ka90008` 보완본 및 기존 형식의 스냅샷을 키·저장 시각·payload와 함께 보관한다. 거래일은 스냅샷 키에서 가져오고 payload에 기록된 출처·값·결측을 유지한다. 전날 차트 보완으로 전날 프로그램매매를 확정하거나 새 전송을 만들지 않는다.
+
+`<로컬 DB 파일명>.program-archive/<거래일>/`에 같은 읽기 시점의 자료를 32 MiB 이내 배치로 나누어 한 번에 게시한다. 단일 스냅샷이 상한을 넘으면 로컬 원본을 유지하고 동결 실패를 남긴다. 전송은 별도 작업이 맡는다. 첫 전송에서 대상 URL을 고정하고, NAS 영수증을 확인하면 `.ack.json`을 저장한다. 응답을 잃거나 NAS에 닿지 않으면 고정 파일로 재시도하고, PC를 재시작해도 보류 파일을 이어받는다. NAS는 같은 BLOB 보관 테이블에서 첫 내구 영수증을 재사용한다. `restore`는 보관된 프로그램매매 파일을 복원하며 이 종류의 자료는 연구용 관측 export와 분리한다.
+
+순위·분봉·일봉·TOP20 편입은 같은 장후 완료 신호에서 `observations/<거래일>/`에 동결한다. 거래일 안에 발생하고 완료 시점까지 저장된 관측 판본을 SQLite의 한 읽기 스냅샷에서 가져온다. 오전에 전일 보완을 끝냈으면 그때 확보한 전일 봉도 포함한다. 배치는 종류와 원래 가용일별로 나누며 가용 시각·출처·판본·불완전 표시를 보존한다. 30초 순위 원행은 기존 TOP20 편입 스냅샷에 담긴다. 야간 화면 전용 순위나 사후에 새로 보완한 과거 거래일의 별도 전송은 이 자동 배치 범위 밖이다. 보관 설정은 기존 프로그램매매의 선택 설정을 공유하며 PC에 원본 관측 이력 저장이 켜져 있어야 한다.
+
+기본은 비활성이다. 전환 때 실행 PC에 `MONITOR_SERVER_PROGRAM_ARCHIVE_TARGET_FILE`(기존 연결 JSON 형식의 전용 NAS URL·보관 토큰 파일)과 `MONITOR_SERVER_PROGRAM_ARCHIVE_SOURCE_STREAM`(NAS 보관 grant의 owner)을 명시한다. NAS 보관 수신기는 기존 `MONITOR_SERVER_OBSERVATION_ARCHIVE_GRANTS_JSON`을 사용한다. 이번 확인은 격리 로컬 DB와 HTTP에 한정한다. 실제 운영 설정과 보관 기간은 별도다.
 
 ## 기존 6개 조건의 운영 경계
 

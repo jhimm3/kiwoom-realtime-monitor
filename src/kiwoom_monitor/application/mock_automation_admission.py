@@ -341,6 +341,8 @@ def admit_mock_automation(
     spec = repository.load_mock_automation_spec(account_ref, spec_id)
     if spec is None:
         raise ValueError("mock automation operating spec is not stored")
+    if spec.supported_venue in {'NXT', 'SOR'} and not runtime.supports_automation_venue(spec.supported_venue):
+        raise ValueError(f'{spec.supported_venue}_AUTOMATION_REQUIRES_LOCAL_FAKE_BROKER')
     repository.save_mock_automation_spec(spec)  # Revalidate the current mock binding at admission time.
     profile = repository.load_profile(spec.strategy_ref, spec.forward_profile_id)
     if profile is None:
@@ -447,6 +449,8 @@ def admit_mock_automation_account_selection(repository, runtime, *, account_ref:
     admissions = []
     for spec_id in selection.member_spec_ids:
         spec = repository.load_mock_automation_spec(account_ref, spec_id, require_canonical_document=True)
+        if spec.supported_venue in {'NXT', 'SOR'} and not runtime.supports_automation_venue(spec.supported_venue):
+            raise ValueError(f'{spec.supported_venue}_AUTOMATION_REQUIRES_LOCAL_FAKE_BROKER')
         if selection.allows_entry(spec_id):
             _verify_final_candidate(repository, spec)
         existing = repository.load_mock_automation_admission_for_spec(account_ref, spec_id)
@@ -504,6 +508,8 @@ def prepare_mock_automation_account_replacement(repository, runtime, *, account_
         spec = repository.load_mock_automation_spec(account_ref, identity, require_canonical_document=True)
         if spec is None:
             raise ValueError('account replacement member is not stored')
+        if spec.supported_venue in {'NXT', 'SOR'} and not runtime.supports_automation_venue(spec.supported_venue):
+            raise ValueError(f'{spec.supported_venue}_AUTOMATION_REQUIRES_LOCAL_FAKE_BROKER')
         if selection.allows_entry(identity):
             _verify_final_candidate(repository, spec)
         admission = repository.load_mock_automation_admission_for_spec(account_ref, identity)

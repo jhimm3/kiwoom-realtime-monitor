@@ -36,6 +36,10 @@ PANIC_ENTRY_COLLECTION = "execution_panic_entry_evidence"
 PANIC_EXIT_COLLECTION = "execution_panic_exit_evidence"
 
 
+class CloseExitCalendarRecheck(RuntimeError):
+    """A scheduled CLOSE exit must be rebuilt before broker submission."""
+
+
 @dataclass(frozen=True)
 class CloseMockExecutionPolicy:
     maximum_adverse_slippage_bps: int
@@ -321,17 +325,17 @@ class MockAutomationOperatingSpec:
 
     def __post_init__(self) -> None:
         if self.execution_plan_mode == PANIC_NATIVE_PLAN_MODE:
-            if (not isinstance(self.panic_execution_policy, PanicMockExecutionPolicy) or self.supported_venue != 'KRX'
+            if (not isinstance(self.panic_execution_policy, PanicMockExecutionPolicy) or self.supported_venue not in {'KRX', 'NXT', 'SOR'}
                     or self.unfilled_execution_policy is not None or self.close_execution_policy is not None):
-                raise ValueError('PANIC native plan requires its explicit KRX execution policy')
+                raise ValueError('PANIC native plan requires its explicit KRX execution policy or an NXT plan')
         elif self.execution_plan_mode == CLOSE_NATIVE_PLAN_MODE:
             if (not isinstance(self.close_execution_policy, CloseMockExecutionPolicy)
-                    or self.supported_venue != "KRX" or self.unfilled_execution_policy is not None):
-                raise ValueError("CLOSE native plan requires its explicit KRX execution policy")
+                    or self.supported_venue not in {'KRX', 'NXT', 'SOR'} or self.unfilled_execution_policy is not None):
+                raise ValueError("CLOSE native plan requires its explicit KRX execution policy or an NXT plan")
         elif self.execution_plan_mode is not None and (
                 self.execution_plan_mode != LEADER_NATIVE_PLAN_MODE or self.unfilled_execution_policy is None
-                or self.supported_venue != "KRX"):
-            raise ValueError("leader native plan mode requires the explicit KRX mock unfilled policy")
+                or self.supported_venue not in {'KRX', 'NXT', 'SOR'}):
+            raise ValueError("leader native plan mode requires the explicit KRX mock unfilled policy or an NXT plan")
         if self.close_execution_policy is not None and self.execution_plan_mode != CLOSE_NATIVE_PLAN_MODE:
             raise ValueError("CLOSE execution policy requires its native plan mode")
         if self.panic_execution_policy is not None and self.execution_plan_mode != PANIC_NATIVE_PLAN_MODE:
@@ -380,8 +384,12 @@ class MockAutomationOperatingSpec:
             value = getattr(self, name)
             if value is not None and (not isinstance(value, int) or value < 0):
                 raise ValueError(f"{name} must be a non-negative integer or TBD")
-        if self.supported_venue is not None and self.supported_venue != "KRX":
-            raise ValueError("Kiwoom mock automation supports only KRX")
+        if self.supported_venue not in {None, 'KRX', 'NXT', 'SOR'}:
+            raise ValueError("unsupported automation execution venue")
+        if self.supported_venue in {'NXT', 'SOR'}:
+            terms = self.unfilled_execution_policy or self.close_execution_policy or self.panic_execution_policy
+            if getattr(terms, 'accepted_order_management', None) != 'reassess_then_amend_price/v1':
+                raise ValueError('NXT/SOR automation requires a native reassessment and amendment policy')
         if (
             self.session_profile is not None
             and self.session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES

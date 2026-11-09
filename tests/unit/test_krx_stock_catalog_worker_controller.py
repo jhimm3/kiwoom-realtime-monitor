@@ -66,6 +66,7 @@ class KrxStockCatalogWorkerControllerTests(unittest.TestCase):
             fixed = datetime.fromisoformat("2026-10-25T10:00:00+09:00")
             settings = SettingsRepository(path, strict_text=True, now_provider=lambda: fixed)
             stocks = Mock()
+            stocks.load_premarket_flags.return_value = None
             stocks.sync_kind_name_history.side_effect = OSError("controlled history failure")
             worker = KrxStockCatalogWorker(stocks, settings)
             failures = []
@@ -86,6 +87,40 @@ class KrxStockCatalogWorkerControllerTests(unittest.TestCase):
                 stocks.sync_kind_name_history.reset_mock()
                 worker.run()
                 stocks.sync_kind_name_history.assert_called_once_with(initial=False)
+
+    def test_saved_premarket_reuses_current_list_and_still_syncs_kind_name_notices(self) -> None:
+        import tempfile
+        from datetime import datetime
+        from pathlib import Path
+        from unittest.mock import patch
+        from kiwoom_monitor.infrastructure.persistence.database import Database
+        from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            database = Database(path)
+            database.initialize()
+            settings = database.settings
+            settings.set("krx_stock_catalog_date", "2026-11-08 10:00:00")
+            stocks = StockRepository(path)
+            stocks.save_premarket_catalog("2026-11-09", {
+                "flags": {}, "stocks": {"005935": ("삼성전자우", "KOSPI"), "0147B0": ("래블업", "KOSDAQ")},
+            })
+            worker = KrxStockCatalogWorker(stocks, settings)
+            worker.set_now_provider(lambda: datetime.fromisoformat("2026-11-08T23:05:00+00:00"))
+            completed, failed = [], []
+            worker.completed.connect(lambda count, cached: completed.append((count, cached)))
+            worker.failed.connect(failed.append)
+            with patch.object(stocks, "sync_kind_name_history") as history, patch(
+                "kiwoom_monitor.infrastructure.krx.stock_catalog_worker.fetch_krx_stock_catalog",
+            ) as download:
+                worker.run()
+            download.assert_not_called()
+            history.assert_called_once_with(initial=True)
+            self.assertEqual([(0, True)], completed)
+            self.assertEqual([], failed)
+            self.assertEqual("2026-11-08 10:00:00", settings.get("krx_stock_catalog_date"))
+            self.assertEqual("2026-11-09 08:05:00", settings.get("kind_name_history_sync_date"))
 
     def test_running_worker_is_reused_without_factory_call(self) -> None:
         worker = FakeKrxStockCatalogWorker()

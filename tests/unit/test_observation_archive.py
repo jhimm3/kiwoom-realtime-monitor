@@ -9,11 +9,13 @@ import sqlite3
 import subprocess
 import sys
 import unittest
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from urllib.parse import urlsplit
@@ -21,12 +23,15 @@ from urllib.parse import urlsplit
 import httpx
 
 from kiwoom_monitor.central_server.autonomous_top20 import AutonomousTop20Service
+from kiwoom_monitor.central_server.app import create_app
 from kiwoom_monitor.central_server.config import CentralServerSettings, ProducerGrant
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
-from kiwoom_monitor.central_server.market_observations import bar_observation_key, minute_bar_observation
+from kiwoom_monitor.central_server.market_observations import bar_observation_key, minute_bar_observation, ranking_observation
+from kiwoom_monitor.central_server.program_flow_archive import ProgramFlowArchive
+from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
 from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
-from kiwoom_monitor.central_server.rest_broker import BrokerResult
+from kiwoom_monitor.central_server.rest_broker import BrokerResult, CentralRestBroker
 from kiwoom_monitor.domain.market_data_contract import DataCompleteness, DataValueKind, ObservationOrigin
 from kiwoom_monitor.domain.observation_archive import (
     MAX_OBSERVATION_ARCHIVE_BYTES, OBSERVATION_ARCHIVE_PATH, ObservationArchiveBatch, ObservationArchiveLimit, SQLITE_ARCHIVE_DURABILITY,
@@ -36,8 +41,11 @@ from kiwoom_monitor.domain.research_contract import encode_reported_result_owner
 from kiwoom_monitor.domain.time_basis import KST
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient, _result_urlopen
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig, DataSourceSettings
+from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomRestClient
 from kiwoom_monitor.infrastructure.research_data_source import load_frozen_research_export
-from kiwoom_monitor.observation_archive import deliver_observation_archive, prepare_observation_archive, restore_observation_archive
+from kiwoom_monitor.observation_archive import (
+    deliver_observation_archive, inspect_program_flow, main, prepare_observation_archive, restore_observation_archive,
+)
 from tests.unit.test_query_authority import ADMIN, QUERY, query_app, wire_server
 from tests.unit.test_research_input_authority import BODY, INPUT, RESULT, input_settings
 
@@ -93,11 +101,238 @@ class ObservationArchiveTests(unittest.TestCase):
     def _url(path):
         return "sqlite:///" + path.as_posix()
 
+    def test_pc_completed_program_flow_restarts_pending_and_nas_reuses_first_receipt(self):
+        day = "2026-10-26"
+        now = [datetime.fromisoformat(day + "T19:59:00+09:00")]
+        code = "005930"
+        outbox = self.source.with_name(self.source.name + ".program-archive")
+        target = query_app(receiver_settings(self._url(self.target)))
+        settings = replace(input_settings(self._url(self.source)), kiwoom_app_key="isolated-key",
+            kiwoom_secret_key="isolated-secret", autonomous_top20_enabled=True,
+            program_flow_archive_target_file=str(self.target_connection), program_flow_archive_source_stream=STREAM,
+            top20_outbox_path=str(self.root / "index-outbox.json"))
+        lost_get = Event()
+        flow = BrokerResult({"stk_tm_prm_trde_trnsn": [
+            {"tm": "100030", "dt": "20261026", "stex_tp": "통합", "prm_netprps_amt": "12", "cur_prc": "100"},
+        ]}, False, "")
+
+        def lose_first_receipt(request, **kwargs):
+            with _result_urlopen(request, **kwargs) as response:
+                response.read()
+            if request.method == "GET":
+                lost_get.set()
+            raise TimeoutError("isolated loss after native archive commit")
+
+        async def exercise(target_url, recovery):
+            source = create_app(settings)
+            service = source.state.autonomous_top20_service
+            workflow = service.after_close
+            service._excluded_product_codes = frozenset({"069500"})
+            service._stock_master_day = day
+            # The unrelated chart TRs are covered elsewhere. Drive real program recovery and SQLite here.
+            workflow._backfill_market_indexes = AsyncMock()
+            workflow._nxt_enabled = AsyncMock(return_value=False)
+            workflow._backfill_daily = AsyncMock()
+            workflow._backfill_minutes = AsyncMock()
+            workflow.reconcile = AsyncMock(side_effect=[RuntimeError("incomplete close"), {}])
+            live = {"market": "KRX", "rows": [{"trade_time": "195900", "source": "kiwoom_realtime_0w",
+                                               "net_buy_quantity": 20, "available": True}]}
+            service._store.save_dataset_snapshot("program_flow", code, "20261025:REALTIME:195900", live)
+            service._store.upsert_documents("candidate_flow_finalization", [{
+                "owner": f"{day}:{code}", "key": "gap:100000:100100",
+                "document": {"start": "100000", "end": "100100"},
+            }])
+            service._store.upsert_documents("top20_daily_entrants", [{
+                "owner": day, "key": code, "document": {"first_seen": day + "T09:00:00+09:00"},
+            }])
+            service._program_snapshots.enqueue({"subject": code, "snapshot_key": "20261026:REALTIME:195900", "payload": live})
+            original_items = [{"stk_cd": symbol, "stk_nm": name, "dt": "20261026", "tm": "195900"}
+                              for symbol, name in ((code, "삼성전자"), ("069500", "KODEX 200"))]
+            ingestor = MarketDataIngestor(service._store, now_provider=lambda: now[0])
+            original_rank = [{**row, "tm": "080000"} for row in original_items]
+            MarketDataIngestor(service._store, now_provider=lambda: now[0].replace(hour=8, minute=0)).ingest(
+                "ka00198", {"qry_tp": "1"}, {"item_inq_rank": original_rank},
+            )
+            observed = now[0].isoformat()
+            members = {"observed_at": observed, "codes": [code, "069500"], "items": original_items}
+            service._store.save_dataset_snapshot("top20_membership", day, observed, members,
+                observation=ranking_observation(day, observed, members, now[0], source="nas-autonomous-ka00198"))
+            async with source.router.lifespan_context(source):
+                self.assertFalse(await workflow.run_day(day))
+                self.assertFalse(outbox.exists())
+                now[0] = datetime.fromisoformat(day + "T20:05:00+09:00")
+                self.assertFalse(await workflow.run_day(day))
+                self.assertFalse(outbox.exists())
+                bars = {"open_pric": "100", "high_pric": "110", "low_pric": "90", "cur_prc": "105", "trde_qty": "1200"}
+                ingestor.ingest("ka10080", {"stk_cd": code, "tic_scope": "1"},
+                                {"stk_min_pole_chart_qry": [{**bars, "cntr_tm": "20261026155900"}]})
+                ingestor.ingest("ka10081", {"stk_cd": code, "upd_stkpc_tp": "1"},
+                                {"stk_dt_pole_chart_qry": [{**bars, "dt": "20261026"}]})
+                with patch("kiwoom_monitor.infrastructure.central_content_client._result_urlopen",
+                           side_effect=lose_first_receipt):
+                    workflow.schedule(day)
+                    await workflow.join()
+                    self.assertEqual(day, workflow._last_backfill_day)
+                    self.assertTrue(await asyncio.to_thread(lost_get.wait, 8))
+                    [batch_path] = (outbox / day).glob("*.batch")
+                    value = ObservationArchiveBatch.parse(batch_path.read_bytes())
+                    ack_path = batch_path.with_name(batch_path.name + ".ack.json")
+                    self.assertFalse(ack_path.exists())
+                    archive_paths = tuple((outbox / "observations" / day).glob("*.batch"))
+                    archives = {batch.kind: batch for batch in
+                                (ObservationArchiveBatch.parse(path.read_bytes()) for path in archive_paths)}
+                    self.assertEqual({"ranking", "minute_bar", "daily_bar", "top20_membership"}, set(archives))
+            self.assertEqual("completed", source.state.shutdown_status["state"])
+            recovery.assert_awaited_once()
+            self.assertEqual("ka90008", recovery.await_args.args[0])
+            [live_row, restored_row] = map(json.loads, value.document()["observations"].splitlines())
+            self.assertEqual(live, live_row["payload"])
+            self.assertEqual("20261026:RECOVERY:SOR", restored_row["snapshot_key"])
+            self.assertEqual(["100030"], [row["trade_time"] for row in restored_row["payload"]["rows"]])
+            self.assertNotIn("cur_prc", restored_row["payload"]["rows"][0])
+            client = CentralContentClient.for_observation_archive(target_url, STREAM, ARCHIVE_TOKEN)
+            first = await asyncio.to_thread(client.load_observation_archive, value.batch_id, source_stream=STREAM)
+            self.assertEqual(("program_flow", 2, 1), (first["kind"], first["revision_count"], first["receipt_sequence"]))
+            self.assertIsNone(first["first_source_accepted_sequence"])
+            restart = create_app(settings)
+            async with restart.router.lifespan_context(restart):
+                async with asyncio.timeout(8):
+                    while not (ack_path.is_file() and all(path.with_name(path.name + ".ack.json").is_file()
+                                                          for path in archive_paths)):
+                        await asyncio.sleep(0.02)
+                self.assertEqual(first, json.loads(ack_path.read_bytes())["receipt"])
+                self.assertEqual(value.raw, batch_path.read_bytes())
+                restored = self.root / "restored-program-flow"
+                receipt = await asyncio.to_thread(restore_observation_archive, self.target_connection, STREAM,
+                                                  value.batch_id, restored)
+                self.assertEqual(first, receipt)
+                self.assertEqual(value.document()["observations"], (restored / "observations.jsonl").read_text(encoding="utf-8"))
+                self.assertEqual(3, len(restart.state.autonomous_top20_service._store.load_dataset_snapshots("program_flow", code)))
+                for kind, batch in archives.items():
+                    restored_path = self.root / ("restored-" + kind)
+                    await asyncio.to_thread(restore_observation_archive, self.target_connection, STREAM,
+                                            batch.batch_id, restored_path)
+                    [row] = load_frozen_research_export(restored_path).observations
+                    native = restart.state.autonomous_top20_service._store.load_observation_revisions(kind, limit=1)[0]
+                    self.assertEqual(native, {key: value for key, value in row.items() if key != "ordinal"})
+                    if kind in {"ranking", "top20_membership"}:
+                        self.assertEqual(original_rank if kind == "ranking" else original_items, row["payload"]["items"])
+            self.assertEqual([], target.state.query_authority_store.load_dataset_snapshots("program_flow", code))
+            recovery.assert_awaited_once()
+
+        with wire_server(target) as (target_url, _), \
+                patch.object(KiwoomRestClient, "server_now", side_effect=lambda: now[0]), \
+                patch.object(CentralRealtimeCollector, "start", new_callable=AsyncMock), \
+                patch.object(AutonomousTop20Service, "_schedule_loop", new_callable=AsyncMock), \
+                patch.object(CentralRestBroker, "request_unrecorded", new_callable=AsyncMock, return_value=flow) as recovery:
+            save_connection(self.target_connection, target_url, ARCHIVE_TOKEN)
+            asyncio.run(exercise(target_url, recovery))
+
+    def test_program_flow_freeze_partitions_a_day_and_keeps_the_original_cut(self):
+        store = SQLiteQueryStore(self.source, now_provider=lambda: CUT)
+        store.initialize()
+        self.addCleanup(store.close)
+        outbox = self.root / "cut"
+        archive = ProgramFlowArchive(store, outbox, self.target_connection, STREAM)
+        for clock in ("140000", "140001", "140002"):
+            store.save_dataset_snapshot("program_flow", "005930", f"20261026:REALTIME:{clock}", {"rows": [{"trade_time": clock}]})
+        with patch("kiwoom_monitor.central_server.program_flow_archive._MAX_ENCODED_SNAPSHOTS_BYTES", 350):
+            asyncio.run(archive.freeze_day("2026-10-26", CUT))
+        paths = sorted(outbox.glob("2026-10-26/*.batch"))
+        frozen = {path.name: path.read_bytes() for path in paths}
+        self.assertEqual(2, len(frozen))
+        self.assertEqual({"140000", "140001", "140002"}, {
+            json.loads(row)["payload"]["rows"][0]["trade_time"] for raw in frozen.values()
+            for row in ObservationArchiveBatch.parse(raw).document()["observations"].splitlines()
+        })
+        store.save_dataset_snapshot("program_flow", "005930", "20261026:REALTIME:140003", {"rows": []})
+        asyncio.run(archive.freeze_day("2026-10-26", END))
+        self.assertEqual(frozen, {path.name: path.read_bytes() for path in outbox.glob("2026-10-26/*.batch")})
+
+    def test_program_flow_inspection_keeps_only_exact_recorded_samples_and_their_provenance(self):
+        day = "2026-10-26"
+        cutoff = datetime.fromisoformat(day + "T09:01:00+09:00")
+        now = [cutoff]
+        store = SQLiteQueryStore(self.source, now_provider=lambda: now[0])
+        store.initialize()
+        self.addCleanup(store.close)
+        outbox = self.root / "cut"
+        archive = ProgramFlowArchive(store, outbox, self.target_connection, STREAM)
+
+        def save(code, clock, market="SOR", *, source="kiwoom_realtime_0w", key=None, row_market=None):
+            row = {"market": row_market or market, "trade_time": clock, "source": source,
+                   "available": True, "net_buy_quantity": -12, "net_buy_amount_million_won": None}
+            store.save_dataset_snapshot("program_flow", code, key or f"20261026:REALTIME:{clock}",
+                                        {"market": market, "rows": [row]})
+            return row
+
+        first = save("005930", "090000")
+        last = save("005930", "090100")
+        save("005930", "090010", "KRX")
+        save("005930", "090020", row_market="NXT")
+        save("005930", "090030", source="ka90008_after_close", key="20261026:RECOVERY:SOR")
+        save("005930", "090040", key="20261026:REALTIME:090041")
+        save("005930", "090200")
+        save("000660", "090045")
+        now[0] += timedelta(seconds=1)
+        save("005930", "090050")
+        asyncio.run(archive.freeze_day(day, cutoff.replace(hour=20, minute=5)))
+        [path] = (outbox / day).glob("*.batch")
+        raw = path.read_bytes()
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = main(["inspect-program-flow", "--batch", str(path), "--symbol", "005930", "--market", "SOR",
+                              "--recorded-through", "2026-10-26T00:01:00+00:00"])
+
+        self.assertEqual(0, exit_code)
+        result = json.loads(output.getvalue())
+        self.assertEqual(("inspected", "RECORDED", "UNKNOWN", "UNVERIFIED"), (result["status"], result["state"],
+                         result["coverage"], result["point_in_time_availability"]))
+        self.assertEqual(cutoff.isoformat(), result["recorded_through"])
+        self.assertEqual(archive_sha256(raw), result["source"]["content_sha256"])
+        self.assertEqual([first, last], [sample["row"] for sample in result["samples"]])
+        self.assertEqual(["2026-10-26T09:00:00+09:00", cutoff.isoformat()],
+                         [sample["effective_at"] for sample in result["samples"]])
+        self.assertEqual([cutoff.isoformat()] * 2, [sample["saved_at"] for sample in result["samples"]])
+        missing = inspect_program_flow(path, symbol="005930", market="NXT", recorded_through=cutoff)
+        self.assertEqual(("UNKNOWN", []), (missing["state"], missing["samples"]))
+        with self.assertRaisesRegex(ValueError, "KST trading date"):
+            inspect_program_flow(path, symbol="005930", market="SOR", recorded_through=cutoff + timedelta(days=1))
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            inspect_program_flow(path, symbol="005930", market="SOR", recorded_through=cutoff.replace(tzinfo=None))
+        self.assertEqual(raw, path.read_bytes())
+
+    def test_automatic_cut_includes_next_morning_repairs_and_excludes_other_dates_and_product_bars(self):
+        day = "2026-10-26"
+        now = datetime.fromisoformat("2026-10-27T07:10:00+09:00")
+        store = SQLiteQueryStore(self.source, now_provider=lambda: now)
+        store.initialize()
+        self.addCleanup(store.close)
+        ingestor = MarketDataIngestor(store, now_provider=lambda: now)
+        for code, when in (("005930", "20261026153000"), ("069500", "20261026153000"),
+                           ("000660", "20261027100000")):
+            ingestor.ingest("ka10080", {"stk_cd": code, "tic_scope": "1"}, {"stk_min_pole_chart_qry": [
+                {"open_pric": "100", "high_pric": "110", "low_pric": "90", "cur_prc": "105",
+                 "trde_qty": "1200", "cntr_tm": when},
+            ]})
+        outbox = self.root / "cut"
+        archive = ProgramFlowArchive(store, outbox, self.target_connection, STREAM)
+        asyncio.run(archive.freeze_observations(day, now, excluded_codes=frozenset({"069500"})))
+        [path] = (outbox / "observations" / day).glob("*.batch")
+        batch = ObservationArchiveBatch.parse(path.read_bytes())
+        [row] = map(json.loads, batch.document()["observations"].splitlines())
+        self.assertEqual(("minute_bar", "005930:KRX", now),
+                         (batch.kind, row["subject"], datetime.fromisoformat(row["available_at"])))
+        self.assertEqual(day, datetime.fromisoformat(row["effective_at"]).astimezone(KST).date().isoformat())
+        self.assertTrue(store.load_observation_revisions("minute_bar", "069500:KRX"))
+
     def test_actual_ingest_export_append_reopen_and_research_restore_preserve_late_correction(self):
         source_app = query_app(input_settings(self._url(self.source)))
         source = source_app.state.query_authority_store
         target_app = query_app(receiver_settings(self._url(self.target)))
         first_file, second_file = self.root / "first.batch", self.root / "later.batch"
+        # The broker's raw rank capture runs from 08:00 until 08:06 KST.
+        start, cut, end = (moment + timedelta(minutes=5) for moment in (START, CUT, END))
 
         def ingest(at, stock, raw_time):
             MarketDataIngestor(source, now_provider=lambda: at).ingest("ka00198", {"qry_tp": "5"}, {
@@ -107,15 +342,15 @@ class ObservationArchiveTests(unittest.TestCase):
         with wire_server(source_app) as (source_url, _), wire_server(target_app) as (target_url, _):
             save_connection(self.source_connection, source_url, INPUT)
             save_connection(self.target_connection, target_url, ARCHIVE_TOKEN)
-            ingest(START + timedelta(minutes=1), "005930", "075600")
-            ingest(START + timedelta(minutes=2), "000660", "075700")
+            ingest(start + timedelta(minutes=1), "005930", "080100")
+            ingest(start + timedelta(minutes=2), "000660", "080200")
             too_large = self.root / "not-published.batch"
             with patch("kiwoom_monitor.observation_archive.MAX_OBSERVATION_ARCHIVE_BYTES", 256), self.assertRaises(ObservationArchiveLimit):
-                prepare_observation_archive(self.source_connection, STREAM, START, CUT, too_large, kind="ranking", subject="5")
+                prepare_observation_archive(self.source_connection, STREAM, start, cut, too_large, kind="ranking", subject="5")
             self.assertFalse(too_large.exists())
             self.assertEqual([], list(self.root.glob("observation-export-*")))
             self.assertEqual(2, len(source.load_observation_revisions("ranking", "5")))
-            first_id = prepare_observation_archive(self.source_connection, STREAM, START, CUT, first_file, kind="ranking", subject="5")["batch_id"]
+            first_id = prepare_observation_archive(self.source_connection, STREAM, start, cut, first_file, kind="ranking", subject="5")["batch_id"]
             original = first_file.read_bytes()
             first = deliver_observation_archive(first_file, self.target_connection)["receipt"]
             self.assertEqual((1, 1, 2, 2, SQLITE_ARCHIVE_DURABILITY), (first["receipt_sequence"],
@@ -128,8 +363,8 @@ class ObservationArchiveTests(unittest.TestCase):
             self.assertEqual(first_ack, ack.read_bytes())
 
             # Correction arrives later, while its provider event time stays in the original cut.
-            ingest(CUT + timedelta(minutes=1), "035420", "075600")
-            second_id = prepare_observation_archive(self.source_connection, STREAM, CUT, END, second_file, kind="ranking", subject="5")["batch_id"]
+            ingest(cut + timedelta(minutes=1), "035420", "080100")
+            second_id = prepare_observation_archive(self.source_connection, STREAM, cut, end, second_file, kind="ranking", subject="5")["batch_id"]
             second = deliver_observation_archive(second_file, self.target_connection)["receipt"]
             self.assertNotEqual(first_id, second_id)
             self.assertEqual((2, 3, 3, 1), (second["receipt_sequence"], second["first_source_accepted_sequence"],
@@ -357,9 +592,17 @@ class ObservationArchiveTests(unittest.TestCase):
     def test_archive_grant_environment_disjoint_and_secret_free(self):
         env = {"MONITOR_SERVER_ACCESS_TOKEN": ADMIN, "MONITOR_SERVER_OBSERVATION_ARCHIVE_GRANTS_JSON":
             json.dumps([{"owner": STREAM, "token": ARCHIVE_TOKEN}])}
+        self.assertFalse(input_settings().program_flow_archive_target_file)
+        env.update(MONITOR_SERVER_PROGRAM_ARCHIVE_TARGET_FILE=str(self.target_connection),
+                   MONITOR_SERVER_PROGRAM_ARCHIVE_SOURCE_STREAM=STREAM)
         with patch.dict(os.environ, env, clear=True):
             active = CentralServerSettings.from_environment()
         self.assertEqual((ProducerGrant(STREAM, ARCHIVE_TOKEN),), active.observation_archive_grants)
+        self.assertEqual(str(self.target_connection), active.program_flow_archive_target_file)
+        self.assertEqual(STREAM, active.program_flow_archive_source_stream)
+        self.assertNotIn(str(self.target_connection), repr(active))
+        with self.assertRaises(ValueError):
+            replace(active, program_flow_archive_source_stream="")
         self.assertNotIn(ARCHIVE_TOKEN, repr(active))
         for reused in (ADMIN, QUERY, INPUT, RESULT, BODY):
             with self.subTest(reused=reused), self.assertRaises(ValueError):

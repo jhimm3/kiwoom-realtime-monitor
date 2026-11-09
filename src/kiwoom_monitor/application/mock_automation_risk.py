@@ -263,7 +263,7 @@ def _planned_leader_execution_quote(observation, *, spec, run_id, leader_config,
     context = validate_leader_position_proof(position_proof, leader_config, spec, run_id)
     if (observation.get("approved") is not True or not observation.get("source")
             or not isinstance(observation.get("payload"), Mapping)
-            or observation["payload"].get("market", "KRX") != spec.supported_venue):
+            or observation["payload"].get("market", "KRX") != "KRX"):
         raise ValueError("planned leader protection requires an approved raw 0B execution quote")
     received_at = datetime.fromisoformat(observation["received_at"])
     decided_at = datetime.fromisoformat(observation["decided_at"])
@@ -303,10 +303,32 @@ def planned_leader_root_confirmation_time(root, events):
     return at
 
 
+def acknowledged_minute_quote(spec, quote, decided_at, now):
+    at = quote.get('available_at')
+    if isinstance(at, str):
+        at = datetime.fromisoformat(at)
+    gap = spec.maximum_data_gap_seconds
+    if (not isinstance(at, datetime) or at.utcoffset() is None or decided_at.utcoffset() is None
+            or now.utcoffset() is None or gap is None or gap <= 0
+            or quote.get('durable') is not False or quote.get('market_status') != 'TRADABLE'
+            or not isinstance(quote.get('input_ref'), str) or not quote['input_ref'].startswith('collector-trade:')
+            or type(quote.get('price_won')) is not int or quote['price_won'] <= 0
+            or not 0 <= (now - at).total_seconds() <= gap
+            or not 0 <= (now - decided_at).total_seconds() <= gap or at > decided_at):
+        raise ValueError('CLOSE execution requires a fresh acknowledged 0B quote')
+    venue = quote.get('venue', 'KRX')
+    expected = {'KRX', 'NXT'} if spec.supported_venue == 'SOR' else {spec.supported_venue or 'KRX'}
+    if venue not in expected:
+        raise ValueError('execution quote does not match the selected venue')
+    return {'price_won': quote['price_won'], 'available_at': at.isoformat(),
+            'input_ref': quote['input_ref'], 'durable': False, 'market_status': 'TRADABLE',
+            **({'venue': venue} if venue != 'KRX' else {})}
+
+
 def prepare_planned_leader_protection_exit(
     spec, *, run_id, control_revision, notice, plan, observation, risk, plan_position, leader_config,
     position_proof, confirmed_root_state, confirmed_root_at, now, reservation_claimed=False,
-    selected_management_context=None,
+    selected_management_context=None, route_quote=None,
 ):
     """Freeze a candidate. The native owner must prove terminal BUY and both cuts before transport."""
     from .breakout_strategy import StrategyState
@@ -326,6 +348,14 @@ def prepare_planned_leader_protection_exit(
     price = _planned_leader_execution_quote(
         observation, spec=spec, run_id=run_id, leader_config=leader_config, position_proof=position_proof,
     )
+    if spec.supported_venue == 'NXT':
+        if route_quote is None:
+            raise ValueError('planned leader protection requires an NXT execution quote')
+        route_quote = acknowledged_minute_quote(spec, route_quote, risk.observed_at, now)
+        route_at = datetime.fromisoformat(route_quote['available_at'])
+        if route_at < max(price['available_at'], confirmed_root_at):
+            raise ValueError('planned leader protection NXT quote predates its independent cut')
+        price = {**price, 'price_won': route_quote['price_won'], 'available_at': route_at}
     if (price["available_at"] <= datetime.fromisoformat(trigger.stop_loss["available_at"])
             or price["available_at"] < confirmed_root_at
             or datetime.fromisoformat(observation["decided_at"]) > risk.observed_at):
@@ -352,6 +382,7 @@ def prepare_planned_leader_protection_exit(
                 "execution_run_id": run_id, "account_ref": spec.account_scope.account_ref,
                 "control_revision": control_revision, "notice_revision": notice["revision"],
                 "trigger_id": trigger.trigger_id, "plan": asdict(plan), "observation": dict(observation),
+                **({'route_quote': route_quote} if route_quote is not None else {}),
                 "confirmed_root_state": confirmed_root_state, "confirmed_root_at": confirmed_root_at.isoformat(),
                 "risk_snapshot_id": risk.snapshot_id, "risk_reconciliation_revision": risk.reconciliation_revision}
     body = {"run_id": run_id, "snapshot_id": content_id("protection_snapshot", snapshot), "symbol": symbol,
@@ -452,11 +483,13 @@ def gross_price_stop_reached(price, entry, stop_loss_bps):
 def validate_mock_stop_loss_proof(proof, spec, risk=None, *, stop_loss_bps=None, leader_config=None, position_proof=None,
                                   ipo_policy=None, ipo_candidate=None):
     """Bind a sticky gross-price stop to the admitted policy and native fill basis."""
+    venue_fields = {'venue'} if spec.supported_venue == 'NXT' else set()
     if isinstance(proof, Mapping) and proof.get('version') == 'ipo_structure_stop/v1':
         required = {'version', 'symbol', 'quantity', 'entry_price_won', 'price_won', 'available_at', 'input_ref',
                     'breakout_level', 'candidate_event_id', 'candidate_snapshot_id', 'spec_id', 'package_hash',
                     'execution_run_id'}
-        if (set(proof) != required or getattr(ipo_policy, 'variant', None) != 'IPO_BREAKOUT'
+        if (set(proof) != required | venue_fields or proof.get('venue', 'KRX') != ('NXT' if venue_fields else 'KRX')
+                or getattr(ipo_policy, 'variant', None) != 'IPO_BREAKOUT'
                 or (proof['spec_id'], proof['package_hash']) != (spec.spec_id, spec.candidate_package_hash)
                 or any(type(proof.get(key)) is not int or proof[key] <= 0 for key in
                        ('quantity', 'entry_price_won', 'price_won', 'breakout_level'))
@@ -510,7 +543,8 @@ def validate_mock_stop_loss_proof(proof, spec, risk=None, *, stop_loss_bps=None,
         raise ValueError("leader execution cannot use a legacy percentage stop proof")
     if (not isinstance(proof, Mapping) or set(proof) != {
             'symbol', 'quantity', 'entry_price_won', 'stop_loss_bps',
-            'price_won', 'available_at', 'input_ref'}
+            'price_won', 'available_at', 'input_ref'} | venue_fields
+            or proof.get('venue', 'KRX') != ('NXT' if venue_fields else 'KRX')
             or any(type(proof.get(k)) is not int or proof[k] <= 0
                    for k in ('quantity', 'entry_price_won', 'stop_loss_bps', 'price_won'))
             or proof['stop_loss_bps'] >= 10000
@@ -550,6 +584,10 @@ def mock_automation_stop_loss_trigger(spec, risk, *, execution_run_id, now, pric
     proof = {'symbol': symbol, 'quantity': owned[symbol], 'entry_price_won': basis[symbol],
         'stop_loss_bps': stop_loss_bps, 'price_won': price['price_won'],
         'available_at': price['available_at'].isoformat(), 'input_ref': price['input_ref']}
+    if spec.supported_venue == 'NXT':
+        if price.get('venue') != 'NXT':
+            return None
+        proof['venue'] = price['venue']
     if structure_stop:
         proof.pop('stop_loss_bps')
         proof.update(version='ipo_structure_stop/v1',

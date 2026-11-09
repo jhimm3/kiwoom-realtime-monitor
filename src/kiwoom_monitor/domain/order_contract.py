@@ -158,13 +158,16 @@ class OrderIntent:
     policy_version: str
 
     def __post_init__(self) -> None:
+        if self.environment != "mock":
+            raise ValueError("broker execution supports only the mock environment")
+        if self.venue != 'KRX' and not (self.venue in {'NXT', 'SOR'} and self.order_type is OrderType.LIMIT):
+            raise ValueError('execution requires a KRX order or an explicit NXT/SOR limit order')
+        self._validate_fields()
+
+    def _validate_fields(self) -> None:
         for field_name in ("intent_id", "run_id", "decision_id", "account_ref", "symbol", "policy_version"):
             if not str(getattr(self, field_name)).strip():
                 raise ValueError(f"{field_name} is required")
-        if self.environment != "mock":
-            raise ValueError("broker execution supports only the mock environment")
-        if self.venue != "KRX":
-            raise ValueError("Kiwoom mock investment supports KRX orders only")
         if not self.symbol.isdigit() or len(self.symbol) != 6:
             raise ValueError("symbol must be a six-digit domestic stock code")
         if self.quantity <= 0:
@@ -177,6 +180,16 @@ class OrderIntent:
         _require_aware(self.expires_at, "expires_at")
         if self.expires_at <= self.created_at:
             raise ValueError("expires_at must be later than created_at")
+
+
+@dataclass(frozen=True)
+class LocalRehearsalOrderIntent(OrderIntent):
+    """An explicit real-account route exercised only in the isolated local ledger."""
+
+    def __post_init__(self) -> None:
+        if self.environment != "real" or self.venue not in {"KRX", "NXT", "SOR"} or self.order_type is not OrderType.LIMIT:
+            raise ValueError("local rehearsal requires a real KRX, NXT or SOR limit-order route")
+        self._validate_fields()
 
 
 @dataclass(frozen=True)
@@ -198,6 +211,11 @@ class BrokerSubmission:
         if not self.broker_order_id.strip():
             raise ValueError("broker_order_id is required")
         _require_aware(self.accepted_at, "accepted_at")
+
+
+@dataclass(frozen=True, kw_only=True)
+class SorBrokerSubmission(BrokerSubmission):
+    broker_venue: str | None
 
 
 @dataclass(frozen=True)

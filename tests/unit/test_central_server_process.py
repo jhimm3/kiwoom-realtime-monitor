@@ -55,7 +55,8 @@ class LocalCentralServerProcessTests(unittest.TestCase):
                 event.return_value.name = "owned-test-event"
                 self.assertTrue(manager.start())
         command = popen.call_args.args[0]
-        expected = ["python-test", "-m", "kiwoom_monitor.central_server", "--parent-pid", str(os.getpid())]
+        expected = ["python-test", "-m", "kiwoom_monitor.central_server", "--parent-pid", str(os.getpid()),
+                    "--local-mock-automation"]
         if os.name == "nt":
             expected += ["--shutdown-event", "owned-test-event"]
         self.assertEqual(expected, command)
@@ -63,6 +64,7 @@ class LocalCentralServerProcessTests(unittest.TestCase):
         environment = options["env"]
         self.assertEqual("sqlite:///" + (Path(directory) / "monitor.sqlite3").resolve().as_posix(), environment["KIWOOM_SERVER_DATABASE_URL"])
         self.assertEqual(("secret", "127.0.0.1", "8787", "real", "app", "secret"), tuple(environment[key] for key in ("MONITOR_SERVER_ACCESS_TOKEN", "KIWOOM_SERVER_HOST", "KIWOOM_SERVER_PORT", "KIWOOM_ENVIRONMENT", "KIWOOM_APP_KEY", "KIWOOM_SECRET_KEY")))
+        self.assertEqual("0", environment["MOCK_ORDER_TRANSPORT_ENABLED"])
         self.assertEqual((subprocess.DEVNULL,) * 3, tuple(options[key] for key in ("stdin", "stdout", "stderr")))
 
     @patch("kiwoom_monitor.infrastructure.central_server_process.LocalApiConfig")

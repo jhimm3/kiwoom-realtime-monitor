@@ -57,6 +57,7 @@ def create_mock_order_routers(
             "environment": intent.environment,
             "symbol": intent.symbol,
             "venue": intent.venue,
+            **({'broker_venue': record.broker_venue} if intent.venue == 'SOR' else {}),
             "side": intent.side.value,
             "quantity": intent.quantity,
             "order_type": intent.order_type.value,

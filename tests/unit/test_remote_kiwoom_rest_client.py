@@ -291,10 +291,18 @@ class RemoteKiwoomRestClientTests(unittest.TestCase):
         self.assertEqual({"price": 90000, "first_year": 2020, "last_year": 2026, "occurred_on": "20260914", "evidence": []}, value)
 
     def test_loads_stored_stock_documents_and_market_index(self) -> None:
+        catalog_requests = []
+
         def opener(request, **_kwargs):
             if "/content/" in request.full_url:
-                payload = {"nxtEnable": "Y"} if "nxt_eligibility" in request.full_url else {"mac": "1000"}
-                return Response({"documents": [{"document": {"payload": payload}}]})
+                return Response({"documents": [{"document": {"payload": {"mac": "1000"}}}]})
+            if "/snapshots/nxt_eligibility_catalog" in request.full_url:
+                catalog_requests.append(request)
+                return Response({"snapshots": [{"payload": {
+                    "flags": {"005930": True, "000660": False},
+                    "stocks": {"005930": ["삼성전자", "KOSPI"], "000660": ["SK하이닉스", "KOSPI"],
+                               "0147B0": ["래블업", "KOSDAQ"]},
+                }}]})
             return Response({"snapshots": [{"payload": {"minutes": [], "daily": []}}]})
 
         client = RemoteKiwoomRestClient(
@@ -302,6 +310,12 @@ class RemoteKiwoomRestClientTests(unittest.TestCase):
         )
         self.assertEqual("1000", client.load_stored_fundamentals("005930")["mac"])
         self.assertEqual("Y", client.load_stored_nxt_eligibility("005930")["nxtEnable"])
+        self.assertEqual("N", client.load_stored_nxt_eligibility("000660")["nxtEnable"])
+        self.assertEqual({}, client.load_stored_nxt_eligibility("035420"))
+        self.assertEqual(("래블업", "KOSDAQ"),
+                         client.load_stored_premarket_catalog(client.server_now().date().isoformat())["stocks"]["0147B0"])
+        self.assertEqual(1, len(catalog_requests))
+        self.assertEqual("GET", catalog_requests[0].get_method())
         self.assertEqual([], client.load_stored_market_index("kospi", "20260914")["minutes"])
 
     def test_account_query_uses_v2_context_and_server_cursor(self) -> None:

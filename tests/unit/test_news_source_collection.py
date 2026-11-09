@@ -10,8 +10,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from kiwoom_monitor.domain.time_basis import KST
+from kiwoom_monitor.domain.time_basis import KST, kst_now
 from kiwoom_monitor.application.news_analysis import NewsAssessment
+from kiwoom_monitor.application.stock_enrichment import NXT_CATALOG_KIND
 from kiwoom_monitor.central_server import news_sources
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.news_jobs import NewsJobRunner
@@ -55,6 +56,10 @@ class _PageClient:
 
 
 class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        trading_cut = kst_now().replace(hour=10, minute=5, second=0, microsecond=0)
+        self.enterContext(patch.object(news_sources, "kst_now", return_value=trading_cut))
+
     def _store(self, directory: str, *, now_provider=None) -> SQLiteQueryStore:
         store = SQLiteQueryStore(Path(directory) / "central.sqlite3", now_provider=now_provider)
         store.initialize()
@@ -64,7 +69,7 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
         return store
 
     async def test_service_start_collects_without_desktop_request(self) -> None:
-        fixed = datetime(2020, 1, 3, 0, 5)  # Existing broker-compatible naive KST.
+        fixed = datetime(2020, 1, 3, 7, 5)  # Existing broker-compatible naive KST.
         epoch = fixed.replace(tzinfo=KST).timestamp()
         with tempfile.TemporaryDirectory() as directory:
             store = self._store(directory, now_provider=lambda: fixed)
@@ -341,8 +346,11 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
             store.close()
 
     def test_confirmed_stock_news_query_excludes_unresolved_ambiguous_and_other_stock_and_uses_latest_revision(self) -> None:
+        from kiwoom_monitor.application.news_material import received_strategy_material
+
         with tempfile.TemporaryDirectory() as directory:
-            store = self._store(directory)
+            clock = [datetime(2026, 9, 12, 10, 1, tzinfo=KST)]
+            store = self._store(directory, now_provider=lambda: clock[0])
 
             def save(run_id: str, identity: str, title: str, target: dict) -> None:
                 store.save_news_source_page({
@@ -361,6 +369,8 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
             confirmed = {"stock_code": "005930", "stock_name": "삼성전자",
                          "relation_status": "confirmed", "rule_version": "exact-v1"}
             save("old", "same", "삼성전자 이전 판본", confirmed)
+            previous = clock[0]
+            clock[0] += timedelta(minutes=1)
             save("new", "same", "삼성전자 최신 판본", confirmed)
             save("unresolved", "unresolved", "시장 뉴스", {
                 "stock_code": None, "stock_name": None,
@@ -377,6 +387,13 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
 
             samsung = store.load_confirmed_news_articles("005930")
             hynix = store.load_confirmed_news_articles("000660")
+            for cut, title in ((previous, "삼성전자 이전 판본"), (clock[0], "삼성전자 최신 판본")):
+                official, context = received_strategy_material(
+                    "005930", cut, **store.load_strategy_material_inputs("005930", cut),
+                )
+                self.assertEqual((), official.chains)
+                self.assertEqual([], context["events"])
+                self.assertEqual([title], [row["title"] for row in context["recent_reports"]])
             store.close()
 
         self.assertEqual(["삼성전자 최신 판본"], [value["title"] for value in samsung])
@@ -426,6 +443,27 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(1, len(calls))
         self.assertEqual(1, diagnostics["summary"]["target_status"]["unresolved"])
+
+    async def test_query_set_reuses_premarket_names_on_empty_kind_catalog(self) -> None:
+        now = datetime.fromisoformat("2026-09-14T08:00:00+09:00")
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "central.sqlite3", now_provider=lambda: now)
+            store.initialize()
+            day = now.date().isoformat()
+            store.save_dataset_snapshot(NXT_CATALOG_KIND, day, day, {
+                "flags": {}, "stocks": {"005930": ["삼성전자", "KOSPI"], "0147B0": ["래블업", "KOSDAQ"]},
+            })
+            item = _item("catalog-premarket", "래블업 공급계약 체결", description="래블업이 공급계약을 맺었다")
+            page = NaverNewsPage((item,), 1, 1, 1)
+            with patch.object(news_sources, "fetch_krx_stock_catalog") as download:
+                await QuerySetNewsCollector(
+                    _PageClient({("증권", 1): page}), store, queries=("증권",),
+                    catalog_loader=download, now_provider=lambda: now,
+                ).run_once()
+            download.assert_not_called()
+            self.assertEqual([], store.load_documents("stock_catalog", "krx", 10))
+            self.assertEqual(1, store.load_news_source_diagnostics()["summary"]["target_status"]["confirmed"])
+            store.close()
 
     async def test_catalog_loader_with_no_valid_code_name_is_not_saved_as_success(self) -> None:
         calls = []
@@ -591,7 +629,7 @@ class QuerySetNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(diagnostics["runs"][0]["document"]["missing_gap"])
 
     async def test_auth_or_rate_failure_does_not_stop_other_query(self) -> None:
-        fixed = datetime(2020, 1, 3, 0, 5, tzinfo=KST)
+        fixed = datetime(2020, 1, 3, 7, 5, tzinfo=KST)
         with tempfile.TemporaryDirectory() as directory:
             store = self._store(directory, now_provider=lambda: fixed)
             client = _PageClient({

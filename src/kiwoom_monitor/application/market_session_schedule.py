@@ -13,6 +13,7 @@ from kiwoom_monitor.domain.market_data_contract import DataCompleteness, Listing
 
 
 KST = ZoneInfo("Asia/Seoul")
+KRX_CALENDAR_AFTER_CLOSE = time(20, 5)
 # KRX notices:
 # 2021 https://kind.krx.co.kr/external/2021/11/04/000107/20211104000121/99303.htm
 # 2022 CREON 005930 raw 5m: 10:05..16:20 plus 16:30; KRX delayed-day notice
@@ -193,6 +194,16 @@ def decode_strategy_references(document) -> tuple[tuple[TradingDayEvidence, ...]
     return tuple(calendar), listings
 
 
+def listing_evidence_document(row: ListingEvidence) -> dict:
+    return {
+        "symbol": row.symbol, "listing_date": row.listing_date.isoformat() if row.listing_date else None,
+        "listing_type": row.listing_type.value,
+        "available_at": row.available_at.isoformat() if row.available_at is not None else None,
+        "source": row.source, "revision": row.revision, "evidence_id": row.evidence_id,
+        "completeness": row.completeness.value,
+    }
+
+
 def _latest_calendar_revision(rows: list[TradingDayEvidence]) -> TradingDayEvidence | None:
     if not rows:
         return None
@@ -233,6 +244,16 @@ def next_trading_day(
         if revision.sessions:
             return revision
     return None
+
+
+def krx_calendar_valid_through(checked_at: datetime, calendar: Iterable[TradingDayEvidence]) -> date:
+    """Carry an after-close snapshot to its next evidenced trading day."""
+    checked = checked_at.astimezone(KST)
+    if checked.time() >= KRX_CALENDAR_AFTER_CLOSE:
+        following = next_trading_day(checked.date(), venue="KRX", as_of=checked, evidence=calendar)
+        if following is not None:
+            return following.trading_date
+    return checked.date()
 
 
 @dataclass(frozen=True)
@@ -383,6 +404,24 @@ def mock_order_entry_decision(
             else KRX_REGULAR_RESEARCH_PROFILE
         ),
     )
+
+
+def automation_order_entry_decision(at: datetime, *, venue: str) -> MockOrderEntryDecision:
+    """Keep the KRX strategy clock separate from the explicit order destination."""
+    signal_session = mock_order_entry_decision(at, environment='mock', venue='KRX', order_type='LIMIT')
+    if venue == 'SOR':
+        return replace(signal_session, venue='SOR', allowed=(signal_session.allowed
+                       and signal_session.session is MarketSession.KRX_REGULAR))
+    if venue != 'NXT':
+        return (signal_session if venue == 'KRX' else
+                mock_order_entry_decision(at, environment='mock', venue=venue, order_type='LIMIT'))
+    window = session_window_at(at, venue='NXT')
+    # A clock window is necessary but insufficient. The local transport also
+    # requires fresh, symbol-specific eligibility and continuous-session evidence.
+    allowed = (signal_session.session is MarketSession.KRX_REGULAR and signal_session.allowed
+               and window.session is MarketSession.NXT_MAIN_MARKET)
+    return replace(signal_session, allowed=allowed, venue='NXT', session=window.session,
+                   phase=window.phase, reason='' if allowed else 'nxt_automation_session_unavailable')
 
 
 def full_day_close_at(trading_date: date, *, venue: str) -> datetime | None:

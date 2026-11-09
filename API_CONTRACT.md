@@ -2,7 +2,7 @@
 
 **개인 서버 TR 연결 선택(2026-11-07).** 관리자 권한의 `GET /api/v1/settings/tr-connections`는 저장 문서 `settings`, `applied_revision`, `status`, `effective_mode`, `execution_ready`와 별도 기존 `realtime_market`을 반환한다. `PUT`은 `mode`(`integrated`/`separated`), `execution_target`, `data_target`, `expected_revision`만 받는다. 대상은 `scope`(broker·실전/모의 environment·검증된 account_ref), `credential_profile_id`, `binding_revision`이며 키 값은 넣지 않는다. 통합은 매매 기준 계좌의 기존 REST 브로커와 한도를 공유한다. 분리는 시장조회만 지정 데이터 브로커로 보낸다. 동일 검증 계좌의 별칭은 기존 한도를 공유한다. 이 설정은 기존 매매 계좌 선택·원주문·잔고/체결·주문 권한과 공통 0B 수신을 바꾸지 않는다. 저장 전에는 기존 연결을 유지하며, 저장 응답이 유실되거나 연결이 교체 중이면 현행 상태를 다시 확인한다. 준비되지 않은 지정 연결에서 예전 연결로 몰래 전환하지 않는다. 기존 단일 키 관리형 로컬 모드는 설정 대상이 아니다. [사용 범위와 검증](docs/architecture/canonical-offline-followup-20261107.md#offline-tr-routing).
 
-**선택 관측 자료 보관(2026-11-07).** 명시 stream별 보관 grant를 설정한 수신기만 `/api/v1/archive/observation-batches`를 제공한다. `POST ?sha256=…`는 stream과 고정 cut을 포함한 한 종류의 UTF-8 배치(ranking·minute_bar·daily_bar·top20_membership)를 총 32 MiB까지 받는다. `GET /{batch_id}/receipt`는 최초 저장 영수증, `GET /{batch_id}`는 영수증과 자료를 반환한다. stream 전용 bearer는 일반 관리자/조회/연구/주문 인증과 별개다. 최초 내구 저장에만 순번을 배정하고 같은 바이트 재요청에는 같은 영수증을 반환한다. 다른 내용의 동일 ID와 권한 범위 불일치는 거절한다. 수신 순번은 원천 순번이 아니며 저장 수락은 실제 이관·매매 권한을 뜻하지 않는다. [보관 계약](docs/architecture/canonical-offline-followup-20261107.md#offline-observation-archive).
+**선택 관측 자료 보관(2026-11-07).** 명시 stream별 보관 grant를 설정한 수신기만 `/api/v1/archive/observation-batches`를 제공한다. `POST ?sha256=…`는 stream과 고정 cut을 포함한 한 종류의 UTF-8 배치(ranking·minute_bar·daily_bar·top20_membership·program_flow)를 총 32 MiB까지 받는다. `GET /{batch_id}/receipt`는 최초 저장 영수증, `GET /{batch_id}`는 영수증과 자료를 반환한다. stream 전용 bearer는 일반 관리자/조회/연구/주문 인증과 별개다. 최초 내구 저장에만 순번을 배정하고 같은 바이트 재요청에는 같은 영수증을 반환한다. 다른 내용의 동일 ID와 권한 범위 불일치는 거절한다. 수신 순번은 원천 순번이 아니며 저장 수락은 실제 이관·매매 권한을 뜻하지 않는다. `program_flow`의 영수증 개수와 hash는 스냅샷에 대응하며, 원천 accepted sequence 범위는 `null`이다. [보관 계약](docs/architecture/canonical-offline-followup-20261107.md#offline-observation-archive).
 
 **S12-05 명시 계좌 구성·멤버 조회(2026-11-06).** 기존 계좌 구성의 `execution_order_spec_ids`는 선택 필드이며 있으면 모든 `member_spec_ids`의 정확한 순열이다. 기준 명세는 기존 첫 멤버이고 실행 순서와 다르다. 필드 없는 저장 문서·ID는 유지하지만 공개 병행 기동은 명시 순서를 요구한다. 기존 START 요청의 선택 `account_selection_id`로 저장된 구성을 사용하며 누락한 단일 명세 요청은 기존 형식을 유지한다. 병행 상태는 `mock_automation_account_runner_status/v1`의 구성 ID·기준 명세·명시 순서와 `members` 목록을 반환한다. 제어 응답의 `control.account_selection.selection_id`가 실제 적용 구성이다. 저장 구성·화면 선택·현재 적용을 구분한다.
 
@@ -11,6 +11,10 @@
 명시 교체는 `POST /api/v1/mock-automation/replace-selection`에서 저장된 v2 구성과 현재 제어·설정·키 판본을 대조한다. `entry_spec_ids`만 새 진입할 수 있고 `retained_admission_refs`의 기존 멤버는 원래 입장·계획·늦은 체결의 관리를 계속한다. 기준 명세·실행 run·Runtime·단일 lease는 유지한다. 교체가 기존 STOPPED나 명시 재개 필요 상태를 해제하지 않는다. 이전 단일 명세의 원문·해시·체결은 멤버 문서로 재작성하지 않으며 내부의 검증된 귀속 view로 소비한다. 명세 목록의 입장 참조는 `include_admission_refs=true`를 명시한 조회에만 추가한다. 기존 조회 기본 형식은 유지한다.
 
 동결 MICRO 연구는 `POST /api/v1/research/micro-inputs?evidence_sha256=...`의 정확한 `scenario`·`policy` 문서를 사용한다. 출처·판본·가용 컷과 결측을 결과에 남기며 실시간 GET의 확인되지 않은 거래 가능 상태·교차 순서·VI 해제 체결가를 확정으로 바꾸지 않는다. DD 동결 실행 근거도 원주가 보호와 체결별 비용 출처를 보존한다. 연구 결과는 주문 승인이나 운영 실증이 아니다.
+
+동결 MICRO의 `decision_at`이 있으면 그 KST 날짜의 `historical_kind_halt`를 반환한다. KRX는 해당 종목·날짜의 기존 장후 완료 문서를 로컬 DB에서 한 건 읽으며, 요청의 `scenario.kind_halt_receipt`가 있으면 동결 근거를 사용한다. `CONFIRMED_FULL_DAY_HALT`, `UNKNOWN`, `CONFLICT`와 사후 근거의 `available_at`을 구분한다. 저장 조회로 붙인 근거는 `basis=local_archive`이며 요청 SHA의 범위 밖이다. 재현하려면 결과의 `receipt`를 `scenario.kind_halt_receipt`에 포함해 새 SHA를 계산한다. 자료는 사후 설명에만 사용한다.
+
+동결 KRX MICRO 입력은 `decision_at`과 `historical_vi`(`micro-historical-vi/v1`)를 선택해 넣을 수 있다. 응답은 해당 컷까지 가용한 발동·해제 근거와 자료 판본을 `historical_vi`로 반환한다. 기존 순서의 발동 근거를 우선하고, 보관본의 발동 근거는 별도 해제 이벤트와 유일하게 일치할 때 사용한다. [과거 VI 동결 입력 준비](docs/RESEARCH_REQUEST_FORMAT.md#micro-과거-vi-입력).
 
 선별 주문의 `POST /api/v1/mock-automation/selected-order-evidence/{operation_id}/assessment`는 저장 packet digest·원본 owner 증명·현재 대상 계좌와 키 판본·일자별 물리 주문/상세 체결을 대조한다. 자료 부족이나 서로 검증할 수 없는 identity 영역은 `UNKNOWN`이다. 별도 `/bootstrap`은 완전한 v4 단일 주문 또는 v5 단일 계획 전체 원장·정책 자료와 현재 owner 증명을 요구한다. v5는 완료된 최초 매수·추가/부분 청산을 포함한 정확한 원주문/이벤트 집합을 설치한다. 원래 사건/물리 체결 ID와 대상 커서 좌표는 분리한다. 설치 자체는 `management_ready=false`, `order_authority=false`이며 요청자의 확인 여부로 실행 권한을 만들지 않는다.
 
@@ -741,6 +745,9 @@ R3f 당시 실전 설정 변경은 503 PROFILE_RUNTIME_NOT_READY, mock owner 없
 
 `runtime_credentials_v1` capability는 공통 API가 존재한다는 뜻이다. 아래 GET의
 `providers[].supported`와 해당 `profiles[].supported`가 참인 경우만 실행 중 변경할 수 있다.
+`local_mock_automation_v1`은 데스크톱 소유 로컬 서버의 모의계좌·자동운용 지원이다.
+같은 PC에서 접속한 loopback 요청과 기존 bearer 토큰으로만 `kiwoom_mock` 계좌 설정을 받는다.
+개인 서버의 자격증명 쓰기는 기존 HTTPS 조건을 사용한다.
 R3e는 vault/HMAC registry가 있는 서버의 모의계좌 owner를 연결하며 R5a NAVER 지원은 위를 따른다. 미연결 공급자는
 `503 PROVIDER_RUNTIME_NOT_READY`, 시세 담당 main mock profile은 `503 PROFILE_RUNTIME_NOT_READY`다.
 R3f의 모의 `disable=true`는 저장된 검증 계좌/run을 대상으로 기존 prepare/apply를 사용한다.
@@ -835,6 +842,8 @@ NAS 통신이 페이지 도중 끊기면 검증된 직접 API binding이 같은 
 
 허용 API와 경로는 `central_server/rest_broker.py`의 `READ_ONLY_ENDPOINTS`가 현재 구현 원본이다. 주요 조회는 `ka00198`, `ka10016`, `ka10001`, `ka10100`, `ka10054`, `ka10080`, `ka10081`, `ka10083`, `ka10094`, `ka10045`, `ka90008`, `ka20005`, `ka20006`, `kt00007`, `kt00015`다. `ka10054`는 VI 시작·재연결 누락 보완용 저우선순위 조회다. 주문 API는 허용하지 않는다. `cont_yn=Y`에는 `next_key`가 필수다.
 
+일반 `ka90008` 조회는 응답을 반환한다. 날짜별 `program_flow` 보완본은 TOP20 장후 작업이 해당 거래일을 확인한 뒤 게시한다. 행에는 시각·시장·순매수 금액과 수량의 누적 및 증감, 출처를 담는다. 기존 `0W` 및 예전 키움 원본 행도 계속 조회할 수 있다.
+
 2026-09-13 감사에서 같은 allowlist의 `ka00001`이 공개 v1 route에서도 원문 응답으로 전달될 수 있음을 확인했다. 위 신원 대조 구현 시 공개 전달만 명시 거절하고 내부 broker의 `ka00001`/limiter는 유지한다. 이는 해당 민감 TR의 호환 정책 변경이며 기존 시세 요청/응답 형태는 유지한다. 현재 코드에서 이미 차단된 것으로 해석하지 않는다.
 
 클라이언트 의존: `RemoteKiwoomRestClient`는 `payload/has_next/next_key`를 직접 읽으며, 중앙 접속 실패와 정상 HTTP API 오류를 구분한다. `archive_hit`는 완료 coverage가 있는 중앙 분봉·일봉을 재사용했음을 나타내는 선택 필드다. 필드 제거·이름 변경은 스키마 버전 상승 없이 금지한다.
@@ -905,16 +914,18 @@ Kiwoom TR 또는 주문을 만들지 않는다. capability는 `execution_event_r
 | `GET /api/v1/market/daily-bars` | `code`, 선택 `market`, `limit` 1~5000 | 식별자 + `bars[]` |
 | `GET /api/v1/market/coverage` | `kind`, `subject`, ISO `start/end`, 선택 `available_by`, 고정주기 자료만 `expected_seconds` | 상태·관측 수·가용 수·결측 구간·부재 의미 |
 | `GET /api/v1/market/external-bars` | `instrument`, `timeframe=5m/1d`, `limit` 1~10000 | 공급원·계약코드가 포함된 `bars[]` |
-| `GET /api/v1/market/snapshots/{kind}` | 선택 `subject`, `limit` 1~5000; 최신 TOP20 화면 조회만 `kind=top20_membership&limit=1&prefer_live=true` | `kind`, `subject`, `snapshots[]`; live TOP20에는 `persistence_state=pending|persisted` 포함 |
+| `GET /api/v1/market/snapshots/{kind}` | 선택 `subject`, `limit` 1~5000. 최신 TOP20 화면 조회는 `kind=top20_membership&limit=1&prefer_live=true` | `kind`, `subject`, `snapshots[]`. live TOP20의 `persistence_state`는 `pending`, `persisted` 또는 KST 20:00~다음 날 08:00의 화면 전용 `memory_only`다. 일반 조회는 저장 이력을 반환한다. |
 | `GET /api/v1/market/top20-statistics` | `start_date/end_date=YYYY-MM-DD`, 최대 367일, 선택 `basis=realtime/display` (기본 realtime) | NAS TOP20 `hourly[]`, 정규장 일별 `comparisons[]`; display는 품질·coverage·계산 기준 포함 |
 | `GET /api/v1/market/top20-series` | `trading_date=YYYY-MM-DD`, 선택 `basis=display/realtime` (기본 display) | 08:00~19:59의 720분 `rows[]`, basis·coverage·generation·available_at; 미확인 값은 null |
 | `GET /api/v1/research/observations` | offset 포함 ISO `start/end`, `kinds=ranking,top20_membership,minute_bar` 중 하나 이상, 선택 `subject`, `watermark`, `cursor`, `limit` 1~1000 | 고정 `manifest/watermark`, 순서가 붙은 `observations[]`, `next_cursor` |
 
-스냅샷 `kind`는 `ranking`, `top20_membership`, `top20_index`, `market_state`, `investor_flow`, `program_flow`, `new_high`, `stock_fundamentals`, `nxt_eligibility`를 허용한다. `stock_fundamentals`와 `nxt_eligibility`는 시점 이력과 별도로 범용 콘텐츠의 `stock_fundamentals`, `stock_nxt_eligibility` 컬렉션에서 종목별 최신값도 조회할 수 있다. 봉의 중앙 저장 단위는 거래대금 백만원(`trade_value_million_won`)이다.
+스냅샷 `kind`는 `ranking`, `top20_membership`, `top20_index`, `market_state`, `investor_flow`, `program_flow`, `new_high`, `stock_fundamentals`, `nxt_eligibility`, `nxt_eligibility_catalog`, `market_index_chart`를 허용한다. `stock_fundamentals`와 `nxt_eligibility`는 시점 이력과 별도로 범용 콘텐츠의 `stock_fundamentals`, `stock_nxt_eligibility` 컬렉션에서 종목별 최신값도 조회할 수 있다. 자동 NXT 대상 판정은 `nxt_eligibility_catalog`에 KST 날짜 `subject`와 `limit=1`을 지정하고 `payload.flags`의 종목코드별 `true` 또는 `false`를 읽는다. 날짜에 대응하는 목록이나 코드가 없으면 미확인이다. 봉의 중앙 저장 단위는 거래대금 백만원(`trade_value_million_won`)이다.
+
+장전 기본 종목 목록은 같은 `nxt_eligibility_catalog` 응답의 `payload.stocks`에 `{종목코드: [종목명, 시장]}`으로 제공한다. `시장`은 `KOSPI` 또는 `KOSDAQ`이며, `flags`에 없는 종목도 `stocks`에 있을 수 있다. 이전의 `flags` 전용 응답은 NXT 조회에 사용할 수 있으며 기본 목록 갱신은 `stocks`가 있는 정상 응답에서 수행한다.
 
 `prefer_live=true`는 최신 `top20_membership` 한 건에만 적용된다. 목표 회차와 일치하고 종목코드·종목명이 채워진 20행 전체를 검증한 뒤 PostgreSQL 저장과 동시에 공개하는 것이 아니라 저장 전에 메모리 projection으로 반환한다. 부분 응답과 이전 회차 응답은 live 결과가 될 수 없다. live projection이 없거나 서버가 재시작된 때는 같은 요청도 DB 저장본으로 되돌아간다. 연구·과거 조회는 이 옵션을 사용하지 않는다.
 
-검증된 live projection을 게시할 때 동일한 메모리 종목 목록으로 KRX 0B 구독 요청도 즉시 갱신한다. `top20_membership`·당일 편입 원장·TOP20 지수의 DB 저장 완료를 기다리지 않는다. 구독 요청과 실제 수신 준비는 다르며, `subscription_ready`는 WebSocket `REG` 승인 뒤에만 공개한다.
+검증된 live projection은 순위 원행을 그대로 반환한다. 수집기가 연결된 `ranking`·`top20_membership`의 `limit=1` 응답에는 후속 조회 가능한 원행 코드가 `stock_enrichment_codes`로 함께 온다. 초기 상품 분류가 준비되지 않으면 이 목록은 비어 있을 수 있다. KRX 0B·0W 구독은 후속 조회 가능한 종목만 갱신하며 `top20_membership`·당일 편입 원장·TOP20 지수의 DB 저장 완료를 기다리지 않는다. 실제 `subscription_ready`는 WebSocket `REG` 승인 뒤에 공개한다.
 
 NAS 연결 중 TOP20 차트는 `top20_index` 중앙 스냅샷을 읽고, 통계는 서버의 날짜별 저장 집계 `top20_statistics_day`를 합쳐 읽는다. 과거일에 집계가 없으면 처음 한 번 계산해 저장하고, 원본 TOP20·시장 일봉이 보완되면 해당 날짜 집계를 무효화한다. 당일은 원본의 새 분을 반영해 조회한다. PC 직접 연결은 앱 실행 중에만 TOP20 자료를 자동 수집하며 로컬 `monitor.sqlite3`의 날짜별 집계를 재사용한다. 0원 TOP20 행은 관측 표본과 일별 비교에서 제외한다. 정규장 TOP20 합계는 09:00부터 15:30 종가 단일가 체결분까지 포함한다. 과거 전체시장 분모는 `ka20006` 일봉의 코스피·코스닥 거래대금을 사용하므로 장중 `0J/0U` 최종 수신 전에 끝난 값으로 과거 통계를 고정하지 않는다.
 
@@ -991,6 +1002,8 @@ capability `mock_automation_runtime_v1`이 참인 서버는 저장된 READY 운�
 flat 계좌를 수동 bundle에서 불변 자동 run bundle로 교체하고 admission·최신 broker 대사를 완료한 뒤
 runner를 시작한다. 중간 실패는 자동 bundle의 신규 주문을 닫은 상태로 유지한다.
 
+일반 자동운용은 저장된 READY 명세의 `supported_venue`를 사용한다. 네 전략의 새 명세 화면은 `SOR`를 기본으로 제시하며 `KRX`·`NXT` 직접 지정을 선택할 수 있다. `SOR`·`NXT`는 가짜 전송을 명시한 로컬 검증에서 입장한다. 키움 모의 연결에서는 해당 명세의 시작이 `SOR_AUTOMATION_REQUIRES_LOCAL_FAKE_BROKER` 또는 `NXT_AUTOMATION_REQUIRES_LOCAL_FAKE_BROKER`로 거절된다. SOR 주문 조회는 요청 `venue`와 별도로 `broker_venue`를 반환하며 미확인 값은 `null`이다. 정정과 취소에는 확인된 실제 거래소와 원주문번호를 사용한다. [SOR 설정과 복구](docs/architecture/app-target-20261023.md#native-sor-order-routing).
+
 | Method / path | 의미 |
 | --- | --- |
 | `GET /api/v1/mock-automation/accounts/{account_ref}` | `credential_profile_id`의 control·runtime·runner·복원 오류 상태 조회 |
@@ -999,6 +1012,8 @@ runner를 시작한다. 중간 실패는 자동 bundle의 신규 주문을 닫�
 | `POST /api/v1/mock-automation/resume` | 중지 뒤 새 broker 대사를 기록하고 같은 revision을 CAS로 재개 |
 
 상태 조회의 `runner.latency`는 선택적 읽기 전용 진단 값이다. 최근 poll의 전체·관측 DB 조회·관측당 최대 처리 시간(ms), 처리한 관측/분봉 수, 분봉 `available_at`부터 처리 완료까지의 마지막·최대 경과 시간(ms), 시각 누락·미래 분봉 수를 포함한다. 주문 gate나 checkpoint 근거로 사용하지 않으며 NAS 프로세스가 재시작되면 초기화된다. 분봉이 없는 poll에서도 마지막 분봉 시각과 경과 시간은 유지되므로 화면에 처리 시각을 함께 표시한다.
+
+`held_close_material`은 현재 종가베팅 보유 계획의 익일 판단 컷과 진입 컷에서 수락된 공식 공시 판본을 보여 준다. 상태 조회 시점에 읽으며 보유 계획의 주문 근거와 분리한다. 자료 조회 실패는 해당 행의 `UNAVAILABLE`로 표시한다.
 
 중지·재개 요청은 account/profile/spec, 현재 `expected_control_revision`, 비어 있지 않은 `reason`을
 포함한다. 재개는 재시작 뒤 수동 bundle에서도 안전하게 자동 bundle을 다시 만들 수 있도록 현재
@@ -1121,15 +1136,35 @@ R3c 로컬 소스의 `/health.mock_account_available`은 실제 모의 bundle �
 
 `GET /api/v1/research/candidates?after_sequence=0&limit=100`은 인증된 읽기 전용 API다. 응답은 `high_watermark`, 불변 `events[]`, `next_cursor`, `has_more`, 생성기의 `quality`를 반환한다. event에는 서버 `accepted_sequence`, `event_id`, 종목, 감지·만료 시각, 판단 기준가와 입력 근거가 있다. `status=ACTIVE/EXPIRED`는 조회 시각의 표시값이며 원장을 수정하지 않는다. 생성 기능이 꺼져 있어도 HTTP 200과 `quality.status=DISABLED`를 반환한다. 앱의 Shadow 창에서 감지 여부와 조건을 저장하면 같은 서버 실행 중 즉시 이 상태가 바뀐다. 이 경로는 주문이나 체결을 만들지 않는다.
 
-`GET /api/v1/research/micro-inputs`는 관리자 인증으로 단일 종목의 MICRO 입력을 확인한다. `symbol`은 영문 또는 숫자 6자, `venue`는 `KRX` 또는 `NXT`, `variant`는 `VI_GAP_UP`, `VI_FLAT_DOWN_RISE`, `VI_DOWNSIDE_REBOUND`, `BOOK_SCALP` 중 하나다. `lookback_seconds`는 기본 20초·범위 1~60초, `vi_limit`은 기본 100건·범위 1~1,000건이다. 응답 `micro-native-shadow-input/v1`은 판단 시각, 실제 관측 `trade`·`book`·`vi`, `missing_inputs`, `status`를 제공한다. 확인된 KRX 거래일의 VI 관측만 결합하고 NXT 거래일은 별도 근거가 없으면 미확인으로 둔다. `BOOK_SCALP`의 `vi`는 `null`이다. 이 조회에는 `candidate=null`과 `order_authorized=false`가 반환된다.
+`GET /api/v1/research/micro-inputs`는 관리자 인증으로 단일 종목의 MICRO 입력을 확인한다. `symbol`은 영문 또는 숫자 6자, `venue`는 `KRX` 또는 `NXT`, `variant`는 `VI_GAP_UP`, `VI_FLAT_DOWN_RISE`, `VI_DOWNSIDE_REBOUND`, `BOOK_SCALP` 중 하나다. `lookback_seconds`는 기본 20초·범위 1~60초, `vi_limit`은 기본 100건·범위 1~1,000건이다. 응답 `micro-native-shadow-input/v2`는 판단 시각, `trade`·`book`·`vi` 관측, `book_trade_clock_order`, `missing_inputs`, `status`를 제공한다. 확인된 KRX 거래일의 같은 거래소 VI만 결합한다. 통합 채널과 NXT의 VI를 KRX로 귀속하지 않는다. NXT 거래일은 별도 근거가 없으면 미확인으로 둔다. `BOOK_SCALP`의 `vi`는 `null`이다. 이 조회에는 `candidate=null`과 `order_authorized=false`가 반환된다.
 
-중앙 수집기의 선택 설정 `KIWOOM_MICRO_BOOK_CODES`에 쉼표로 종목을 지정하면 기존 구독 대상과 겹치는 종목의 KRX 0D를 같은 연결에서 받는다. 기본은 빈 목록이다. 승인된 종목당 최신 호가 한 건을 메모리에 두고, 조회 범위 안의 수집기 가용 시각·호가 원문 시각·가격·수량·예상 체결 필드를 제공한다. 유효한 가격·수량 쌍이 매수·매도 양쪽에 있으면 `book.state=OBSERVED`, 한쪽 또는 양쪽이 비어 있으면 `PARTIAL`, 범위 내 수신이 없거나 NXT 요청이면 `UNKNOWN`이다. `level_counts`는 관측한 쌍만 센다. 구독 해제·연결 종료·수집 단절은 해당 메모리의 관측을 폐기한다. 0D 승인 거절이나 승인 대기 시간 초과 후에는 수집기가 기존 재연결 절차로 공통 구독을 복구한다. 해당 수집기 수명 동안 0D 요청을 보류하고 `book_registration_unavailable`로 표시한다. 0B·0D·VI 교차 순서, 종목 거래 가능 상태, VI 해제 체결가는 별도 근거가 필요하다.
+`market_state_evidence`는 모든 MICRO 종류에서 `market_operation_0s`의 마지막 KRX 장운영 관측과 시각, `vi_1h`의 같은 종목·거래소에서 마지막으로 확인된 VI 주기 상태를 분리해 반환한다. `kind_halt_resume`은 같은 KRX 종목의 공식 원문 수락이 확인되고 정지 시작·해제 시각이 모두 명시된 경우 `SCHEDULED`·`HALTED`·`RESUME_TIME_REACHED`를 반환한다. 원문 미수락·범위 불명·상충은 `UNKNOWN`이다. 같은 초에서 수신 기록 시각이 다르면 `book_trade_clock_order.application_receipt_order`에 앱 기록의 순서를 별도로 제공한다. 거래소 순서와 종목별 현재 거래 가능 상태는 `missing_inputs`에 남는다. 장후 분봉 보완의 종일 거래정지 완료 근거는 해당 과거 거래일에만 적용한다.
 
-`POST /api/v1/research/daily-decline-setup`은 관리자 인증으로 `dd-shadow-setup-evidence/v1` JSON 원문과 쿼리의 `evidence_sha256`을 받는다. JSON에는 `version`, `policy`, `symbol`, `venue`(`KRX`), `signal_day`, `strategy_references`, `basis`, `benchmark`, 선택 `catalyst`를 담는다. 응답 `dd-shadow-setup-result/v1`은 보정된 현재 컷의 `setup`, 최대 5,000개 판본에서 확인한 원본·기타 수와 제한 도달 여부를 제공한다. 호출자 근거를 `caller_supplied`로 표시하고 입력이 부족하면 해당 셋업 상태를 `UNKNOWN`으로 반환한다. 후보 저장이나 주문 권한은 없다.
+VI 관측은 기존 일반 자동매매와 같은 원본 `1h` 해석을 쓴다. `vi.latest_episode`는 가장 최근 발동 시각에 속하는 발동·해제의 확인된 원본 참조를 제공한다. 같은 종목의 이전 발동이 해제됐어도 그 해제를 새 발동에 붙이지 않는다. 해제 관측이 있고 범위 안에 유효한 `0B`가 있으면 `trade.release_comparison`에서 해제와 같은 초의 양수 수량 체결 수, 한 건일 때의 관측값, 수신 순서상 최초의 보관된 후속 체결을 제공한다. 이 비교에서 `release_execution_price_won`은 `null`이다. `book_trade_clock_order`는 같은 수집기 세대와 날짜에서 호가·체결이 보고한 초가 서로 다를 때의 선후를 표시한다. 같은 초 또는 시각·세대 결측은 `UNKNOWN`이며 거래소의 교차 메시지 순서는 별도다.
+
+`trade.release_comparison.indicative_match`는 같은 종목·KRX·수집기 세대에서 `1h` 발동 이후 해제 초가 시작되기 전에 앱이 받은 마지막 `0D`의 예상가를 대조한다. 마지막 호가의 원문 시각이 확인되고 FID `23`·`291` 중 값이 있는 필드가 한 가격을 가리킬 때, 해제와 같은 초의 실제 `0B` 체결에 그 가격이 있으면 `INDICATIVE_MATCH`와 `candidate_price_won`을 반환한다. 같은 가격의 체결 건수와 한 건일 때의 참조를 제공한다. 같은 수신 시각의 호가가 상충하거나 필드가 비고, 수집이 끊기거나, 일치 체결이 없으면 `UNKNOWN`이다. 이 대조가 일치해도 `release_execution_price_won`은 `null`이다.
+
+중앙 수집기의 선택 설정 `KIWOOM_MICRO_BOOK_CODES`에 쉼표로 종목을 지정하면 기존 구독 대상과 겹치는 종목의 KRX 0D를 같은 연결에서 받는다. 기본은 빈 목록이다. 승인된 종목당 최신 호가 한 건을 메모리에 두고, 조회 범위 안의 수집기 가용 시각·호가 원문 시각·가격·수량·예상 체결 필드를 제공한다. VI 대조에는 최근 최대 60초의 예상가 필드만 종목당 256건까지 남긴다. 이미 승인된 같은 종목의 KRX `0B`는 기존 RAM 버퍼에 보관하며, 공유 보관 설정이 있으면 그 기간을 따른다. 유효한 가격·수량 쌍이 매수·매도 양쪽에 있으면 `book.state=OBSERVED`, 한쪽 또는 양쪽이 비어 있으면 `PARTIAL`, 범위 내 수신이 없거나 NXT 요청이면 `UNKNOWN`이다. `level_counts`는 관측한 쌍만 센다. 구독 해제·연결 종료·수집 단절은 해당 호가 관측을 폐기한다. 0D 승인 거절이나 승인 대기 시간 초과 후에는 수집기가 기존 재연결 절차로 공통 구독을 복구한다. 해당 수집기 수명 동안 0D 요청을 보류하고 `book_registration_unavailable`로 표시한다. 0B·0D·VI 교차 순서, 종목 거래 가능 상태, VI 해제 체결가는 별도 근거가 필요하다.
+
+<a id="research-daily-decline-setup"></a>
+
+`POST /api/v1/research/daily-decline-setup`은 관리자 인증으로 JSON 원문과 쿼리의 `evidence_sha256`을 받는다. `dd-shadow-setup-evidence/v1`에는 `version`, `policy`, `symbol`, `venue`(`KRX`), `signal_day`, `strategy_references`, `basis`, `benchmark`, 선택 `catalyst`를 담는다. 응답 `dd-shadow-setup-result/v1`은 보정된 현재 컷의 `setup`, 최대 5,000개 판본에서 확인한 원본·기타 수와 제한 도달 여부를 제공한다. 호출자 근거를 `caller_supplied`로 표시하고 입력이 부족하면 해당 셋업 상태를 `UNKNOWN`으로 반환한다.
+
+v1·v2는 호출자가 준비한 선택 `material_news`를 받을 수 있다. 입력 구조는 [낙주·DD 비AI 뉴스 사건 비교](docs/RESEARCH_REQUEST_FORMAT.md#panic-dd-material-news-input)를 따른다. 서버 판단 시각까지 확인 가능한 선택 사건의 판본을 기존 DD 재료 입력으로 사용한다. v2에서 이 입력을 생략하면 저장된 공식 사건의 `contract_events`를 반환한다. 행의 `event_kind`는 계약해지, 횡령·배임 혐의 발생과 사실 확인, 회생 신청과 개시결정, 부도, 영업정지를 구분한다. 사건 하나는 자동으로 상태 평가에 표시하며, 여러 사건에서는 선택 `material_event_ref`가 지정한 사건만 평가한다. 선택 참조는 `selected_material_event_ref`에 표시한다. v2는 신호 평가용이며 뉴스 필수 정책이나 주문 권한을 추가하지 않는다.
+
+`dd-shadow-setup-evidence/v2`는 `benchmark`와 `catalyst` 대신 `benchmark_market`(`KOSPI` 또는 `KOSDAQ`)을 받는다. `policy`는 `lookback_sessions`, `minimum_decline_bps`, `minimum_relative_decline_bps`, `minimum_volatility_multiple_bps`의 신호 평가 값만 받는다. 응답 `dd-shadow-setup-result/v2`는 저장된 해당 지수의 신호일·직전 거래일 종가로 구한 `benchmark`와 기존 Collector의 승인된 KRX `0B`에서 얻은 `price_observation`을 추가한다. 가격 관측의 가용 시각은 신호일 뒤인 현재 KST 날짜에 속해야 한다. 두 입력은 각각 `OBSERVED` 또는 `UNKNOWN`이다. 거래일과 수정주가 기준의 권한은 호출자에게 있다. 두 판본 모두 `candidate: null`, `order_authorized: false`다.
+
+v2의 `input_assessment`는 신호가 수정 일봉을 기준으로 함을 표시하고 원주가 보호 수준은 미확인으로 남긴다. 관측한 현재가는 `price_observation.price_basis=unadjusted`로 표시한다.
 
 기존 결과 전용 `POST /api/v1/research/reported-results` 및 소유자별 조회는 `kiwoom-monitor-research-run` v3와 DD·MICRO·RISK의 `kiwoom-monitor-evidence-experiment` v1 원본을 지원한다. 기존 결과 전용 권한과 256 KiB 한도를 적용하며, 같은 ID의 같은 내용은 최초 영수증을 반환한다. v1 결과에는 `order_authorized=false`가 필요하다. 수신 영수증의 `scientific_verified`와 `order_authorized`는 모두 `false`다. 생산 측의 전달은 명시적 연결·소유자 지정이 있을 때만 수행한다.
 
 Section 12 완료봉 Shadow는 `PUT /api/v1/settings/operations`의 `shadow_candidate_config`에 `version: "section12-minute-shadow/v1"`, `strategy`, 양의 정수 `signal_valid_seconds`를 전달해 선택한다. `family` 생략 시 `breakout_study/v1`이며, 종가베팅과 신규주 두 조합은 `references`에 `strategy-reference/v1` 문서를 요구한다. `symbols`를 명시하면 해당 목록의 종목만 보고, 생략하면 당시 가용한 TOP20을 사용한다. 후보는 `shadow_scope`, `strategy_variant`, `observation_key`, `input_cutoff`, `input_revision_refs`를 보존한다. 조회는 현재 모니터 교체·비활성, 입력 복구, 마감 판본 정정을 각각 `SUPERSEDED`, `WARMUP`, `INVALIDATED`로 표시할 수 있다.
+
+완료봉과 0B 주도주 후보, 호출자 재료를 생략한 DD v2의 선택 응답 필드 `material_news`는 해당 판단 컷의 저장 근거다. `events`는 공식 원문 수락 뒤 확인한 사건과 판본, `recent_reports`는 확인 전 공시나 일반 보도를 포함한다. 보도는 `effect=UNKNOWN`으로 보존한다. `available_at`은 앱 저장 기준이며 `partial`은 읽기 한도 도달을 뜻한다. 기존 후보, 부가 읽기 실패, 호출자 재료를 사용하는 DD 요청에는 이 필드가 없을 수 있다. 저장한 후보의 값은 이후 정정으로 갱신하지 않는다.
+
+낙주의 선택 `material_news.panic_prior_session`은 개장 전에 수락된 직전 거래일 장후의 공식 악재를 보조 근거로 반환한다. 이월 차단 시간과 별도로 현재 후보의 당일 뉴스 판정을 유지한다.
+
+신규주 두 조합에서 `konex_to_kosdaq` 상장 근거는 첫날 진입에 사용할 수 있다. 일반 `transfer` 및 `relisting`은 신규주 진입에서 제외한다. 기존 상장 근거 문서 형식은 유지한다. 현재 상장 근거가 후보가 사용한 판본과 달라지거나 신규주 조건을 잃으면 후보를 `INVALIDATED`로 표시한다.
 
 새 낙주 후보의 `panic_entry_setup`은 최초 급락 봉의 판본·가용시각·확인가, 실패선·반등 목표가를 후보 `snapshot_id`와 함께 보존한다. P1의 확인 봉은 별도의 후보 판본이며 최초 급락 판본을 대체하지 않는다. 기존 후보에 이 필드가 없어도 조회할 수 있다.
 

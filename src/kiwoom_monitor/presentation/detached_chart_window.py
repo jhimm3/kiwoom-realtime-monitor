@@ -119,10 +119,13 @@ class DetachedChartPanel(QWidget):
         self._index_rows = index_rows or {}; self._apply_source()
 
     def set_stock_choices(self, stocks: tuple[tuple[str, str], ...]) -> None:
-        current = self.source.currentText(); self.source.blockSignals(True)
+        current = self.source.currentText()
+        selected_code = self._stock_codes.get(current)
+        self.source.blockSignals(True)
         self.source.clear(); self.source.addItems(("현재 종목", "코스피 지수", "코스닥 지수"))
         self._stock_codes = {f"{name} · {code}": code for code, name in stocks}
-        self.source.addItems(tuple(self._stock_codes)); self.source.setCurrentText(current)
+        self.source.addItems(tuple(self._stock_codes))
+        self.source.setCurrentText(next((label for label, code in self._stock_codes.items() if code == selected_code), current))
         self.source.blockSignals(False)
 
     def selected_stock_code(self) -> str:

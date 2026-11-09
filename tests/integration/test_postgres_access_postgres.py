@@ -106,6 +106,78 @@ from kiwoom_monitor.domain.news_observation import (
 
 
 class PostgresAccessIntegrationTests(unittest.TestCase):
+    def test_sor_recovery_keeps_lost_ack_fenced_and_uses_only_the_confirmed_venue(self):
+        from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
+        from kiwoom_monitor.central_server.execution_runtime import ExecutionRuntime
+        from kiwoom_monitor.domain.order_contract import (
+            BrokerFill, BrokerOrderSnapshot, OrderIntent, OrderSide, OrderState, OrderType,
+        )
+        from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import BrokerOrderDetails
+        from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import LocalAutomationOrderTransport
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository, execution_broker_venue
+
+        marker = uuid.uuid4().hex
+        account_ref, run_id = f'sor-{marker}', f'run-{marker}'
+        self.execution_account_refs.append(account_ref)
+        self.execution_owner_keys.append(f'mock:{account_ref}')
+        clock = datetime(2026, 11, 9, 1, tzinfo=timezone.utc)
+        account = AccountSnapshot(account_ref, 1_000_000, 0, {}, clock)
+        known = OrderIntent(f'{marker}:known', run_id, 'known', account_ref, 'mock', '005930', 'SOR',
+                            OrderSide.BUY, 3, OrderType.LIMIT, 1000, clock, clock + timedelta(minutes=1), 'test')
+        lost = replace(known, intent_id=f'{marker}:lost', decision_id='lost', symbol='000660')
+        self.execution_intent_ids.extend((known.intent_id, lost.intent_id))
+        calls = []
+
+        def request_once(api, path, body):
+            calls.append((api, body))
+            if api == 'kt10000':
+                return {'ord_no': marker} if body['stk_cd'] == known.symbol else {}
+            return {'ord_no': f'{marker}-cancel', 'dmst_stex_tp': 'NXT'}
+
+        def open_owner(name):
+            repository = ExecutionRepository(self.store)
+            transport = LocalAutomationOrderTransport(SimpleNamespace(request_once=request_once), now_provider=lambda: clock)
+            lifecycle = OrderLifecycle(repository, transport, now_provider=lambda: clock,
+                                       local_automation_order_rejection=lambda _intent, _now: None)
+            runtime = ExecutionRuntime(lifecycle, repository, account_ref=account_ref, run_id=run_id,
+                                       owner_token=name, now_provider=lambda: clock)
+            runtime.start()
+            self.addCleanup(runtime.stop)
+            return runtime
+
+        with patch.object(self.store, '_execution_wall_now', lambda: clock, create=True):
+            owner = open_owner(f'{marker}-first')
+            self.assertEqual(marker, owner.submit(known, account).broker_order_id)
+            self.assertEqual(OrderState.SUBMISSION_UNKNOWN, owner.submit(lost, account).state)
+            self.assertTrue(owner.stop())
+            owner = open_owner(f'{marker}-second')
+            self.assertFalse(owner.submit(lost, account).broker_order_id)
+            clock += timedelta(seconds=1)
+            partial = BrokerOrderSnapshot(marker, account_ref, known.symbol, OrderState.PARTIALLY_FILLED,
+                1, 2, clock, (BrokerFill('first', 1, 1000, clock),))
+            detail = BrokerOrderDetails(marker, 3, OrderSide.BUY, 1000, 'NXT')
+            self.assertIsNone(owner.reconcile_by_broker_order(
+                partial, broker_venue='KRX', broker_details=(replace(detail, venue='KRX', venue_confirmed=False),)))
+            self.assertIsNone(owner.reconcile_by_broker_order(
+                replace(partial, broker_order_id='different-order', symbol=lost.symbol), broker_venue='NXT',
+                broker_details=(replace(detail, broker_order_id='different-order'),)))
+            record = owner.reconcile_by_broker_order(partial, broker_venue='NXT', broker_details=(detail,))
+            self.assertEqual(('NXT', 1), (execution_broker_venue(record), record.detailed_filled_quantity))
+            owner.cancel(known.intent_id)
+            clock += timedelta(seconds=1)
+            late = replace(partial, as_of=clock, filled_quantity=2, remaining_quantity=1,
+                           fills=(BrokerFill('late', 1, 1000, clock),))
+            self.assertIsNone(owner.reconcile_by_broker_order(late, broker_venue='KRX'))
+            self.assertEqual(2, owner.reconcile_by_broker_order(late, broker_venue='NXT').detailed_filled_quantity)
+            self.assertTrue(owner.stop())
+            owner = open_owner(f'{marker}-third')
+            self.assertEqual(2, owner.reconcile_by_broker_order(late, broker_venue='NXT').detailed_filled_quantity)
+            self.assertEqual(OrderState.SUBMISSION_UNKNOWN, owner.load_intent(lost.intent_id).state)
+            self.assertTrue(owner.stop())
+        self.assertEqual([('kt10000', 'SOR'), ('kt10000', 'SOR'), ('kt10003', 'NXT')],
+                         [(api, body['dmst_stex_tp']) for api, body in calls])
+        self.assertEqual(marker, calls[-1][1]['orig_ord_no'])
+
     def test_native_store_without_diagnostic_source_preserves_commit_and_recovers_after_failed_write(self):
         import shutil
         import subprocess
@@ -4718,7 +4790,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             capture_scope=capture_owner, workload_paused=is_paused,
         )
 
-        async def nxt_disabled(_code: str) -> bool:
+        async def nxt_disabled(_code: str, _day: str) -> bool:
             return False
 
         service._nxt_enabled = nxt_disabled

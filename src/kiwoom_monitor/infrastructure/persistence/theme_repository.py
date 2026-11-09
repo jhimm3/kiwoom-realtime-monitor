@@ -8,7 +8,7 @@ from typing import Callable
 from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 from kiwoom_monitor.application.theme_suggestions import ProfileThemeSuggestion, ThemeSuggestion
-from kiwoom_monitor.infrastructure.persistence.stock_repository import StockRepository
+from kiwoom_monitor.infrastructure.persistence.stock_repository import CURRENT_STOCKS_SQL, StockRepository
 from kiwoom_monitor.infrastructure.persistence.settings_repository import SettingsNativeWriteError, SettingsRepository
 
 
@@ -351,7 +351,12 @@ class ThemeRepository:
     def search(self, text: str = "") -> tuple[tuple[str, str, str], ...]:
         connection = self._connect()
         try:
-            rows = connection.execute("SELECT s.code, s.name, GROUP_CONCAT(st.theme_name, ', ') FROM stocks s LEFT JOIN profile_stock_themes st ON st.stock_code=s.code AND st.profile_id=? WHERE s.name LIKE ? GROUP BY s.code, s.name ORDER BY s.name", (self._profile_id(connection), f"%{text}%")).fetchall()
+            rows = connection.execute(
+                "SELECT s.code, s.name, GROUP_CONCAT(st.theme_name, ', ') FROM stocks s "
+                "LEFT JOIN profile_stock_themes st ON st.stock_code=s.code AND st.profile_id=? "
+                f"WHERE ({CURRENT_STOCKS_SQL}) AND s.name LIKE ? GROUP BY s.code, s.name ORDER BY s.name",
+                (self._profile_id(connection), f"%{text}%"),
+            ).fetchall()
         finally:
             connection.close()
         return tuple((str(code), str(name), str(themes or "")) for code, name, themes in rows)

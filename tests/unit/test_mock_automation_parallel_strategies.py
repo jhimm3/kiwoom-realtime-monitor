@@ -130,7 +130,8 @@ def reentry_config():
     return LeaderBreakoutConfig.from_dict(raw)
 
 
-def parallel_ready_inputs(case, factory=None, *, shared_capital=20_000, reentry=False):
+def parallel_ready_inputs(case, factory=None, *, shared_capital=20_000, reentry=False,
+                          venues=('KRX', 'KRX'), close_symbol='005930'):
     from tests.unit.test_leader_staged_research import staged_final
     from tests.unit.test_close_and_ipo import CloseAndIpoTests
     from tests.unit.test_mock_automation_specification import ACCOUNT_REF, PROFILE_ID, MockUnfilledReplacementDispatchTests
@@ -182,7 +183,7 @@ def parallel_ready_inputs(case, factory=None, *, shared_capital=20_000, reentry=
     leader_event, = [event for event in store.load_shadow_candidates(0, 100)['events']
                      if event['strategy_id'] == 'leader_breakout']
     example = CloseAndIpoTests()
-    example.symbol, example.friday, example.tuesday = '005930', day, day + timedelta(days=1)
+    example.symbol, example.friday, example.tuesday = close_symbol, day, day + timedelta(days=1)
     example.published = cut - timedelta(hours=7)
     example.setUp()
     example.calendar = (example.calendar[0], example.calendar[-1])
@@ -194,7 +195,7 @@ def parallel_ready_inputs(case, factory=None, *, shared_capital=20_000, reentry=
     example.signal = replace(example.signal, open=1001, high=1005, low=1001, close=1001,
                              schedule_version=example.entry.schedule_version)
     minute_config = json.loads(json.dumps(dict(version=MINUTE_SHADOW_VERSION, family='close_betting/v1',
-        signal_valid_seconds=30, symbols=['005930'], strategy=close.request.strategy.to_dict(),
+        signal_valid_seconds=30, symbols=[close_symbol], strategy=close.request.strategy.to_dict(),
         references=dict(version='strategy-reference/v1', calendar=[asdict(day) for day in example.calendar], listings=[])),
         default=lambda value: value.isoformat()))
     minute_monitor = CandidateMonitor.from_json(store, json.dumps(minute_config), poll_seconds=1,
@@ -221,7 +222,7 @@ def parallel_ready_inputs(case, factory=None, *, shared_capital=20_000, reentry=
             dict(execution_plan_mode=CLOSE_NATIVE_PLAN_MODE, close_execution_policy=management_terms()))
         documents = build_mock_automation_publication_documents(candidate_publication=publication, binding=binding,
             credential_profile_id=PROFILE_ID, shadow_event=event, evaluation_start=cut, evaluation_end=cut + timedelta(days=7),
-            frozen_at=cut, criteria=criteria, limits={**limits, 'maximum_concurrent_strategies': 1,
+            frozen_at=cut, criteria=criteria, supported_venue=venues[index], limits={**limits, 'maximum_concurrent_strategies': 1,
                 'maximum_concurrent_positions': 1, 'maximum_capital_won': 10_000 if index == 0 else 100_000}, **terms)
         spec = mock_automation_spec_from_dict(documents['operating_spec'])
         ready, _ = publish_ready_mock_automation_spec(repository, profile=forward_spec_from_dict(documents['forward_profile']),
@@ -239,7 +240,7 @@ def parallel_ready_inputs(case, factory=None, *, shared_capital=20_000, reentry=
     return SimpleNamespace(store=store, factory=factory, repository=repository, binding=binding, clock=clock, specs=tuple(specs),
         selection=selection, implementation_hash=implementation, leader_config=leader, minute_config=minute_config,
         leader_monitor=leader_monitor, minute_monitor=minute_monitor, example=example, publications=publications,
-        finals=(leader_result, close.result))
+        finals=(leader_result, close.result), venues=venues)
 
 
 async def parallel_runtime(case, factory=None, *, shared_capital=20_000, reentry=False):
@@ -275,7 +276,14 @@ async def assemble_parallel_runtime(case, data, *, admit):
         data.original_submit = data.transport.submit
     data.run_id = execution_run_id_for_spec(data.selection.primary_spec_id)
     data.owner_generation = getattr(data, 'owner_generation', 0) + 1
-    data.runtime = ExecutionRuntime(OrderLifecycle(data.execution, data.transport, now_provider=lambda: data.clock[0]),
+    local_venue = any(venue in {'NXT', 'SOR'} for venue in data.venues)
+    transport = data.transport
+    if local_venue:
+        from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import LocalAutomationOrderTransport
+        transport = LocalAutomationOrderTransport(SimpleNamespace(request_once=lambda *args: data.request_once(*args)),
+                                                 now_provider=lambda: data.clock[0])
+    data.runtime = ExecutionRuntime(OrderLifecycle(data.execution, transport, now_provider=lambda: data.clock[0],
+        local_automation_order_rejection=(lambda intent, now: data.route_rejection(intent, now)) if local_venue else None),
         data.execution, account_ref=data.selection.account_scope.account_ref, run_id=data.run_id,
         owner_token='one-leader-close-native-owner:' + str(data.owner_generation), now_provider=lambda: data.clock[0])
     case.addCleanup(data.runtime.stop)
@@ -327,6 +335,39 @@ async def assemble_parallel_runtime(case, data, *, admit):
     case.enterContext(patch.object(data.transport, 'submit', side_effect=broker_submit))
     case.enterContext(patch.object(data.transport, 'cancel', side_effect=data.book.cancel))
     case.enterContext(patch.object(data.transport, 'amend', side_effect=data.book.amend, create=True))
+    if local_venue:
+        from kiwoom_monitor.domain.order_contract import OrderSide, OrderState
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_venue
+        data.wire = getattr(data, 'wire', [])
+
+        def request_once(api_id, path, body):
+            case.assertEqual('/api/dostk/ordr', path)
+            data.wire.append((api_id, dict(body)))
+            venue, symbol = body['dmst_stex_tp'], body['stk_cd']
+            if api_id in {'kt10000', 'kt10001'}:
+                side = OrderSide.BUY if api_id == 'kt10000' else OrderSide.SELL
+                candidates = data.execution.active_intents('mock', data.runtime.account_ref, data.run_id)
+                record, = (item for item in candidates if item.state is OrderState.SUBMISSION_UNKNOWN
+                           and not item.broker_order_id and (item.intent.symbol, item.intent.venue, item.intent.side,
+                            item.intent.quantity, item.intent.limit_price) == (symbol, venue, side,
+                                int(body['ord_qty']), int(body['ord_uv'])))
+                actual = data.sor_destinations[symbol] if venue == 'SOR' else venue
+                result = broker_submit(replace(record.intent, venue=actual))
+                return {'ord_no': result.broker_order_id, 'dmst_stex_tp': actual}
+            original = body['orig_ord_no']
+            record = data.execution.find_by_broker_order_id('mock', data.runtime.account_ref, data.run_id, original)
+            case.assertEqual((symbol, venue), (record.intent.symbol, execution_broker_venue(record)))
+            actual_intent = replace(record.intent, venue=venue)
+            if api_id == 'kt10002':
+                result = data.book.amend(actual_intent, original, int(body['mdfy_qty']), int(body['mdfy_uv']))
+                return {'ord_no': result.broker_order_id, 'base_orig_ord_no': original,
+                        'mdfy_qty': str(result.quantity), 'dmst_stex_tp': venue}
+            case.assertEqual('kt10003', api_id)
+            result = data.book.cancel(actual_intent, original, int(body['cncl_qty']))
+            return {'ord_no': result.broker_order_id, 'dmst_stex_tp': venue}
+
+        data.request_once = request_once
+        data.route_rejection = getattr(data, 'route_rejection', lambda _intent, _now: None)
     monitor = MockAccountMonitor(data.book, data.runtime, data.execution, now_provider=lambda: data.clock[0],
         automation_risk_repository=data.repository, automation_binding_revision=data.selection.binding_revision,
         automation_account_scope=data.selection.account_scope, new_orders_enabled_on_start=False,
@@ -341,6 +382,7 @@ async def assemble_parallel_runtime(case, data, *, admit):
     data.close_gateway = own_async_close(case, gateway.close)
     if admit:
         data.quotes = {}
+        data.nxt_quotes = {}
         data.live = dict(revision=1, enabled=True, policy=data.leader_config.policy.to_dict())
         data.settings = dict(revision=1, shadow_candidate_enabled=True,
             shadow_candidate_configs={data.specs[0].spec_id: data.leader_config.policy.to_dict(),
@@ -365,6 +407,7 @@ async def assemble_parallel_runtime(case, data, *, admit):
             account_ref=data.runtime.account_ref, spec_id=spec.spec_id, observation=cut['observation'])
     episodes = tuple(MockAutomationEpisode(data.store, data.bundle, spec, member_admission=admission,
         price_source=lambda symbol: data.quotes.get(symbol),
+        nxt_price_source=lambda symbol: data.nxt_quotes.get(symbol),
         leader_context_source=lambda spec_id=None: data.live if spec_id in (None, data.specs[0].spec_id) else None,
         now_provider=lambda: data.clock[0]) for spec, admission in zip(data.specs, admissions, strict=True))
     for episode in episodes:
@@ -422,19 +465,24 @@ async def advance_members(data):
         await episode.advance_once()
 
 
-async def deliver_price(data, price, *, advance=True, source='parallel-approved-0B:1'):
+async def deliver_price(data, price, *, advance=True, source='parallel-approved-0B:1', nxt_price=None):
     data.clock[0] += timedelta(milliseconds=100)
     data.runtime.heartbeat()
     quote = dict(price_won=price, available_at=data.clock[0],
         input_ref='collector-trade:' + source + ':' + data.clock[0].isoformat(),
         durable=False, market_status='TRADABLE')
-    data.quotes['005930'] = quote
+    for symbol in {'005930', data.example.symbol}:
+        data.quotes[symbol] = quote
+        data.nxt_quotes[symbol] = {**quote, 'venue': 'NXT', 'price_won': price if nxt_price is None else nxt_price,
+                                  'input_ref': quote['input_ref'] + ':NXT:' + symbol}
     payload = dict(code='005930', market='KRX', current_price=price,
                    trade_time=data.clock[0].strftime('%H%M%S'), cumulative_trade_value=100)
     data.shadow.observe_trade(payload, data.clock[0], source=source, approved=True)
     for episode in data.episodes:
         episode.observe_leader_trade(payload, data.clock[0], source=source, approved=True)
-        episode.observe_automation_price('005930', quote)
+        for symbol in {'005930', data.example.symbol}:
+            episode.observe_automation_price(symbol, quote)
+            episode.observe_automation_price(symbol, data.nxt_quotes[symbol])
     data.shadow.run_once()
     if advance:
         await advance_members(data)
@@ -844,6 +892,105 @@ async def verify_parallel_late_fill_restart_resume(case, factory=None):
 
 
 class ParallelStrategyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sor_amends_the_physical_nxt_and_krx_orders_after_reopening(self):
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_legs, execution_broker_venue
+
+        data = parallel_ready_inputs(self, venues=('SOR', 'SOR'), close_symbol='000660')
+        data.sor_destinations = {'005930': 'NXT', '000660': 'KRX'}
+        await assemble_parallel_runtime(self, data, admit=True)
+        data.clock[0] = max(data.clock[0], datetime.fromisoformat(data.example.signal.bar_end) + timedelta(minutes=1))
+        await deliver_price(data, 990)
+        publish_current_close_minute(data)
+        await deliver_price(data, 1001)
+        entries = tuple(member_records(data, index, side='BUY')[0] for index in (0, 1))
+        self.assertEqual([('SOR', 'NXT'), ('SOR', 'KRX')],
+                         [(row.intent.venue, execution_broker_venue(row)) for row in entries])
+        self.assertEqual(['SOR', 'SOR'], [body['dmst_stex_tp'] for api, body in data.wire if api == 'kt10000'])
+        for entry in entries:
+            data.book.fill(entry.broker_order_id, 1, 'same-source-fill')
+        # Refresh the broker ledger while holding the original price, then restart.
+        await advance_members(data)
+        sent = list(data.wire)
+        await reopen_parallel_runtime(self, data)
+        self.assertEqual(sent, data.wire)
+        await deliver_price(data, 1002, nxt_price=1003)
+        mutations = {body['stk_cd']: body for api, body in data.wire if api == 'kt10002'}
+        self.assertEqual({'005930', '000660'}, set(mutations), ([e.status for e in data.episodes], data.wire))
+        self.assertEqual([('NXT', entries[0].broker_order_id, '1', '1003'),
+                          ('KRX', entries[1].broker_order_id, '3', '1002')],
+            [tuple(mutations[entry.intent.symbol][key] for key in ('dmst_stex_tp', 'orig_ord_no', 'mdfy_qty', 'mdfy_uv'))
+             for entry in entries])
+        sent = list(data.wire)
+        await reopen_parallel_runtime(self, data)
+        self.assertEqual(sent, data.wire)
+        for entry in entries:
+            current = data.execution.load(entry.intent.intent_id)
+            self.assertEqual(execution_broker_venue(entry), execution_broker_venue(current))
+            self.assertEqual(1, current.detailed_filled_quantity)
+            active, = (leg for leg in execution_broker_legs(current) if leg.remaining_quantity)
+            self.assertEqual(entry.broker_order_id, active.original_broker_order_id)
+        fills = data.execution.account_events('mock', data.runtime.account_ref).events
+        self.assertEqual({('005930', 'NXT', 1), ('000660', 'KRX', 1)},
+                         {(row.symbol, row.venue, row.quantity) for row in fills if row.event_type == 'FILL'})
+
+    async def test_native_nxt_and_krx_keep_two_stocks_and_original_orders_separate_on_reopen(self):
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_legs
+
+        data = parallel_ready_inputs(self, venues=('NXT', 'KRX'), close_symbol='000660')
+        await assemble_parallel_runtime(self, data, admit=True)
+        data.clock[0] = max(data.clock[0], datetime.fromisoformat(data.example.signal.bar_end) + timedelta(minutes=1))
+        await deliver_price(data, 990)
+        publish_current_close_minute(data)
+        await deliver_price(data, 1001)
+        leader, = member_records(data, 0, side='BUY')
+        close, = member_records(data, 1, side='BUY')
+        self.assertEqual([('005930', 'NXT', 2), ('000660', 'KRX', 4)],
+            [(row.intent.symbol, row.intent.venue, row.intent.quantity) for row in (leader, close)])
+        data.book.fill(leader.broker_order_id, 1, 'same-broker-fill-token')
+        data.book.fill(close.broker_order_id, 4, 'same-broker-fill-token')
+        await advance_members(data)
+        await deliver_price(data, 1002)
+        amendments = [(api, body) for api, body in data.wire if api == 'kt10002' and body['stk_cd'] == '005930']
+        self.assertEqual(1, len(amendments), ([episode.status for episode in data.episodes], data.wire,
+            data.execution.load(leader.intent.intent_id).state))
+        amendment, = amendments
+        self.assertEqual(('005930', 'NXT', leader.broker_order_id, '1'), tuple(amendment[1][key] for key in
+            ('stk_cd', 'dmst_stex_tp', 'orig_ord_no', 'mdfy_qty')))
+        submitted = list(data.wire)
+        await reopen_parallel_runtime(self, data)
+        self.assertEqual(submitted, data.wire)
+        self.assertEqual([1, 4], [data.execution.load_plan_position(data.runtime.account_ref, data.run_id,
+            row.intent.symbol, row.intent.plan).quantity for row in (leader, close)])
+        working, = [leg for leg in execution_broker_legs(data.execution.load(leader.intent.intent_id))
+                    if leg.remaining_quantity]
+        await fill_order(data, leader, 1, 'nxt-amended-lot', broker_order_id=working.broker_order_id)
+        await deliver_price(data, 1049)
+        await deliver_price(data, 1051)
+        addition, = member_records(data, 0, side='BUY')
+        self.assertEqual((leader.intent.plan.plan_id, 'NXT', 1),
+                         (addition.intent.plan.plan_id, addition.intent.venue, addition.intent.quantity))
+        await fill_order(data, addition, 1, 'nxt-addition')
+        await deliver_price(data, 1101)
+        reduction, = member_records(data, 0, side='SELL')
+        self.assertEqual((leader.intent.plan.plan_id, 'NXT', 2),
+                         (reduction.intent.plan.plan_id, reduction.intent.venue, reduction.intent.quantity))
+        await fill_order(data, reduction, 2, 'nxt-reduction')
+        await deliver_price(data, 890)
+        await deliver_price(data, 900)
+        await advance_members(data)
+        exits = tuple(member_records(data, index, side='SELL') for index in (0, 1))
+        self.assertEqual([1, 1], list(map(len, exits)), [episode.status for episode in data.episodes])
+        for (sell,), entry, residual in zip(exits, (leader, close), (1, 4), strict=True):
+            self.assertEqual((entry.intent.symbol, entry.intent.venue, residual),
+                             (sell.intent.symbol, sell.intent.venue, sell.intent.quantity))
+            legs = [leg for leg in execution_broker_legs(data.execution.load(sell.intent.intent_id))
+                    if leg.remaining_quantity]
+            self.assertEqual(sell.intent.quantity, sum(leg.remaining_quantity for leg in legs))
+            for leg in legs:
+                data.book.fill(leg.broker_order_id, leg.remaining_quantity, 'same-exit-fill-token')
+        await advance_members(data)
+        self.assertEqual({}, data.bundle.monitor.latest_automation_execution_cut['observation'].account.positions)
+
     async def test_genuine_final_ready_and_one_binding_restore_two_members_without_orders(self):
         await verify_parallel_preparation(self)
 

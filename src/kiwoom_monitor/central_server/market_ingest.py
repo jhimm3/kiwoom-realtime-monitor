@@ -6,7 +6,7 @@ from time import monotonic
 from typing import Any, Callable, Protocol
 
 from kiwoom_monitor.application.market_session_schedule import KRX_AFTER_MARKET_EFFECTIVE_DATE
-from kiwoom_monitor.application.ranking_schedule import ranking_snapshot_archive_due
+from kiwoom_monitor.application.ranking_schedule import ranking_history_due, ranking_snapshot_archive_due
 from kiwoom_monitor.domain.market_data_contract import (
     CoverageObservation,
     DataCompleteness,
@@ -132,8 +132,6 @@ class MarketDataIngestor:
             self._ingest_ranking(body, payload)
         elif api_id == "ka10045":
             self._ingest_investor_flow(body, payload)
-        elif api_id == "ka90008":
-            self._ingest_program_flow(body, payload)
         elif api_id == "ka10016":
             self._ingest_new_highs(body, payload)
         elif api_id == "ka10001":
@@ -352,6 +350,12 @@ class MarketDataIngestor:
             f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}T{raw_time[:2]}:{raw_time[2:4]}:{raw_time[4:]}"
             if len(raw_date) == 8 and len(raw_time) == 6 else now.isoformat(timespec="seconds")
         )
+        try:
+            observed_at = datetime.fromisoformat(snapshot_key)
+        except ValueError:
+            return
+        if not ranking_history_due(observed_at):
+            return
         subject = str(body.get("qry_tp", "5"))
         value = {"query_type": subject, "items": records}
         self._store.save_dataset_snapshot(
@@ -369,16 +373,6 @@ class MarketDataIngestor:
             self._store.save_dataset_snapshot(
                 "investor_flow", code, f"{day}:{market}",
                 {"market": market, "rows": payload.get("stk_orgn_trde_trnsn", [])},
-            )
-
-    def _ingest_program_flow(self, body: dict[str, Any], payload: dict[str, Any]) -> None:
-        raw_code = str(body.get("stk_cd", "")).strip()
-        code, market = _code_and_market(raw_code)
-        day = str(body.get("date", "")).strip()
-        if code and len(day) == 8:
-            self._store.save_dataset_snapshot(
-                "program_flow", code, f"{day}:{market}",
-                {"market": market, "rows": payload.get("stk_tm_prm_trde_trnsn", [])},
             )
 
     def _ingest_new_highs(self, body: dict[str, Any], payload: dict[str, Any]) -> None:

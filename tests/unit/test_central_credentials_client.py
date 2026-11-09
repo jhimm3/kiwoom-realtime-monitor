@@ -29,7 +29,8 @@ class CredentialsClientTests(unittest.TestCase):
         self.requests = []
         self.responses = []
         self.factory = patch("kiwoom_monitor.infrastructure.central_credentials_client.build_opener")
-        self.opener = self.factory.start().return_value
+        self.build_opener = self.factory.start()
+        self.opener = self.build_opener.return_value
         self.opener.open.side_effect = self.open
         self.addCleanup(self.factory.stop)
 
@@ -55,6 +56,23 @@ class CredentialsClientTests(unittest.TestCase):
         context = system_ssl_context()
         self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
         self.assertTrue(context.check_hostname)
+
+    def test_local_credentials_use_only_the_loopback_mock_provider_without_a_proxy(self):
+        for url, provider in (
+            ("http://nas.test", "kiwoom_mock"),
+            ("http://127.0.0.1:8787", "kiwoom_real"),
+            ("http://127.0.0.1:8787/relay", "kiwoom_mock"),
+        ):
+            with self.subTest(url=url, provider=provider), self.assertRaises(RuntimeError):
+                CentralCredentialsClient(DataSourceSettings("local_server", url, "access"), provider=provider).load()
+        self.assertEqual([], self.requests)
+        local = CentralCredentialsClient(DataSourceSettings("local_server", "http://127.0.0.1:8787", "access"))
+        self.responses.extend([
+            {"capabilities": {"runtime_credentials_v1": True, "local_mock_automation_v1": True}},
+            {"profiles": [], "providers": [{"provider": "kiwoom_mock", "supported": True}]},
+        ])
+        self.assertTrue(local.load()["providers"][0]["supported"])
+        self.assertEqual({}, self.build_opener.call_args.args[1].proxies)
 
     def test_old_server_and_secret_echo_filter(self):
         self.responses = [{"capabilities": {"runtime_credentials_v1": False}}]

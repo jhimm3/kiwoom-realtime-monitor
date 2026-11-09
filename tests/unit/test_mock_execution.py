@@ -5,10 +5,12 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from kiwoom_monitor.domain.order_contract import OrderIntent, OrderSide, OrderType
+from kiwoom_monitor.domain.order_contract import LocalRehearsalOrderIntent, OrderIntent, OrderSide, OrderType
 from kiwoom_monitor.infrastructure.kiwoom_rest.client import KiwoomRestClient
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import (
     KiwoomMockExecutionTransport,
+    KiwoomRealExecutionTransport,
+    LocalAutomationOrderTransport,
     SubmissionRejected,
     SubmissionUnknown,
 )
@@ -48,9 +50,50 @@ def _intent(side: OrderSide = OrderSide.BUY) -> OrderIntent:
 
 
 class MockExecutionTests(unittest.TestCase):
+    def test_real_order_wire_uses_bound_account_and_only_mutates_physical_orders(self):
+        peer = _Client('real', {'ord_no': '0000123', 'dmst_stex_tp': 'NXT'})
+        transport = KiwoomRealExecutionTransport(peer, account_ref='bound', now_provider=lambda: NOW)
+        intent = LocalRehearsalOrderIntent('intent', 'run', 'decision', 'bound', 'real', '005930', 'SOR',
+                                         OrderSide.BUY, 2, OrderType.LIMIT, 70_000,
+                                         NOW, NOW + timedelta(minutes=1), 'policy')
+        with self.assertRaisesRegex(ValueError, 'matching account'):
+            transport.submit(replace(intent, account_ref='other'))
+        with self.assertRaisesRegex(ValueError, 'physical order venue'):
+            transport.cancel(intent, '0000123')
+        with self.assertRaisesRegex(ValueError, 'physical order venue'):
+            transport.amend(intent, '0000123', 1, 70_100)
+        self.assertEqual([], peer.calls)
+        reply = transport.submit(intent)
+        self.assertEqual(('0000123', 'NXT'), (reply.broker_order_id, reply.broker_venue))
+        physical = replace(intent, venue=reply.broker_venue)
+        peer.response = {'ord_no': '0000124', 'dmst_stex_tp': 'NXT',
+                         'base_orig_ord_no': reply.broker_order_id, 'mdfy_qty': '1'}
+        amendment = transport.amend(physical, reply.broker_order_id, 1, 70_100)
+        peer.response = {'ord_no': '0000125', 'dmst_stex_tp': 'NXT'}
+        transport.cancel(physical, amendment.broker_order_id)
+        transport.submit(replace(physical, side=OrderSide.SELL, quantity=1))
+        self.assertEqual([('kt10000', 'SOR', None), ('kt10002', 'NXT', '0000123'),
+                          ('kt10003', 'NXT', '0000124'), ('kt10001', 'NXT', None)],
+                         [(api, body['dmst_stex_tp'], body.get('orig_ord_no')) for api, _, body in peer.calls])
+
     def test_real_credentials_are_rejected_before_any_order(self) -> None:
         with self.assertRaisesRegex(ValueError, "mock credentials"):
             KiwoomMockExecutionTransport(_Client("real"))
+
+    def test_kiwoom_mock_rejects_nxt_without_sending_any_request(self):
+        client = _Client()
+        for venue in ('NXT', 'SOR'):
+            with self.subTest(venue=venue), self.assertRaisesRegex(ValueError, 'only KRX mock orders'):
+                KiwoomMockExecutionTransport(client).submit(replace(_intent(), venue=venue))
+        self.assertEqual([], client.calls)
+
+    def test_local_nxt_order_with_an_unconfirmed_destination_stays_unknown(self):
+        peer = _Client(response={'ord_no': 'wrong-venue', 'dmst_stex_tp': 'KRX'})
+        transport = LocalAutomationOrderTransport(peer, now_provider=lambda: NOW)
+        with self.assertRaisesRegex(SubmissionUnknown, 'did not confirm the requested venue'):
+            transport.submit(replace(_intent(), venue='NXT'))
+        self.assertEqual(1, len(peer.calls))
+        self.assertEqual('NXT', peer.calls[0][2]['dmst_stex_tp'])
 
     def test_buy_and_cancel_use_official_order_contract(self) -> None:
         client = _Client()

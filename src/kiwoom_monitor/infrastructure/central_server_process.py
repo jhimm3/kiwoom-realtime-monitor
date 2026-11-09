@@ -68,6 +68,10 @@ class LocalCentralServerProcess:
             "KIWOOM_ENVIRONMENT": profiles.active_environment,
             "KIWOOM_APP_KEY": app_key,
             "KIWOOM_SECRET_KEY": secret_key,
+            "KIWOOM_SERVER_SECRET_DIR": "",
+            "ACCOUNT_IDENTITY_REGISTRY_ENABLED": "0",
+            "MOCK_ACCOUNT_MONITOR_ENABLED": "0",
+            "MOCK_ORDER_TRANSPORT_ENABLED": "0",
         })
         try:
             from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig
@@ -104,6 +108,7 @@ class LocalCentralServerProcess:
                 self._executable, "-m", "kiwoom_monitor.central_server",
                 "--parent-pid", str(os.getpid()),
             ]
+        command.append("--local-mock-automation")
         self._shutdown_event = WindowsShutdownEvent.create() if os.name == "nt" else None
         if self._shutdown_event is not None:
             command.extend(["--shutdown-event", self._shutdown_event.name])

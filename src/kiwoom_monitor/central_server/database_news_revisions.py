@@ -11,8 +11,13 @@ import sqlite3
 import uuid
 from time import monotonic, time
 from typing import Any, Callable
-from datetime import datetime
+from datetime import date, datetime
+from urllib.parse import parse_qs, urlsplit
 
+from kiwoom_monitor.application.news_material import (
+    RECORDED_CONTRACT_FILINGS, is_contract_award_correction, is_contract_termination_filing, official_adverse_kind,
+    official_filing_ref, read_contract_award_change, read_contract_correction,
+)
 from kiwoom_monitor.domain.news_observation import (
     ARTICLE_BODY_EXTRACTOR_VERSION, NEWS_ANALYSIS_SCHEMA_VERSION,
     SUPPLY_CONTRACT_RULE_VERSION, stable_document_hash,
@@ -27,6 +32,9 @@ from .database_news_job_writes import (
     _insert_sqlite_news_job, _insert_postgres_news_job, _notify_news_job_wakeup,
     _news_job_rows, _NEWS_JOB_CLAIM_HISTORICAL_SCOPES_SQL,
 )
+from kiwoom_monitor.domain.time_basis import KST, aware_iso_kst
+from kiwoom_monitor.infrastructure.exchange_effective_dates import document_rows, kind_trading_notice
+from kiwoom_monitor.infrastructure.official_news_filing import MAX_FILING_BYTES, confirms_adverse_filing
 
 
 _NEWS_AI_REVISION_COLUMNS = (
@@ -120,6 +128,16 @@ class SQLiteNewsRevisionStoreMixin:
         values = self.load_news_history("body", target=article_revision_id, limit=1)
         return values[0] if values else None
 
+    def load_strategy_material_inputs(self, symbol: str, cut: datetime) -> dict:
+        sql, params = _strategy_material_query(symbol, cut, postgres=False)
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return _strategy_material_rows(rows)
+
+    def load_kind_trading_notices(self, symbol: str, cut: datetime) -> list[dict] | None:
+        with self._lock, self._connection() as connection:
+            return _read_kind_trading_notices(connection.cursor(), "?", symbol, cut)
+
     def load_news_body_revision(self, body_revision_id: str) -> dict[str, Any] | None:
         with self._lock, self._connection() as connection:
             row = connection.execute(
@@ -168,6 +186,25 @@ class SQLiteNewsRevisionStoreMixin:
 
 
 class PostgresNewsRevisionStoreMixin:
+    def load_strategy_material_inputs(self, symbol: str, cut: datetime) -> dict:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        context = DBWriterContext(writer_family="read.news_history", writer_kind="strategy_material",
+                                  operation="load_strategy_material_inputs", access_mode="read")
+        sql, params = _strategy_material_query(symbol, cut, postgres=True)
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+        return _strategy_material_rows(rows)
+
+    def load_kind_trading_notices(self, symbol: str, cut: datetime) -> list[dict] | None:
+        from .postgres_access import DBWriterContext, open_observed_connection
+
+        context = DBWriterContext(writer_family="read.news_history", writer_kind="strategy_material",
+                                  operation="load_kind_trading_notices", access_mode="read")
+        with open_observed_connection(self._connect, context) as connection, connection.cursor() as cursor:
+            return _read_kind_trading_notices(cursor, "%s", symbol, cut)
+
     def _news_body_command(self, operation, owner, function, *args, **kwargs):
         from .postgres_access import DBWriterContext, open_observed_connection
         context=DBWriterContext(writer_family='news.body_processor',writer_kind='news_body_processor',
@@ -365,6 +402,87 @@ class PostgresNewsRevisionStoreMixin:
         return str(row[0]) if row else None
 
 
+def _accepted_filing(filing, payload, stock, body_receipt, now):
+    fields = {"filing_url", "document_url", "filing_html", "original_filing_url"}
+    if (not isinstance(filing, dict) or set(filing) != fields
+            or not all(isinstance(value, str) for value in filing.values())
+            or filing["filing_url"] not in {payload.get("link"), payload.get("original_link")}
+            or not filing["filing_html"] or len(filing["filing_html"].encode()) > MAX_FILING_BYTES):
+        raise NewsBodyConflict("official filing does not match the BODY input")
+    input_ref = official_filing_ref(filing["filing_url"])
+    parent = official_filing_ref(filing["original_filing_url"])
+    document = urlsplit(filing["document_url"])
+    if (not input_ref or filing["original_filing_url"] and not parent
+            or document.scheme != "https" or document.username is not None):
+        raise NewsBodyConflict("official filing source or original link is unverified")
+    provider, receipt = input_ref.split(":")
+    if provider == "dart":
+        if (document.netloc != "dart.fss.or.kr" or document.path != "/report/viewer.do"
+                or parse_qs(document.query).get("rcpNo") != [receipt]):
+            raise NewsBodyConflict("DART document receipt differs from BODY input")
+        ref = input_ref
+        source_day = date.fromisoformat(receipt[:8])
+    else:
+        ref = official_filing_ref(filing["document_url"])
+        parts = document.path.split("/")
+        if not ref.startswith("kind:") or document.netloc != "kind.krx.co.kr" or not (
+            ref == input_ref or len(parts) == 8 and parts[5] == receipt[-6:]
+        ):
+            raise NewsBodyConflict("KIND document receipt differs from BODY input")
+        source_day = date.fromisoformat("-".join(parts[2:5]))
+    available = datetime.fromtimestamp(now, KST)
+    body_ref = body_receipt["body_revision_id"]
+    archive_key = stable_document_hash({"filing_ref": ref, "html": filing["filing_html"]})
+    archive = {**filing, "filing_ref": ref, "article_revision_id": body_receipt["article_revision_id"],
+               "body_revision_id": body_ref, "fetched_at": body_receipt["fetched_at"],
+               "available_at": available.isoformat(), "content_hash": archive_key}
+    title = str(payload.get("title") or "")
+    if provider == "kind" and stock != "GLOBAL" and source_day <= available.date() and "거래정지" in "".join(title.split()):
+        notice = kind_trading_notice(document_rows(filing["filing_html"]), title, str(payload.get("stock_name") or ""))
+        if notice is not None:
+            archive["kind_trading_notice"] = {**notice, "available_at": available.isoformat(),
+                "filing_ref": ref, "original_filing_ref": parent, "body_ref": body_ref,
+                "source_ref": filing["document_url"]}
+    adverse_kind = official_adverse_kind(title)
+    award_correction = is_contract_award_correction(title)
+    if (stock == "GLOBAL" or source_day > available.date()
+            or not (adverse_kind or award_correction or is_contract_termination_filing(title))):
+        return archive_key, archive, None
+    if adverse_kind and not confirms_adverse_filing(filing["filing_html"], adverse_kind):
+        return archive_key, archive, None
+    rows = document_rows(filing["filing_html"])
+    if not rows:
+        return archive_key, archive, None
+    try:
+        published = aware_iso_kst(str(payload.get("published_at") or ""))
+    except ValueError:
+        published = available
+    # DART lists receipt dates at midnight. An unproven intraday publication
+    # uses today's receipt time, or the stated filing day for a late capture.
+    effective = min(available, published) if published.date() == source_day and published.time().isoformat() != "00:00:00" else (
+        available if source_day == available.date() else datetime.combine(source_day, datetime.max.time(), KST))
+    material = {
+        "filing_ref": ref, "original_filing_ref": parent, "source_ref": filing["filing_url"],
+        "title": title, "symbol": stock, "body_ref": body_ref, "available_at": available.isoformat(),
+        "effective_at": effective.isoformat(), "rows_hash": stable_document_hash({"rows": rows}),
+    }
+    if adverse_kind:
+        material["event_kind"] = adverse_kind
+    correction = None
+    if award_correction:
+        change = read_contract_award_change(rows, body_ref)
+        if change is None:
+            return archive_key, archive, None
+        identity, correction = change
+        material["contract_award_key"] = stable_document_hash({"identity": identity})
+    elif "".join(title.split()).startswith("["):
+        correction = read_contract_correction(rows, body_ref)
+    if correction is not None:
+        material["correction"] = {"outcome": correction.outcome, "changes": correction.changes,
+                                  "body_ref": body_ref, "supersedes": None}
+    return archive_key, archive, material
+
+
 def _accept_news_job_result(db: Any, job_key: str, result: dict[str, Any], *,
                             attempts: int, postgres: bool,
                             now_provider: Callable[[], datetime]) -> tuple[dict[str, Any], bool]:
@@ -431,13 +549,14 @@ def _accept_news_job_result(db: Any, job_key: str, result: dict[str, Any], *,
             raise RuntimeError("뉴스 작업 종결 중 작업 소유권이 변경되었습니다.")
         return {"state": "completed", "output_ref": "", "reason": "manual_reanalysis_required"}, False
 
-    def save_document(collection: str, owner: str, key: str, document: dict[str, Any]) -> None:
+    def save_document(collection: str, owner: str, key: str, document: dict[str, Any], *, immutable=False) -> None:
         inequality = ("central_documents.document_json IS DISTINCT FROM excluded.document_json"
                       if postgres else "central_documents.document_json<>excluded.document_json")
         execute(
             "INSERT INTO central_documents(collection,owner,document_key,updated_at,document_json) "
-            "VALUES(?,?,?,?,?) ON CONFLICT(collection,owner,document_key) DO UPDATE SET "
-            "updated_at=excluded.updated_at,document_json=excluded.document_json WHERE " + inequality,
+            "VALUES(?,?,?,?,?) ON CONFLICT(collection,owner,document_key) " +
+            ("DO NOTHING" if immutable else
+             "DO UPDATE SET updated_at=excluded.updated_at,document_json=excluded.document_json WHERE " + inequality),
             document_value_rows(collection, [{"owner": owner, "key": key, "document": document}], now)[0],
         )
 
@@ -477,7 +596,16 @@ def _accept_news_job_result(db: Any, job_key: str, result: dict[str, Any], *,
             else:
                 body_value = dict(result["body"])
                 body_value["article_revision_id"] = article_id
-                output_ref = save_body(db, body_value, now=now)["body_revision_id"]
+                body_receipt = save_body(db, body_value, now=now)
+                output_ref = body_receipt["body_revision_id"]
+                if "filing" in result:
+                    key, archive, material = _accepted_filing(
+                        result["filing"], json_mapping(payload_raw), str(target_id), body_receipt, now,
+                    )
+                    save_document("news_official_filing", str(target_id), key, archive, immutable=True)
+                    if material is not None:
+                        save_document(RECORDED_CONTRACT_FILINGS, str(target_id), material["filing_ref"], material,
+                                      immutable=True)
                 wake = True
                 if publication := result.get("original_publication"):
                     save_document("news_original_publication", str(article_id), "published_at", publication)
@@ -1254,6 +1382,85 @@ def _postgres_possible_related(cursor: Any, stock_code: str, event_id: str, iden
     return [str(row[0]) for row in rows if str(row[0]) != event_id]
 
 
+def _strategy_material_query(symbol: str, cut: datetime, *, postgres: bool) -> tuple[str, tuple]:
+    """Read only committed, scoped material at the strategy cut, without fetching bodies."""
+    p = "%s" if postgres else "?"
+    archive = "document_json->>'{}'" if postgres else "json_extract(document_json,'$.{}')"
+    sql = f"""
+        WITH scope(symbol, cut) AS (VALUES (CAST({p} AS TEXT), CAST({p} AS DOUBLE PRECISION))),
+        global_targets AS (
+            SELECT t.article_revision_id, MIN(t.available_at) AS available_at
+            FROM central_news_article_target_revisions t, scope s
+            WHERE t.stock_code=s.symbol AND t.relation_status='confirmed' AND t.available_at<=s.cut
+            GROUP BY t.article_revision_id
+            ORDER BY available_at DESC, t.article_revision_id DESC LIMIT 101
+        ),
+        articles AS (
+            SELECT a.article_revision_id AS ref, a.published_at, a.available_at,
+                   a.content_hash, a.identity, a.document_json
+            FROM central_news_article_revisions a, scope s
+            WHERE a.stock_code=s.symbol AND a.collection_scope='watchlist' AND a.available_at<=s.cut
+            UNION ALL
+            SELECT a.article_revision_id, a.published_at,
+                   CASE WHEN t.available_at>a.available_at THEN t.available_at ELSE a.available_at END,
+                   a.content_hash, a.identity, a.document_json
+            FROM global_targets t JOIN central_news_article_revisions a
+                ON a.article_revision_id=t.article_revision_id, scope s
+            WHERE a.stock_code='GLOBAL' AND a.available_at<=s.cut
+            ORDER BY available_at DESC, ref DESC LIMIT 101
+        ),
+        originals AS (
+            SELECT document_json, updated_at FROM central_documents, scope s
+            WHERE collection='news_official_filing' AND owner=s.symbol AND updated_at<=s.cut
+            ORDER BY updated_at DESC, document_key DESC LIMIT 101
+        ),
+        material AS (
+            SELECT document_json, updated_at, document_key FROM central_documents, scope s
+            WHERE collection={p} AND owner=s.symbol AND updated_at<=s.cut
+            ORDER BY updated_at DESC, document_key DESC LIMIT 1001
+        )
+        SELECT 'article', ref, published_at, available_at, content_hash, identity, document_json, NULL, NULL
+            FROM articles
+        UNION ALL
+        SELECT 'original', {archive.format('article_revision_id')}, {archive.format('available_at')},
+               updated_at, {archive.format('body_revision_id')}, NULL, NULL,
+               {archive.format('filing_url')}, {archive.format('original_filing_url')}
+            FROM originals
+        UNION ALL
+        SELECT 'material', document_key, NULL, updated_at, NULL, NULL, document_json, NULL, NULL
+            FROM material
+        ORDER BY 4 DESC, 2 DESC, 5 DESC
+    """
+    return sql, (symbol, cut.timestamp(), RECORDED_CONTRACT_FILINGS)
+
+
+def _read_kind_trading_notices(cursor, p: str, symbol: str, cut: datetime) -> list[dict] | None:
+    notice = "document_json->'kind_trading_notice'" if p == "%s" else "json_extract(document_json,'$.kind_trading_notice')"
+    cursor.execute(
+        f"SELECT {notice} FROM central_documents WHERE collection='news_official_filing' "
+        f"AND owner={p} AND updated_at<={p} AND {notice} IS NOT NULL "
+        "ORDER BY updated_at DESC, document_key DESC LIMIT 65",
+        (symbol, cut.timestamp()),
+    )
+    rows = cursor.fetchall()
+    return None if len(rows) > 64 else [json_mapping(row[0]) for row in rows]
+
+
+def _strategy_material_rows(rows: list[tuple[object, ...]]) -> dict:
+    articles, originals, filings = [], [], []
+    for kind, ref, published, available, version, identity, raw, source, parent in rows:
+        if kind == "article":
+            articles.append(dict(article_revision_id=ref, published_at=published, available_at=available,
+                                 content_hash=version, identity=identity, document=json_mapping(raw)))
+        elif kind == "original":
+            originals.append(dict(article_revision_id=ref, available_at=published,
+                                  body_ref=version, source_ref=source, original_filing_url=parent))
+        else:
+            filings.append(json_mapping(raw))
+    return dict(articles=articles[:100], originals=originals[:100], filings=filings[:1000],
+                partial=len(articles) > 100 or len(originals) > 100 or len(filings) > 1000)
+
+
 def _news_history_query(kind: str, placeholder: str, target: str, identity: str,
                         available_at: float | None, limit: int,
                         before_revision_id: str = "") -> tuple[str, list[object]]:
@@ -1661,7 +1868,7 @@ def _news_body_accept(db, owner, key, envelope, *, postgres, now_provider):
     else:
         if cached and cached[6] in {'fulltext','summary_only'}:
             raise NewsBodyConflict('an admitted reusable BODY must retain its accepted reference')
-        if set(result) - {'stage','body','original_publication'} or not isinstance(result.get('body'),dict):
+        if set(result) - {'stage','body','original_publication','filing'} or not isinstance(result.get('body'),dict):
             raise NewsBodyConflict("invalid BODY output")
         body=result['body']
         if (set(body) != {'extractor_version','fetched_at','status','body_text','error'}

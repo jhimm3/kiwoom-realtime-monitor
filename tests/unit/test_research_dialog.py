@@ -235,8 +235,14 @@ class ResearchDialogTests(unittest.TestCase):
                 "evidence_provenance": {"execution": provenance}}, "상세 체결 비용 12원"),
             ("micro_experiment", "frozen_micro_execution_research", {
                 "status": "UNKNOWN", "position_quantity": 0, "evidence_provenance": provenance,
+                "historical_kind_halt": {"state": "CONFIRMED_FULL_DAY_HALT", "scope": "retrospective_only"},
                 "input_assessment": {"missing_inputs": ["cross_stream_order"], "native_confirmation": False}},
                 "미확인: cross_stream_order"),
+            ("micro_experiment", "frozen_micro_execution_research", {
+                "status": "COMPLETED", "position_quantity": 0, "evidence_provenance": provenance,
+                "total_cost_won": 44, "realized_pnl_won": -1044,
+                "default_cost_model": {"source": "agreed_research_cost/v1"}},
+                "상세 체결 비용 44원 · 실현손익 -1,044원 · 기본 추정 비용 포함"),
         )
         with tempfile.TemporaryDirectory() as directory:
             dialog = ResearchDialog(Path(directory))
@@ -253,6 +259,9 @@ class ResearchDialogTests(unittest.TestCase):
                     self.assertIn("계좌 주문 없음", dialog._summary.text())
                     self.assertEqual("동결 복원", dialog._table.item(0, 5).text())
                     self.assertIn('"source_version": "frozen/v2"', dialog._table.item(0, 4).toolTip())
+                    if "historical_kind_halt" in trace:
+                        self.assertIn("KIND 종일 거래정지 확인", row[4])
+                        self.assertIn('"scope": "retrospective_only"', dialog._table.item(0, 4).toolTip())
             finally:
                 dialog.stop()
                 dialog.deleteLater()
@@ -366,6 +375,7 @@ class ResearchProcessEnvironmentTests(unittest.TestCase):
             'MONITOR_SERVER_ACCESS_TOKEN', 'KIWOOM_SERVER_ACCESS_TOKEN', 'MONITOR_SERVER_QUERY_ACCESS_TOKEN',
             'MONITOR_SERVER_RESEARCH_INPUT_GRANTS_JSON', 'MONITOR_SERVER_RESEARCH_RESULT_GRANTS_JSON',
             'MONITOR_SERVER_NEWS_BODY_GRANTS_JSON', 'MONITOR_SERVER_OBSERVATION_ARCHIVE_GRANTS_JSON',
+            'MONITOR_SERVER_PROGRAM_ARCHIVE_TARGET_FILE', 'MONITOR_SERVER_PROGRAM_ARCHIVE_SOURCE_STREAM',
             'KIWOOM_SERVER_DATABASE_URL', 'KIWOOM_SERVER_SECRET_DIR',
             'monitor_server_access_token',
         }

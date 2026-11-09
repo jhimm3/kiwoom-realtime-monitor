@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QCoreApplication, QEventLoop, QObject, QThread, QTimer, Qt, Signal, Slot
 
 from kiwoom_monitor.application.ranking_execution import RankingExecutionCoordinator
-from kiwoom_monitor.application.ranking_schedule import RankingChangeSummary, RankingResponseAction
+from kiwoom_monitor.application.ranking_schedule import RankingChangeSummary, RankingResponseAction, ranking_history_due
 from kiwoom_monitor.application.realtime_subscription import (
     RealtimeSubscriptionAction, RealtimeSubscriptionCoordinator,
 )
@@ -168,6 +168,7 @@ class AppController(QObject):
         daily_high_worker_factory: Callable[[tuple[str, ...]], DailyHighWorker] | None = None,
         historical_high_worker_factory: Callable[[tuple[str, ...]], HistoricalHighWorker] | None = None,
         nxt_eligibility_worker_factory: Callable[[tuple[str, ...]], NxtEligibilityWorker] | None = None,
+        nxt_catalog_due: Callable[[datetime], bool] | None = None,
         monitor_database_path: Path | None = None,
         minute_bar_repository: MinuteBarRepository | None = None,
         stock_lookup: object | None = None,
@@ -189,6 +190,7 @@ class AppController(QObject):
         self.daily_high = DailyHighWorkerController(self, daily_high_worker_factory)
         self.historical_high = HistoricalHighWorkerController(self, historical_high_worker_factory)
         self.nxt_eligibility = NxtEligibilityWorkerController(self, nxt_eligibility_worker_factory)
+        self._nxt_catalog_due = nxt_catalog_due
         self.krx_catalog = KrxStockCatalogWorkerController(self)
         self.image_ocr = ImageThemeOcrWorkerController(self)
         self.top20_repair = Top20MarketRepairWorkerController(self)
@@ -273,6 +275,7 @@ class AppController(QObject):
         )
         self.nxt_checked_codes: set[str] = set()
         self.nxt_enabled_codes: set[str] = set()
+        self._nxt_eligibility_day = ""
         self.ranked_codes: tuple[str, ...] = ()
         self.ranking_uses_local_fallback = False
         self._ranking_followup_revision = 0
@@ -298,9 +301,7 @@ class AppController(QObject):
         self.ranking.failed.connect(self.on_ranking_failed)
         self.ranking.finished.connect(self.on_ranking_worker_finished)
         self.realtime.subscription_ready.connect(self.start_realtime_followups)
-        self.nxt_eligibility.finished.connect(self._start_catalog_after_nxt)
-        self.nxt_eligibility.finished.connect(lambda: self.start_realtime_subscription(self.ranked_codes))
-        self.nxt_eligibility.finished.connect(lambda: self.start_realtime_followups(self.ranked_codes))
+        self.nxt_eligibility.finished.connect(self._on_ranking_nxt_finished)
         self.minute_history.finished.connect(self._on_minute_history_finished)
         self._adopt_unpublished_observer_error(unpublished_observer_error)
 
@@ -338,9 +339,20 @@ class AppController(QObject):
     def request_ranking(self) -> None:
         if self.closing or self.api_reloading or self.ranking_loader is None or self.ranking.is_running:
             return
+        now = self.ranking_now()
+        self._reset_nxt_eligibility(now)
+        if self._nxt_catalog_due is not None and self._nxt_catalog_due(now):
+            self.nxt_eligibility.start(())
         self.ranking_started.emit()
-        logger.info("순위 조회 작업 시작: %s", self.ranking_now().strftime("%H:%M:%S"))
+        logger.info("순위 조회 작업 시작: %s", now.strftime("%H:%M:%S"))
         self.ranking.start(self.ranking_loader)
+
+    def _reset_nxt_eligibility(self, now: datetime) -> None:
+        day = as_kst(now).date().isoformat()
+        if day != self._nxt_eligibility_day:
+            self._nxt_eligibility_day = day
+            self.nxt_checked_codes.clear()
+            self.nxt_enabled_codes.clear()
 
     def on_ranking_timer(self) -> None:
         if self.closing or self.api_reloading:
@@ -353,7 +365,7 @@ class AppController(QObject):
         self.ranking_requested.emit()
 
     def prepare_ranking_refresh(self) -> None:
-        if self.closing or self.api_reloading:
+        if self.closing or self.api_reloading or not ranking_history_due(self.ranking_now()):
             return
         self.ranking_execution.begin_priority_preparation()
         for worker in (self.minute_history.worker, self.daily_high.worker,
@@ -370,7 +382,10 @@ class AppController(QObject):
         query_type = actions.query_type()
         schedule = self.ranking_execution.next_schedule(query_type)
         self.ranking_timer.start(schedule.delay_ms)
-        self.ranking_preparation_timer.start(schedule.preparation_delay_ms)
+        if ranking_history_due(schedule.next_time):
+            self.ranking_preparation_timer.start(schedule.preparation_delay_ms)
+        else:
+            self.ranking_preparation_timer.stop()
         logger.info("다음 순위 조회 예약: %s + 0.25초 (기준 %s)",
                     schedule.next_time.strftime("%H:%M:%S"), query_type)
 
@@ -430,17 +445,19 @@ class AppController(QObject):
             self.on_ranking_failed("순위 변경 계산 결과가 없습니다.")
             return
         started = time.monotonic()
-        codes = tuple(stock.code for stock in stocks)
+        codes = tuple(stock.code for stock in stocks if getattr(stock, "enrich", True))
         self.ranked_codes = codes
         self._ranking_followup_revision += 1
         actions.apply_ranking(stocks, summary, codes)
-        if is_nxt_only_session(actions.environment(), self.ranking_now()) and actions.start_nxt_eligibility(codes):
-            self.nxt_preparing.emit(len(codes))
-        else:
-            if actions.uses_nas_source():
-                actions.start_minute_history(codes)
-            self.start_realtime_subscription(actions.realtime_codes(codes))
-            self._schedule_followup_fallback(codes)
+        now = self.ranking_now()
+        if ranking_history_due(now):
+            if is_nxt_only_session(actions.environment(), now) and actions.start_nxt_eligibility(codes):
+                self.nxt_preparing.emit(len(codes))
+            else:
+                if actions.uses_nas_source():
+                    actions.start_minute_history(codes)
+                self.start_realtime_subscription(actions.realtime_codes(codes))
+                self._schedule_followup_fallback(codes)
         self.schedule_next_ranking_refresh()
         logger.info("순위 표 적용 완료: %dms · %d개", round((time.monotonic() - started) * 1000), len(stocks))
 
@@ -501,7 +518,7 @@ class AppController(QObject):
     def on_realtime_session_boundary(self) -> None:
         if self.closing or self.api_reloading:
             return
-        self.start_realtime_subscription(self.ranked_codes)
+        self.start_realtime_subscription(self.ranked_codes if ranking_history_due(self.ranking_now()) else ())
         self.schedule_realtime_session_refresh()
 
     def _schedule_followup_fallback(self, codes: tuple[str, ...]) -> None:
@@ -516,7 +533,7 @@ class AppController(QObject):
         timer.start(5_000)
 
     def start_realtime_followups(self, codes: tuple[str, ...]) -> None:
-        if self.closing or self.api_reloading or self.ranking_execution.priority_preparing:
+        if not self._ranking_followups_due():
             return
         if not self.ranked_codes or not set(self.ranked_codes).issubset(codes):
             return
@@ -541,29 +558,36 @@ class AppController(QObject):
         actions.phase_started(request, phase)
 
     def start_daily_high_phase(self, codes: tuple[str, ...]) -> None:
-        if self.closing or self.api_reloading or self.ranking_execution.priority_preparing:
+        if not self._ranking_followups_due():
             return
         assert self._secondary_actions is not None
         if not self._secondary_actions.start_daily_high(codes, False):
             self.start_fundamentals_phase(codes)
 
     def start_fundamentals_phase(self, codes: tuple[str, ...]) -> None:
-        if self.closing or self.api_reloading or self.ranking_execution.priority_preparing:
+        if not self._ranking_followups_due():
             return
         assert self._secondary_actions is not None
         if not self._secondary_actions.start_fundamentals(codes):
             self.start_nxt_phase(codes)
 
     def start_nxt_phase(self, codes: tuple[str, ...]) -> None:
-        if self.closing or self.api_reloading or self.ranking_execution.priority_preparing:
+        if not self._ranking_followups_due():
             return
         assert self._secondary_actions is not None
         if not self._secondary_actions.start_nxt_eligibility(codes):
             self._secondary_actions.start_catalog()
 
-    def _start_catalog_after_nxt(self) -> None:
-        if not self.closing and not self.api_reloading and self._secondary_actions is not None:
-            self._secondary_actions.start_catalog()
+    def _ranking_followups_due(self) -> bool:
+        return (not self.closing and not self.api_reloading and not self.ranking_execution.priority_preparing
+                and ranking_history_due(self.ranking_now()))
+
+    def _on_ranking_nxt_finished(self) -> None:
+        if not self._ranking_followups_due() or self._secondary_actions is None:
+            return
+        self._secondary_actions.start_catalog()
+        self.start_realtime_subscription(self.ranked_codes)
+        self.start_realtime_followups(self.ranked_codes)
 
     def _on_minute_history_finished(self, codes: tuple[str, ...], forced: bool) -> None:
         actions = self._secondary_actions
@@ -930,6 +954,7 @@ class AppController(QObject):
         )
         previous = {
             "ranking_loader": self.ranking_loader, "market_data_client": self.market_data_client,
+            "nxt_catalog_due": self._nxt_catalog_due,
             "owned_observers": self._owned_observers,
             **{name: controller._worker_factory for controller, name in controllers},
         }
@@ -951,6 +976,7 @@ class AppController(QObject):
             raise
         try:
             self.ranking_loader = runtime.get("ranking_loader")
+            self._nxt_catalog_due = runtime.get("nxt_catalog_due")
             for controller, name in controllers:
                 controller.set_factory(runtime.get(name))
             source_attempted = writer is not None
@@ -965,6 +991,7 @@ class AppController(QObject):
                 actions.apply_runtime(runtime)
         except Exception as error:
             self.ranking_loader = previous["ranking_loader"]
+            self._nxt_catalog_due = previous["nxt_catalog_due"]
             self.market_data_client = previous["market_data_client"]
             self._owned_observers = previous["owned_observers"]
             self.ranking_uses_local_fallback = old_fallback

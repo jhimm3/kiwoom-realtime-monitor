@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -12,6 +12,40 @@ from kiwoom_monitor.infrastructure.naver_stock_market_news_source import parse_p
 
 
 class MarketFeedNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_morning_restart_reopens_yesterday_from_head_and_only_retries_failed_source(self) -> None:
+        clock = [datetime.fromisoformat("2026-09-22T06:59:00+09:00")]
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteQueryStore(Path(directory) / "news.sqlite3", now_provider=lambda: clock[0])
+            store.initialize()
+            self.addCleanup(store.close)
+            old_cut = datetime.fromisoformat("2026-09-21T19:58:00+09:00").timestamp()
+            store.save_news_source_page({
+                "source_id": "naver-stock:flash:2026-09-21", "scope": "naver_stock_market",
+                "query_text": "flash", "run_id": "unfinished", "checked_at": old_cut,
+                "next_start": 4, "next_schedule_at": old_cut, "items": [],
+            })
+
+            def fetch(source, day, page):
+                calls.append((source, day, page))
+                if source == "world" and day == "2026-09-21" and clock[0].minute == 0:
+                    raise OSError("fixture provider unavailable")
+                return parse_page(source, day, page, {"articles": []} if source == "flash" else [])
+
+            collector = MarketFeedNewsCollector(store, fetcher=fetch, now_provider=lambda: clock[0])
+            await collector.run_once()
+            self.assertEqual([], calls)
+            clock[0] += timedelta(minutes=1)
+            with self.assertLogs("kiwoom_monitor.central_server.market_news_sources", "ERROR"):
+                await collector.run_once()
+            self.assertEqual([("flash", "2026-09-21", 1), ("world", "2026-09-21", 1),
+                              ("flash", "2026-09-22", 1), ("world", "2026-09-22", 1)], calls)
+            clock[0] += timedelta(minutes=5)
+            calls.clear()
+            await MarketFeedNewsCollector(store, fetcher=fetch, now_provider=lambda: clock[0]).run_once()
+            self.assertEqual([("world", "2026-09-21", 1), ("flash", "2026-09-22", 1),
+                              ("world", "2026-09-22", 1)], calls)
+
     async def test_disabled_market_feed_does_not_fetch(self) -> None:
         calls = []
         collector = MarketFeedNewsCollector(
@@ -26,10 +60,9 @@ class MarketFeedNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteQueryStore(Path(directory) / "central.sqlite3", now_provider=lambda: now)
             store.initialize()
-            store.replace_documents("stock_catalog", [{
-                "owner": "krx", "key": "005930",
-                "document": {"code": "005930", "name": "삼성전자"},
-            }])
+            store.save_dataset_snapshot("nxt_eligibility_catalog", "2026-09-22", "2026-09-22", {
+                "flags": {}, "stocks": {"005930": ["삼성전자", "KOSPI"], "0147B0": ["래블업", "KOSDAQ"]},
+            })
             calls: list[tuple[str, str, int]] = []
 
             def fetch(source: str, target_date: str, page: int):
@@ -45,14 +78,16 @@ class MarketFeedNewsCollectorTests(unittest.IsolatedAsyncioTestCase):
                 return parse_page(source, target_date, page, payload)
 
             collector = MarketFeedNewsCollector(store, fetcher=fetch, now_provider=lambda: now)
-            await collector.run_once()
-            await collector.run_once()
+            for source in ("flash", "world"):
+                await collector._collect(source, "2026-09-22")
+                await collector._collect(source, "2026-09-22")
             history = store.load_news_history("article", target="GLOBAL")
             diagnostics = store.load_news_source_diagnostics(limit=10)
             store.close()
 
         self.assertEqual([("flash", "2026-09-22", 1), ("world", "2026-09-22", 1)], calls)
         self.assertEqual(2, len(history))
+        self.assertEqual(1, diagnostics["summary"]["target_status"]["confirmed"])
         self.assertEqual({now.timestamp()}, {run["checked_at"] for run in diagnostics["runs"]})
         self.assertEqual({now.timestamp() + 300}, {
             source["next_schedule_at"] for source in diagnostics["sources"]

@@ -6,8 +6,9 @@ from kiwoom_monitor.domain.time_basis import kst_now, as_kst, aware_iso_kst
 import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import Callable, Awaitable
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Any, Literal, Protocol, TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -21,6 +22,9 @@ from kiwoom_monitor.domain.research_contract import (
 if TYPE_CHECKING:
     from .candidate_monitor import CandidateMonitor
     from .realtime_collector import CentralRealtimeCollector
+
+
+logger = logging.getLogger(__name__)
 
 
 class ResearchReadStore(Protocol):
@@ -37,12 +41,16 @@ class ResearchReadStore(Protocol):
     def load_shadow_candidates(self, after_sequence: int = 0, limit: int = 100) -> dict[str, Any]: ...
 
     def load_document(self, collection: str, owner: str, key: str) -> dict[str, Any] | None: ...
+    def load_documents(self, collection: str, owner: str) -> list[dict[str, Any]]: ...
+    def load_strategy_material_inputs(self, symbol: str, cut: datetime) -> dict: ...
+    def load_kind_trading_notices(self, symbol: str, cut: datetime) -> list[dict] | None: ...
 
     def load_market_event_history(self, kind: str, *, code: str = "", limit: int = 100) -> list[dict[str, Any]]: ...
     def load_observation_revisions(self, kind: str, subject: str, limit: int) -> list[dict[str, Any]]: ...
+    def load_dataset_snapshots(self, kind: str, subject: str, limit: int) -> list[dict[str, Any]]: ...
 
 
-def _confirmed_krx_day(receipt: dict[str, Any] | None, cut: datetime) -> date | None:
+def _krx_market_operation(receipt: dict[str, Any] | None, cut: datetime) -> dict[str, Any] | None:
     """Use an observed native 0s receipt only for its own visible KST day."""
     if receipt is None:
         return None
@@ -58,7 +66,10 @@ def _confirmed_krx_day(receipt: dict[str, Any] | None, cut: datetime) -> date | 
         available = datetime.fromtimestamp(updated_at, timezone.utc)
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError, OSError):
         return None
-    return day if observed.date() == day and observed <= available <= cut else None
+    if observed.date() != day or not observed <= available <= cut:
+        return None
+    return {"state": "OBSERVED", "source": document["source"], "status_code": document["status_code"],
+            "observed_at": observed.isoformat(), "available_at": as_kst(available).isoformat()}
 
 
 def create_research_read_router(
@@ -83,15 +94,18 @@ def create_research_read_router(
         vi_limit: int = Query(default=100, ge=1, le=1000),
     ) -> dict[str, object]:
         from kiwoom_monitor.application.micro_execution_evidence import MICRO_VARIANTS, assess_micro_shadow_inputs
+        from kiwoom_monitor.infrastructure.exchange_effective_dates import kind_trading_state
 
         if variant not in MICRO_VARIANTS:
             raise HTTPException(status_code=422, detail="unsupported MICRO Shadow variant")
-        day_receipt, vi_history = None, ()
-        if venue == "KRX" and variant != "BOOK_SCALP":
+        day_receipt, vi_history, kind_notices = None, (), []
+        if venue == "KRX":
+            native_cut = now_kst()
             day_receipt = await asyncio.to_thread(
-                store.load_document, "krx_trading_day_observations", now_kst().date().isoformat(), "latest",
+                store.load_document, "krx_trading_day_observations", native_cut.date().isoformat(), "latest",
             )
-            if _confirmed_krx_day(day_receipt, now_kst()) is not None:
+            kind_notices = await asyncio.to_thread(store.load_kind_trading_notices, symbol, native_cut)
+            if _krx_market_operation(day_receipt, now_kst()) is not None:
                 vi_history = await asyncio.to_thread(store.load_market_event_history, "vi", code=symbol, limit=vi_limit)
 
         # Take the one current RAM cut after native reads so their visibility
@@ -101,10 +115,13 @@ def create_research_read_router(
             (symbol,), seconds=lookback_seconds, include_micro_books=True,
         ) if collector is not None else None
         cut = aware_iso_kst(snapshot["decision_time"]) if snapshot is not None else now_kst()
-        trading_date = _confirmed_krx_day(day_receipt, cut)
+        operation = _krx_market_operation(day_receipt, cut)
+        trading_date = cut.date() if operation is not None else None
         result = assess_micro_shadow_inputs(
             symbol=symbol, venue=venue, variant=variant, decision_at=cut, trading_date=trading_date,
-            trade_snapshot=snapshot, vi_history=vi_history,
+            trade_snapshot=snapshot, vi_history=vi_history, market_operation=operation,
+            kind_halt_resume=(kind_trading_state(kind_notices, cut) if venue == "KRX" else
+                              {"state": "UNKNOWN", "reason": "kind_venue_unavailable"}),
         )
         return {**result, "order_authorized": False}
 
@@ -128,7 +145,17 @@ def create_research_read_router(
                     or not isinstance(document['scenario'], dict)
                     or document['scenario'].get('version') != MICRO_FROZEN_EVIDENCE_VERSION):
                 raise ValueError('invalid MICRO frozen research descriptor')
-            result = replay_micro_execution(document['scenario'], document['policy'])
+            scenario = document['scenario']
+            read_at = None
+            symbol = scenario.get('symbol')
+            if (scenario.get('venue') == 'KRX' and 'decision_at' in scenario and 'kind_halt_receipt' not in scenario
+                    and isinstance(symbol, str) and len(symbol) == 6 and symbol.isascii() and symbol.isalnum()):
+                day = aware_iso_kst(scenario['decision_at']).date()
+                if day <= now_kst().date():
+                    receipt = await asyncio.to_thread(store.load_document, 'market_data_coverage', f'{day}:{symbol}:KRX', 'complete')
+                    read_at = now_kst()
+                    scenario = {**scenario, 'kind_halt_receipt': receipt}
+            result = replay_micro_execution(scenario, document['policy'], kind_halt_read_at=read_at)
         except (UnicodeError, ValueError, TypeError, KeyError, RecursionError) as error:
             raise HTTPException(status_code=422, detail='invalid MICRO frozen research descriptor') from error
         return {**result, 'execution_scope': 'frozen_micro_execution_research',
@@ -139,7 +166,10 @@ def create_research_read_router(
         request: Request, evidence_sha256: str = Query(pattern=r"^[0-9a-f]{64}$"),
     ) -> dict[str, object]:
         from kiwoom_monitor.application.daily_decline import (
-            decode_daily_decline_setup_inputs, evaluate_daily_decline_shadow,
+            daily_decline_index_benchmark, decode_daily_decline_setup_inputs, evaluate_daily_decline_shadow,
+        )
+        from kiwoom_monitor.application.news_material import (
+            RECORDED_CONTRACT_FILINGS, received_strategy_material, recorded_contract_material,
         )
 
         body = bytearray()
@@ -151,33 +181,113 @@ def create_research_read_router(
             raise HTTPException(status_code=422, detail="DD setup evidence SHA256 does not match")
         try:
             document = json.loads(body)
-            required = {"version", "policy", "symbol", "venue", "signal_day", "strategy_references", "basis", "benchmark"}
-            if (not isinstance(document, dict) or not required <= document.keys()
-                    or document.keys() - required - {"catalyst"} or document["version"] != "dd-shadow-setup-evidence/v1"
+            if not isinstance(document, dict):
+                raise ValueError("invalid DD Shadow setup evidence")
+            version = document.get("version")
+            native_market = version == "dd-shadow-setup-evidence/v2"
+            required = {"version", "policy", "symbol", "venue", "signal_day", "strategy_references", "basis"}
+            required.add("benchmark_market" if native_market else "benchmark")
+            optional = {"material_news", "material_event_ref"} if native_market else {"catalyst", "material_news"}
+            if (version not in ("dd-shadow-setup-evidence/v1", "dd-shadow-setup-evidence/v2")
+                    or not required <= document.keys() or document.keys() - required - optional
                     or not isinstance(document["policy"], dict)):
                 raise ValueError("invalid DD Shadow setup evidence")
-            inputs = decode_daily_decline_setup_inputs(document, document["policy"])
+            market = document.get("benchmark_market")
+            if native_market and market not in ("KOSPI", "KOSDAQ"):
+                raise ValueError("DD benchmark market must be KOSPI or KOSDAQ")
+            selected_material = document.get("material_event_ref")
+            if "material_event_ref" in document and (not isinstance(selected_material, str)
+                    or not selected_material or "material_news" in document):
+                raise ValueError("DD recorded material selection must be explicit and separate from frozen evidence")
+            inputs = decode_daily_decline_setup_inputs(document, document["policy"], signal_only=native_market)
         except (UnicodeError, ValueError, RecursionError) as error:
             raise HTTPException(status_code=422, detail="invalid DD Shadow setup evidence") from error
 
         symbol, venue = inputs["symbol"], inputs["venue"]
+        signal_day = inputs["signal_day"]
         revision_limit = 5000
         observations = await asyncio.to_thread(store.load_observation_revisions, "daily_bar", f"{symbol}:{venue}", revision_limit)
+        quote = benchmark = index_snapshot = None
+        if native_market:
+            raw_day = signal_day.strftime("%Y%m%d")
+            snapshots = await asyncio.to_thread(
+                store.load_dataset_snapshots, "market_index_chart", f"{raw_day}:{market.lower()}", 1,
+            )
+            index_snapshot = snapshots[0] if snapshots else None
+            collector = get_realtime_collector()
+            if collector is not None:
+                quote = collector.automation_price_observation(symbol)
         cut = now_kst()
+        contract_events = []
+        material_context = None
+        if native_market and "material_news" not in inputs:
+            try:
+                receipts = await await_native_call(store.load_strategy_material_inputs, symbol, cut)
+                timeline, material_context = received_strategy_material(symbol, cut, **receipts)
+                filings = {row["filing_ref"]: row for row in receipts["filings"]}
+            except Exception:
+                logger.warning("DD strategy news context unavailable for %s", symbol, exc_info=True)
+                filing_rows = await await_native_call(store.load_documents, RECORDED_CONTRACT_FILINGS, symbol)
+                filings = {row["key"]: row["document"] for row in filing_rows}
+                timeline = recorded_contract_material(filings.values(), cut)
+            for root, current, effect, _ in timeline.as_of(symbol, cut):
+                contract_events.append({
+                    "event_ref": root, "filing_ref": current.ref, "source_ref": current.source_ref,
+                    "event_kind": filings[root].get("event_kind", "contract_termination"),
+                    "effect": effect, "available_at": current.available_at.isoformat(),
+                })
+            if selected_material is None and len(contract_events) == 1:
+                selected_material = contract_events[0]["event_ref"]
+            if selected_material is not None:
+                inputs["material_news"] = selected_material, timeline
         native = [row for row in observations if (row.get("source_id"), row.get("origin")) == ("kiwoom-ka10081", "query")]
+
+        def benchmark_for_session(previous_day, signal_closed_at):
+            nonlocal benchmark
+            benchmark = daily_decline_index_benchmark(
+                index_snapshot, market=market.lower(), previous_day=previous_day,
+                signal_day=signal_day, signal_closed_at=signal_closed_at, cut=cut,
+            )
+            return benchmark
+
         try:
-            decision = evaluate_daily_decline_shadow(native, cut=cut, **inputs)
+            decision = evaluate_daily_decline_shadow(
+                native, cut=cut, **inputs, benchmark_for_session=benchmark_for_session if native_market else None,
+            )
         except ValueError as error:
             raise HTTPException(status_code=422, detail="invalid DD Shadow setup evidence") from error
-        return {
+        result = {
             "version": "dd-shadow-setup-result/v1", "execution_scope": "native_setup_assessment",
-            "symbol": symbol, "venue": venue, "signal_day": inputs["signal_day"].isoformat(),
+            "symbol": symbol, "venue": venue, "signal_day": signal_day.isoformat(),
             "cut": cut.isoformat(), "evidence_sha256": evidence_sha256,
             "reference_authority": "caller_supplied", "setup": decision.to_document(),
             "native_revision_count": len(native), "other_revision_count": len(observations) - len(native),
             "revision_read_limit_reached": len(observations) == revision_limit,
             "candidate": None, "order_authorized": False,
         }
+        if native_market:
+            if material_context is not None:
+                result["material_news"] = material_context
+            price = {"status": "UNKNOWN", "reason": "no_current_post_signal_krx_trade"}
+            if quote is not None:
+                at = as_kst(quote["available_at"])
+                if signal_day < at.date() == cut.date() and at <= cut:
+                    price = {"status": "OBSERVED", "source": "kiwoom-websocket-0B",
+                             "price_won": quote["price_won"], "available_at": at.isoformat(),
+                             "evidence_id": quote["input_ref"], "price_basis": "unadjusted", "durable": False}
+            index = {"market": market, "status": "UNKNOWN", "source": "kiwoom-ka20006"}
+            if benchmark is not None:
+                index.update(status="OBSERVED", return_bps=benchmark.return_bps,
+                             available_at=benchmark.available_at.isoformat(), evidence_id=benchmark.evidence_id)
+            result.update(version="dd-shadow-setup-result/v2", execution_scope="native_market_setup_assessment",
+                          reference_authority="mixed", benchmark=index, price_observation=price)
+            result["input_assessment"] = {
+                "signal_price_basis": "adjusted_daily",
+                "raw_price_protection": {"status": "UNKNOWN", "reason": "raw_protection_level_unverified"},
+            }
+            if contract_events or selected_material is not None:
+                result.update(contract_events=contract_events, selected_material_event_ref=selected_material)
+        return result
 
     if result_authorize is not None:
         @router.post("/api/v1/research/reported-results")

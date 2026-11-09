@@ -64,15 +64,22 @@ class MockAutomationSupervisor:
 
     def __init__(self, store: Any, credential_owner: Any, *, poll_seconds: float = 1.0, price_source=None,
                  now_provider: Callable[[], datetime] | None = None, leader_context_source=None,
-                 expected_implementation_hash=None) -> None:
+                 expected_implementation_hash=None, minute_candidate_current=None, close_calendar=None,
+                 nxt_price_source=None) -> None:
         self._now = (lambda: as_kst(now_provider())) if now_provider else (lambda: datetime.now(KST))
         self._store = store
         self._owner = credential_owner
         self._repository = ForwardEvaluationRepository(store)
         self._poll_seconds = max(0.25, float(poll_seconds))
         self._price_source = price_source
+        self._nxt_price_source = nxt_price_source
         self._leader_context_source = leader_context_source
         self._expected_implementation_hash = expected_implementation_hash
+        self._minute_candidate_options = ({} if minute_candidate_current is None else {
+            "minute_candidate_current": minute_candidate_current,
+        })
+        if close_calendar is not None:
+            self._minute_candidate_options['close_calendar'] = close_calendar
         self._runners: dict[str, MockAutomationRunner] = {}
         self._preparing_runners: set[MockAutomationRunner] = set()
         # The current map is withdrawn before bundle replacement. Keep its
@@ -85,6 +92,10 @@ class MockAutomationSupervisor:
         self._close_task: asyncio.Task[None] | None = None
         self._restore_stop = asyncio.Event()
         self._closing = False
+
+    def needs_close_calendar(self):
+        return any(episode._minute_management is not None and episode._minute_management.needs_close_calendar()
+                   for runner in tuple(self._runners.values()) for episode in runner.episodes)
 
     def observe_automation_price(self, symbol, price):
         if self._closing:
@@ -401,7 +412,9 @@ class MockAutomationSupervisor:
                             account_ref, admission.spec_id, require_canonical_document=True)
                         episode = MockAutomationEpisode(self._store, bundle, spec, member_admission=admission,
                             proposed_selection=selection, price_source=self._price_source,
-                            leader_context_source=self._leader_context_source, now_provider=self._now)
+                            nxt_price_source=self._nxt_price_source,
+                            leader_context_source=self._leader_context_source, now_provider=self._now,
+                            **self._minute_candidate_options)
                         created.append(episode)
                         await drain_thread_call(episode.prepare_restore)
                     members.append(episode)
@@ -818,7 +831,9 @@ class MockAutomationSupervisor:
         from .mock_automation_episode import MockAutomationEpisode
         from .mock_automation_runner import MockAutomationRunner
         episode_options = dict(price_source=self._price_source, now_provider=self._now,
-                               leader_context_source=self._leader_context_source)
+                               nxt_price_source=self._nxt_price_source,
+                               leader_context_source=self._leader_context_source,
+                               **self._minute_candidate_options)
         if selection is None:
             episodes = (MockAutomationEpisode(self._store, bundle, spec, **episode_options),)
             runner_options = {}
@@ -859,16 +874,38 @@ class MockAutomationSupervisor:
         finally:
             self._preparing_runners.discard(runner)
 
-    def status(self, account_ref: str, *, credential_profile_id: str = "") -> dict[str, Any]:
+    def status(self, account_ref: str, *, credential_profile_id: str = "",
+               include_held_close_material: bool = False) -> dict[str, Any]:
         control = self._repository.load_mock_automation_control(account_ref)
         return self._status_from_control(
             account_ref, credential_profile_id=credential_profile_id, control=control,
+            include_held_close_material=include_held_close_material,
         )
 
-    def _status_from_control(self, account_ref: str, *, credential_profile_id: str, control) -> dict[str, Any]:
+    def _held_close_material(self, decision):
+        from kiwoom_monitor.application.news_material import decision_material_context, recorded_contract_material
+
+        symbol = decision['symbol']
+        cut, entry_cut = (datetime.fromisoformat(decision[name]) for name in ('cut', 'entry_cut'))
+        try:
+            inputs = self._store.load_strategy_material_inputs(symbol, cut)
+            filings = inputs['filings']
+            result = decision_material_context(recorded_contract_material(filings, cut), symbol, cut,
+                                               entry_cut=entry_cut)
+            filings_by_ref = {filing['filing_ref']: filing for filing in filings}
+            for event in (*result['entry_events'], *result['events']):
+                filing = filings_by_ref[event['revision_ref']]
+                event.update(title=filing['title'], body_ref=filing['body_ref'])
+        except Exception:
+            logger.warning("held CLOSE material unavailable for %s", symbol, exc_info=True)
+            return {**decision, 'status': 'UNAVAILABLE'}
+        return {**decision, **result, 'partial': inputs['partial']}
+
+    def _status_from_control(self, account_ref: str, *, credential_profile_id: str, control,
+                             include_held_close_material: bool = False) -> dict[str, Any]:
         runner = self._runners.get(account_ref)
         bundle = self._owner.bundle(credential_profile_id) if credential_profile_id else None
-        return {
+        value = {
             "version": "mock_automation_supervisor_status/v1",
             "account_ref": account_ref,
             "credential_profile_id": credential_profile_id,
@@ -877,6 +914,12 @@ class MockAutomationSupervisor:
             "runner": runner.status if runner is not None else None,
             "restore_error": self._restore_errors.get(account_ref, ""),
         }
+        if include_held_close_material and runner is not None:
+            material = [self._held_close_material(decision) for episode in runner.episodes
+                        for decision in episode.held_close_decisions()]
+            if material:
+                value['held_close_material'] = material
+        return value
 
     async def publish_native_unfilled_population(self, document):
         """Existing account lock/runner only; never activate or restore for a packet."""

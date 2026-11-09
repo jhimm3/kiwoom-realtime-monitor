@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -19,6 +20,36 @@ from .database_codec import (
 
 
 class SQLiteResearchExportStoreMixin:
+    @contextmanager
+    def read_after_close_observations(self, start: datetime, end: datetime, completed_at: datetime):
+        """Read one trading date at one WAL snapshot, including repairs recorded the next morning."""
+        if not self._observation_history_enabled:
+            raise ValueError("after-close archive requires observation history")
+        kinds = sorted(RESEARCH_OBSERVATION_KINDS)
+        placeholders = ",".join("?" for _ in kinds)
+        first = _instant_time_key(start, require_aware=True)
+        last = _instant_time_key(end, require_aware=True)
+        cut = _instant_time_key(completed_at, require_aware=True)
+        # Use the existing available-at index to bound candidates. Exact instant
+        # comparisons handle the mixed offsets stored by older collectors.
+        lower = (start.astimezone(timezone.utc) - timedelta(days=1)).date().isoformat()
+        upper = (completed_at.astimezone(timezone.utc) + timedelta(days=2)).date().isoformat()
+        sql = (
+            f"SELECT {_observation_revision_columns()} FROM central_observation_revisions "
+            f"WHERE kind IN ({placeholders}) AND available_at>=? AND available_at<? "
+            "AND research_time_key(available_at)<=? "
+            "AND research_time_key(COALESCE(effective_at,available_at))>=? "
+            "AND research_time_key(COALESCE(effective_at,available_at))<? "
+            "ORDER BY kind,research_time_key(available_at),accepted_sequence,revision_id"
+        )
+        with self._connection() as connection:
+            connection.create_function("research_time_key", 1,
+                                       lambda value: _instant_time_key(value, require_aware=True),
+                                       deterministic=True)
+            rows = connection.execute(sql, (*kinds, lower, upper, cut, first, last))
+            yield (row for chunk in iter(lambda: rows.fetchmany(1000), [])
+                   for row in observation_revision_result_rows(chunk))
+
     def create_observation_export(
             self, start: datetime, end: datetime, kinds: tuple[str, ...], subject: str = "",
         ) -> dict[str, Any]:
@@ -168,6 +199,7 @@ def _observation_export_manifest(
     kinds: tuple[str, ...],
     subject: str,
     selected: list[tuple[object, ...]],
+    *, exported_at: datetime | None = None,
 ) -> dict[str, Any]:
     dataset_id = str(uuid.uuid4())
     revision_ids = [str(row[0]) for row in selected]
@@ -178,7 +210,7 @@ def _observation_export_manifest(
         "schema_version": 1,
         "captured_range": {"start": start.isoformat(), "end": end.isoformat()},
         "recorded_from": recorded_from,
-        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "exported_at": (exported_at or datetime.now(timezone.utc)).isoformat(),
         "source_ids": sorted({str(row[1]) for row in selected}),
         "fixed_watermark": dataset_id,
         "revision_count": len(revision_ids),

@@ -11,17 +11,39 @@ from datetime import datetime
 from time import monotonic
 from typing import Any, Callable
 
+from kiwoom_monitor.application.news_material import official_filing_ref
 from kiwoom_monitor.domain.news_observation import ARTICLE_BODY_EXTRACTOR_VERSION, AIJobResultError, NewsBodyDeliveryError
 from kiwoom_monitor.domain.time_basis import as_kst, kst_now
-from kiwoom_monitor.infrastructure.article_text import clean_article_text, fetch_article_text_with_metadata
+from kiwoom_monitor.infrastructure.article_text import (
+    clean_article_text, fetch_article_text_with_metadata, parse_article_text_with_metadata,
+)
+from kiwoom_monitor.infrastructure.exchange_effective_dates import document_rows
+from kiwoom_monitor.infrastructure.official_news_filing import fetch_official_filing
 
 
 LOGGER = logging.getLogger(__name__)
 
 
+def official_filing_body_result(filing: dict[str, str], payload: dict[str, Any], fetched_at: float) -> dict[str, Any]:
+    body = "\n".join(" | ".join(row) for row in document_rows(filing["filing_html"]))[:24_000]
+    status = "fulltext"
+    if not body.strip():
+        try:
+            body, _ = parse_article_text_with_metadata(filing["filing_html"])
+        except ValueError:
+            body = str(payload.get("description") or payload.get("title") or filing["filing_url"]).strip()
+            status = "summary_only"
+    return {
+        "stage": "BODY", "filing": filing,
+        "body": {"extractor_version": ARTICLE_BODY_EXTRACTOR_VERSION, "fetched_at": fetched_at,
+                 "status": status, "body_text": body, "error": ""},
+    }
+
+
 class NewsJobRunner:
     def __init__(self, store: Any, *, ai_service: Any = None,
                  fetcher: Callable[..., str | tuple[str, str]] = fetch_article_text_with_metadata,
+                 filing_fetcher: Callable[..., dict[str, str]] = fetch_official_filing,
                  poll_seconds: float = 1.0, body_timeout: float = 15.0,
                  ai_timeout: float = 90.0, busy_pause_seconds: float = 1.0,
                  parallelism: int = 1, max_idle_poll_seconds: float = 5.0,
@@ -29,6 +51,7 @@ class NewsJobRunner:
                  body_input: Callable | None = None, body_accept: Callable | None = None,
                  diagnostic_scope: Callable | None = None, paused: Callable[[], bool] | None = None) -> None:
         self._store, self._ai_service, self._fetcher = store, ai_service, fetcher
+        self._filing_fetcher = filing_fetcher
         self._body_input, self._body_accept = body_input, body_accept
         self._run_loop = (diagnostic_scope(self._loop.__func__).__get__(self,type(self))
                           if diagnostic_scope is not None else self._loop)
@@ -203,7 +226,15 @@ class NewsJobRunner:
         body = ""
         original_published_at = ""
         fetched_url = ""
-        for url in dict.fromkeys((str(payload.get("link", "")), str(payload.get("original_link", "")))):
+        urls = tuple(dict.fromkeys((str(payload.get("link") or ""), str(payload.get("original_link") or ""))))
+        filing_url = next((url for url in reversed(urls) if official_filing_ref(url)), "")
+        if filing_url:
+            filing = await asyncio.wait_for(
+                asyncio.to_thread(self._filing_fetcher, filing_url, timeout_seconds=self._body_timeout / 4),
+                timeout=self._body_timeout + 1.0,
+            )
+            return await self._accept_result(job, official_filing_body_result(filing, payload, self._now().timestamp()))
+        for url in urls:
             if not url:
                 continue
             try:

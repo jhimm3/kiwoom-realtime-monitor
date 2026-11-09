@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -8,11 +9,22 @@ from typing import Callable
 
 from kiwoom_monitor.application.trade_strength import StockFundamentals
 from kiwoom_monitor.application.historical_high_service import HistoricalHighCache, HistoricalHighEvidence, HistoricalHighTarget
+from kiwoom_monitor.application.stock_enrichment import PREMARKET_CATALOG_SETTING, PremarketCatalog
 from kiwoom_monitor.application.theme_matching import extract_known_stocks_and_unknown_fragments, split_concatenated_stock_name
 from kiwoom_monitor.infrastructure.persistence.stock_aliases import seed_known_stock_aliases
 from kiwoom_monitor.infrastructure.krx.kind_name_history import KindNameHistorySync
 from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 from kiwoom_monitor.infrastructure.persistence.sqlite_connections import sqlite_transaction
+
+
+_PREMARKET_SNAPSHOT_SQL = f"(SELECT value FROM settings WHERE key='{PREMARKET_CATALOG_SETTING}')"
+CURRENT_STOCKS_SQL = (
+    f"code IN (SELECT key FROM json_each({_PREMARKET_SNAPSHOT_SQL}, '$.stocks')) "
+    f"OR {_PREMARKET_SNAPSHOT_SQL} IS NULL"
+)
+_OUTSIDE_PREMARKET_SQL = (
+    f"""json_type({_PREMARKET_SNAPSHOT_SQL}, '$.stocks."' || stocks.code || '"') IS NOT 'array'"""
+)
 
 
 @dataclass(frozen=True)
@@ -80,33 +92,53 @@ class StockRepository:
         )
 
     @staticmethod
-    def _remember_renames(con: sqlite3.Connection, stocks: tuple[tuple[str, str, str], ...], updated_at: str) -> None:
+    def _remember_renames(
+        con: sqlite3.Connection, stocks: tuple[tuple[str, str, str], ...], updated_at: str,
+        *, source: str = "KRX",
+    ) -> None:
         """같은 종목코드의 이름 변경을 사용자 확인 대기 상태로 남긴다."""
+        previous_names = None
+        if source == "KIWOOM":
+            previous_names = dict(con.execute(
+                "SELECT code,name FROM stocks WHERE code IN (SELECT value FROM json_each(?))",
+                (json.dumps([code for code, _, _ in stocks]),),
+            ))
         for code, new_name, _market in stocks:
-            row = con.execute("SELECT name FROM stocks WHERE code=?", (code,)).fetchone()
-            if row is None:
-                continue
-            old_name = str(row[0]).strip()
+            if previous_names is None:
+                row = con.execute(
+                    f"SELECT name FROM stocks WHERE code=? AND {_OUTSIDE_PREMARKET_SQL}", (code,),
+                ).fetchone()
+                old_name = row[0].strip() if row is not None else ""
+            else:
+                old_name = previous_names.get(code, "").strip()
             new_name = str(new_name).strip()
             if not old_name or old_name == new_name:
                 continue
             # 현재 다른 종목이 사용 중인 이름은 과거 별칭으로 가로채지 않는다.
-            owner = con.execute("SELECT code FROM stocks WHERE name=? AND code<>?", (old_name, code)).fetchone()
-            if owner is not None:
+            if source != "KIWOOM" and con.execute(
+                "SELECT code FROM stocks WHERE name=? AND code<>?", (old_name, code),
+            ).fetchone():
                 continue
             con.execute(
-                "INSERT INTO stock_name_history(stock_code,old_name,new_name,source,decision,changed_at) VALUES(?,?,?,'KRX','pending',?) "
+                "INSERT INTO stock_name_history(stock_code,old_name,new_name,source,decision,changed_at) VALUES(?,?,?,?,'pending',?) "
                 "ON CONFLICT(stock_code,old_name) DO UPDATE SET new_name=excluded.new_name, changed_at=excluded.changed_at, "
                 "decision=CASE WHEN stock_name_history.new_name=excluded.new_name THEN stock_name_history.decision ELSE 'pending' END",
-                (code, old_name, new_name, updated_at),
+                (code, old_name, new_name, source, updated_at),
             )
 
     def upsert(self, code: str, name: str, market: str = "") -> None:
         observed_at = as_kst(self._now())
         con = sqlite3.connect(self._path)
         try:
+            con.execute("BEGIN IMMEDIATE")
             self._remember_renames(con, ((code, name, market),), observed_at.isoformat())
-            con.execute("INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,?) ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=CASE WHEN excluded.market<>'' THEN excluded.market ELSE stocks.market END", (code,name,market,observed_at.isoformat()))
+            con.execute(
+                "INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(code) DO UPDATE SET name=excluded.name, "
+                "market=CASE WHEN excluded.market<>'' THEN excluded.market ELSE stocks.market END "
+                f"WHERE {_OUTSIDE_PREMARKET_SQL}",
+                (code, name, market, observed_at.isoformat()),
+            )
             seed_known_stock_aliases(con, observed_at=observed_at)
             con.commit()
         finally:
@@ -125,10 +157,13 @@ class StockRepository:
         updated_at = observed_at.isoformat()
         con = sqlite3.connect(self._path)
         try:
+            con.execute("BEGIN IMMEDIATE")
             self._remember_renames(con, stocks, updated_at)
             con.executemany(
                 "INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,?) "
-                "ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=CASE WHEN excluded.market<>'' THEN excluded.market ELSE stocks.market END, updated_at=excluded.updated_at",
+                "ON CONFLICT(code) DO UPDATE SET name=excluded.name, "
+                "market=CASE WHEN excluded.market<>'' THEN excluded.market ELSE stocks.market END, "
+                f"updated_at=excluded.updated_at WHERE {_OUTSIDE_PREMARKET_SQL}",
                 ((*row, updated_at) for row in stocks),
             )
             if seed_aliases:
@@ -136,6 +171,37 @@ class StockRepository:
             con.commit()
         finally:
             con.close()
+
+    @staticmethod
+    def _load_premarket_snapshot(con: sqlite3.Connection) -> dict:
+        row = con.execute("SELECT value FROM settings WHERE key=?", (PREMARKET_CATALOG_SETTING,)).fetchone()
+        return json.loads(row[0]) if row is not None else {}
+
+    def load_premarket_flags(self, day: str) -> dict[str, bool] | None:
+        with sqlite_transaction(self._path) as con:
+            snapshot = self._load_premarket_snapshot(con)
+        return snapshot["flags"] if snapshot.get("day") == day else None
+
+    def save_premarket_catalog(self, day: str, catalog: PremarketCatalog) -> None:
+        stocks = tuple((code, name, market) for code, (name, market) in catalog["stocks"].items())
+        observed_at = as_kst(self._now())
+        updated_at = observed_at.isoformat()
+        with sqlite_transaction(self._path) as con:
+            con.execute("BEGIN IMMEDIATE")
+            if self._load_premarket_snapshot(con).get("day", "") >= day:
+                return
+            self._remember_renames(con, stocks, updated_at, source="KIWOOM")
+            con.executemany(
+                "INSERT INTO stocks(code,name,market,updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(code) DO UPDATE SET name=excluded.name,market=excluded.market,updated_at=excluded.updated_at "
+                "WHERE stocks.name<>excluded.name OR stocks.market<>excluded.market",
+                ((*stock, updated_at) for stock in stocks),
+            )
+            con.execute(
+                "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (PREMARKET_CATALOG_SETTING, json.dumps({"day": day, **catalog}, ensure_ascii=False)),
+            )
+
     def find_code_by_name(self, name: str) -> str | None:
         con = self._catalog_connect()
         try:
@@ -177,9 +243,9 @@ class StockRepository:
             return ()
         con = self._catalog_connect()
         try:
-            rows = con.execute("SELECT code, name FROM stocks WHERE name LIKE ? ORDER BY name LIMIT ?", (f"%{query}%", limit)).fetchall()
+            rows = con.execute(f"SELECT code, name FROM stocks WHERE ({CURRENT_STOCKS_SQL}) AND name LIKE ? ORDER BY name LIMIT ?", (f"%{query}%", limit)).fetchall()
             if len(rows) < limit:
-                all_rows = con.execute("SELECT code, name FROM stocks ORDER BY name").fetchall()
+                all_rows = con.execute(f"SELECT code, name FROM stocks WHERE {CURRENT_STOCKS_SQL} ORDER BY name").fetchall()
                 used = {str(code) for code, _ in rows}
                 names = [str(stock_name) for _, stock_name in all_rows]
                 similar = set(get_close_matches(query, names, n=limit, cutoff=0.35))

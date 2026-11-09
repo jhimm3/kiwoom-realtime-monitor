@@ -4,17 +4,19 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any
 from uuid import UUID
 
 from .research_contract import OBSERVATION_REVISION_SCHEMA_VERSION, RESEARCH_OBSERVATION_KINDS
+from .time_basis import KST
 
 
 # Use the existing 32 MiB research preparation budget for the entire HTTP body,
 # including the JSON envelope and escaping of the two original UTF-8 files.
 MAX_OBSERVATION_ARCHIVE_BYTES = 32 * 1024 * 1024
 OBSERVATION_ARCHIVE_PATH = "/api/v1/archive/observation-batches"
+PROGRAM_FLOW_ARCHIVE_KIND = "program_flow"
 SQLITE_ARCHIVE_DURABILITY = "sqlite_wal_synchronous_full"
 POSTGRES_ARCHIVE_DURABILITY = "postgresql_fsync_synchronous_commit_on"
 _RECEIPT_FIELDS = {"status", "accepted_at", "receipt_sequence", "durability", "storage_only"}
@@ -65,6 +67,31 @@ def archive_source_stream(value: Any) -> str:
     return value
 
 
+def _program_snapshot_ids(observations: str, start: datetime, end: datetime) -> list[str]:
+    if (start.utcoffset() != KST.utcoffset(None) or start.time() != time()
+            or end != start + timedelta(days=1)):
+        raise ValueError("program flow archive requires one KST trading date")
+    prefix = start.strftime("%Y%m%d") + ":"
+    previous = ("", "")
+    identities = []
+    if not observations or not observations.endswith("\n"):
+        raise ValueError("program flow archive requires a complete snapshot batch")
+    for line in observations[:-1].split("\n"):
+        row = _object(line)
+        if (set(row) != {"subject", "snapshot_key", "saved_at", "payload"}
+                or not isinstance(row["subject"], str) or not row["subject"]
+                or not isinstance(row["snapshot_key"], str) or not row["snapshot_key"].startswith(prefix)
+                or not isinstance(row["payload"], dict) or archive_json(row) != line.encode("utf-8")):
+            raise ValueError("invalid program flow archive snapshot")
+        _aware(row["saved_at"])
+        key = (row["subject"], row["snapshot_key"])
+        if key <= previous:
+            raise ValueError("program flow archive snapshots must be unique and ordered")
+        previous = key
+        identities.append(archive_sha256(line.encode("utf-8")))
+    return identities
+
+
 @dataclass(frozen=True)
 class ObservationArchiveBatch:
     raw: bytes
@@ -107,7 +134,7 @@ class ObservationArchiveBatch:
         captured = manifest.get("captured_range")
         observations = body["observations"]
         if (manifest.get("dataset_id") != batch_id or type(manifest.get("schema_version")) is not int
-                or manifest["schema_version"] != 1 or kind not in RESEARCH_OBSERVATION_KINDS
+                or manifest["schema_version"] != 1 or kind not in RESEARCH_OBSERVATION_KINDS | {PROGRAM_FLOW_ARCHIVE_KIND}
                 or not isinstance(captured, dict) or set(captured) != {"start", "end"}
                 or not isinstance(manifest.get("subject"), str) or manifest.get("observations_file") != "observations.jsonl"
                 or manifest.get("bundle_version") is not None or manifest.get("research_session_profile") is not None
@@ -121,7 +148,14 @@ class ObservationArchiveBatch:
             raise ValueError("archive requires one fixed observation export range")
         _aware(manifest.get("exported_at"))
         revision_ids, sequences = [], set()
-        for ordinal, line in enumerate(observations.splitlines(), start=1):
+        if kind == PROGRAM_FLOW_ARCHIVE_KIND:
+            if manifest["subject"]:
+                raise ValueError("program flow archive requires the completed trading date scope")
+            revision_ids = _program_snapshot_ids(observations, start, end)
+            lines = ()
+        else:
+            lines = observations.splitlines()
+        for ordinal, line in enumerate(lines, start=1):
             row = _object(line)
             sequence = row.get("accepted_sequence")
             if (row.get("kind") != kind or type(row.get("ordinal")) is not int or row["ordinal"] != ordinal

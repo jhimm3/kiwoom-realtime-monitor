@@ -125,6 +125,7 @@ def replay_krx_minute_bars(
     strict: bool = True,
     session_profile: str = KRX_REGULAR_RESEARCH_PROFILE,
     calendar_evidence: Iterable[TradingDayEvidence] | Mapping[date, Iterable[TradingDayEvidence]] | None = None,
+    reclassify_default_schedule: bool = False,
 ) -> tuple[KrxMinuteBarFrame, ...]:
     """Read latest KRX minute revisions with their original availability cut."""
     cutoff = _utc_cutoff(as_of)
@@ -188,8 +189,16 @@ def replay_krx_minute_bars(
                 calendar_at_receipt[key] = trading_day_as_of(
                     trading_date, venue="KRX", as_of=available, evidence=calendar_by_day.get(trading_date, ()),
                 )
+            day_evidence = calendar_at_receipt[key]
+            if (reclassify_default_schedule and day_evidence is not None
+                    and day_evidence.revision_id.startswith("krx-equity:")):
+                # Recorder tags from the fixed schedule are inferred, not observed phases.
+                default = session_window_at(bar_start, venue="KRX")
+                if declared == {"declared_session": default.session.value, "declared_phase": default.phase.value,
+                                "declared_schedule_version": default.schedule_version}:
+                    declared = dict.fromkeys(declared)
             scheduled = calendar_research_bar_window(
-                bar_start, bar_end, trading_day=calendar_at_receipt[key], decision_at=available,
+                bar_start, bar_end, trading_day=day_evidence, decision_at=available,
                 session_profile=session_profile, **declared,
             )
             if scheduled is None:

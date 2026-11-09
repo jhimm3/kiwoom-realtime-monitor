@@ -297,6 +297,23 @@ class ResearchProcessTests(unittest.TestCase):
             cost = load_research_process_request(path).execution.cost_model
             self.assertEqual(cost.to_dict(), document["execution"]["cost_model"])
 
+    def test_omitted_cost_uses_agreed_rates_over_the_requested_folds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_empty_dataset(root)
+            document = _request_document()
+            document["execution"].pop("cost_model")
+            path = root / "request.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            request = load_research_process_request(path)
+            cost = request.execution.cost_model
+            self.assertEqual(("fixed_bps/v2", "model_estimate", "agreed_research_cost/v1"),
+                             (cost.version, cost.rate_basis, cost.source))
+            self.assertEqual((request.evaluation.folds[0].start, request.evaluation.folds[-1].end),
+                             (cost.valid_from, cost.valid_to))
+            self.assertEqual((15, 0), cost.fees_won(100_000, sell=False))
+            self.assertEqual((15, 200), cost.fees_won(100_000, sell=True))
+
     def test_relative_paths_and_all_locked_settings_are_validated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -698,7 +715,7 @@ class ResearchProcessTests(unittest.TestCase):
                     self.assertFalse((root / request["database"]).exists())
                     self.assertFalse((root / request["runs_dir"]).exists())
 
-    def _verify_section12_shadow_request(self, path, request, repository) -> None:
+    def _verify_section12_shadow_request(self, path, request, repository, *, has_candidates=True) -> None:
         path.write_text(json.dumps({**request, "shadow_only": True}), encoding="utf-8")
         with patch("kiwoom_monitor.research_run.PaperExecutionEngine.process_decision", side_effect=AssertionError), \
                 patch("kiwoom_monitor.research_run.PaperExecutionEngine.process_bar", side_effect=AssertionError):
@@ -707,7 +724,7 @@ class ResearchProcessTests(unittest.TestCase):
         self.assertFalse(result["order_authorized"])
         self.assertEqual((), repository.load_execution_events(result["run_id"]))
         manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
-        self.assertGreater(manifest["candidate_count"], 0)
+        self.assertEqual(has_candidates, manifest["candidate_count"] > 0)
 
     def test_section12_close_and_ipo_requests_preserve_actual_filled_quantity(self) -> None:
         import sqlite3
@@ -799,9 +816,18 @@ class ResearchProcessTests(unittest.TestCase):
                 ("ipo_breakout/v1", {**breakout, "listing_phases": ["after_listing_day"]},
                  [("BUY", 4, 105), ("SELL", 4, 106)], [original, correction]),
             )
+            for family, policy, fills, _ in cases[1:3]:
+                cases += (
+                    (family, policy, fills, [{**listing, "listing_type": "konex_to_kosdaq"}]),
+                    (family, policy, [], [{**listing, "listing_type": "transfer"}]),
+                    (family, policy, [], [{**listing, "listing_type": "relisting"}]),
+                    (family, {**policy, "listing_phases": ["after_listing_day"]}, [],
+                     [{**original, "listing_type": "konex_to_kosdaq"}]),
+                )
             repository = ResearchRepository(root / request["database"])
             for family, policy, expected, listing_rows in cases:
-                with self.subTest(family=family, listing_phases=policy["listing_phases"]):
+                with self.subTest(family=family, listing_phases=policy["listing_phases"],
+                                  listing_type=listing_rows[0]["listing_type"]):
                     references = json.dumps({**reference_document, "listings": listing_rows}).encode()
                     (root / "references.json").write_bytes(references)
                     request.update(
@@ -847,7 +873,51 @@ class ResearchProcessTests(unittest.TestCase):
                         self.assertIn("EXIT", {decision["final_action"] for decision in management})
                         for decision in management:
                             self.assertEqual(entry_setup, snapshots[decision["snapshot_id"]])
-                    self._verify_section12_shadow_request(path, request, repository)
+                    self._verify_section12_shadow_request(path, request, repository, has_candidates=bool(expected))
+
+            known = {"symbol": "005930", "ref": "contract-at-entry", "revises": None, "stage": "CONFIRMED",
+                     "effect": "INTACT", "effective_at": stamp(friday, "15:15"), "available_at": stamp(friday, "15:15"),
+                     "source_ref": "fixture:original", "source_version": "body:1"}
+            changed = {**known, "ref": "overnight-change", "revises": known["ref"], "stage": "CORRECTED",
+                       "effect": "DAMAGED", "effective_at": stamp(friday, "17:00"),
+                       "available_at": stamp(monday, "07:00"), "source_version": "body:2"}
+            late = {**changed, "ref": "future-revision", "revises": changed["ref"],
+                    "available_at": stamp(monday, "10:05")}
+            references = json.dumps({**reference_document, "listings": [listing]}).encode()
+            (root / "references.json").write_bytes(references)
+            for family, policy, expected, _ in cases[:3]:
+                with self.subTest(family=family, material_news=True):
+                    request.update(
+                        family=family, strategy={"capital_won": 1000, "policy": policy,
+                                                 "material_news": [known, changed, late]},
+                        strategy_references={"path": "references.json", "sha256": hashlib.sha256(references).hexdigest()},
+                    )
+                    path.write_text(json.dumps(request), encoding="utf-8")
+                    result = execute_process_request(load_research_process_request(path))
+                    run_id = result["run_id"]
+                    self.assertEqual(3, result["section12"]["material_news_revision_count"])
+                    self.assertEqual(expected, [(event["side"], event["quantity"], event["price"])
+                                                for event in repository.load_execution_events(run_id)
+                                                if event["event_type"] == "FILL"])
+                    candidate, = repository.load_candidate_events(run_id)
+                    with closing(sqlite3.connect(root / request["database"])) as connection:
+                        contexts = {snapshot_id: json.loads(document)["feature_values"][1:]
+                                    for snapshot_id, document in connection.execute(
+                                        "SELECT snapshot_id,document_json FROM research_feature_snapshots WHERE run_id=?",
+                                        (run_id,),
+                                    )}
+                    entry, = contexts[candidate["snapshot_id"]]
+                    self.assertEqual(["contract-at-entry"], [row["revision_ref"] for row in entry["events"]])
+                    self.assertNotIn("future-revision", json.dumps(contexts))
+                    if family != "ipo_breakout/v1":
+                        next_open, = [context for features in contexts.values() for context in features
+                                      if context["cut"] == stamp(monday, "10:01")]
+                        self.assertEqual(entry["cut"], next_open["entry_cut"])
+                        self.assertEqual(["contract-at-entry"], [row["revision_ref"] for row in next_open["entry_events"]])
+                        self.assertEqual(["overnight-change"], [row["revision_ref"] for row in next_open["changes_after_entry"]])
+                    path.write_text(json.dumps({**request, "shadow_only": True}), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "invalid minute experiment fields"):
+                        load_research_process_request(path)
 
     def test_section12_panic_request_uses_each_variant_entry_cut_and_completed_close_exit(self) -> None:
         from datetime import datetime, timedelta
@@ -880,6 +950,15 @@ class ResearchProcessTests(unittest.TestCase):
                 "venue": "KRX", "trading_date": "2026-09-10", "available_at": at(-15), "revision_id": "krx-session",
                 "evidence_ref": "fixture-calendar", "sessions": [{"session": "KRX_REGULAR", "phase": "CONTINUOUS",
                 "support": "SUPPORTED", "schedule_version": "fixture/v1", "starts_at": at(0), "ends_at": at(380)}],
+            }, {
+                "venue": "KRX", "trading_date": "2026-09-09", "available_at": "2026-09-08T07:00:00+09:00",
+                "revision_id": "krx-closure", "evidence_ref": "fixture-closure", "sessions": [],
+            }, {
+                "venue": "KRX", "trading_date": "2026-09-08", "available_at": "2026-09-08T07:00:00+09:00",
+                "revision_id": "krx-prior-close", "evidence_ref": "fixture-calendar", "sessions": [{
+                    "session": "KRX_CLOSING_AUCTION", "phase": "AUCTION_ORDER_ENTRY", "support": "SUPPORTED",
+                    "schedule_version": "fixture/v1", "starts_at": "2026-09-08T15:20:00+09:00",
+                    "ends_at": "2026-09-08T15:30:00+09:00"}],
             }]}).encode()
             (root / "references.json").write_bytes(references)
             proof = {"symbol": "123456", "source": "reviewed-fixture", "assessment_id": "assessment", "revision": "first",
@@ -925,10 +1004,126 @@ class ResearchProcessTests(unittest.TestCase):
                         decisions = repository.load_evaluations(result["run_id"])
                         entry, = [row for row in decisions if row["final_action"] == "ENTER"]
                         self.assertIn("panic_price_setup_news_unresolved", entry["reasons"])
+            def revision(ref, revises, stage, minute, effect):
+                return {"symbol": "123456", "ref": ref, "revises": revises, "stage": stage,
+                        "effect": effect, "effective_at": at(minute), "available_at": at(minute),
+                        "source_ref": f"source:{ref}", "source_version": "fixture/v1"}
+
+            report = revision("report", None, "REPORT", 1, "UNKNOWN")
+            confirmed = revision("confirmed", "report", "CONFIRMED", 2, "NONFUNDAMENTAL")
+            corrected = revision("corrected", "confirmed", "CORRECTED", 5, "FUNDAMENTAL_ADVERSE")
+            withdrawn = revision("withdrawn", "corrected", "WITHDRAWN", 6, "UNKNOWN")
+            request["strategy"].update(news_proofs=[], panic_allow_unresolved_news=True)
+            for material, expected in ((None, [("BUY", 915), ("SELL", 940)]),
+                                       ([report, confirmed, corrected, withdrawn], []),
+                                       ([report, confirmed, corrected | {"available_at": at(6)},
+                                         withdrawn | {"available_at": at(7)}], [("BUY", 915), ("SELL", 940)])):
+                with self.subTest(material=material):
+                    if material is not None:
+                        request["strategy"]["material_news"] = material
+                    path.write_text(json.dumps(request), encoding="utf-8")
+                    result = execute_process_request(load_research_process_request(path))
+                    events = repository.load_execution_events(result["run_id"])
+                    self.assertEqual(expected, [(row["side"], row["price"]) for row in events if row["event_type"] == "FILL"])
+                    if material is not None and not expected:
+                        decisions = repository.load_evaluations(result["run_id"])
+                        self.assertTrue(any("panic_fundamental_adverse" in row["reasons"] for row in decisions))
+            previous = revision("prior-contract", None, "CONFIRMED", 1, "INTACT") | {
+                "effective_at": "2026-09-08T09:00:00+09:00", "available_at": "2026-09-08T09:00:00+09:00",
+            }
+            cancellation = revision("after-close", "prior-contract", "WITHDRAWN", 1, "FUNDAMENTAL_ADVERSE") | {
+                "effective_at": "2026-09-08T16:30:00+09:00", "available_at": "2026-09-08T16:30:00+09:00",
+            }
+            correction = revision("intraday-correction", "after-close", "CORRECTED", 5, "UNKNOWN")
+            official_adverse = cancellation | {
+                "ref": "after-close-official-adverse", "revises": None, "stage": "CONFIRMED",
+                "source_ref": "https://kind.krx.co.kr/common/disclsviewer.do?method=search&acptno=20260908000001",
+                "available_at": "2026-09-09T07:00:00+09:00",
+            }
+            request["strategy"]["policy"]["variant"] = "P1"
+            for window, evidence, blocked in (
+                (None, [previous, cancellation], False),
+                (5, [previous, cancellation], False),
+                (30, [previous, cancellation], True),
+                ("session", [previous, cancellation], True),
+                ("session", [previous, cancellation, correction], False),
+                ("session", [previous, cancellation, correction | {"available_at": at(6)}], True),
+                ("session", [previous, cancellation | {"available_at": at(1)}], False),
+                (None, [official_adverse], False),
+                (5, [official_adverse], False),
+                (30, [official_adverse], True),
+                ("session", [official_adverse], True),
+                ("session", [official_adverse | {"available_at": at(1)}], False),
+                ("session", [official_adverse | {"effective_at": "2026-09-08T15:29:00+09:00"}], False),
+                ("session", [official_adverse | {"source_ref": "source:unofficial-report"}], False),
+            ):
+                with self.subTest(window=window, evidence=evidence):
+                    request["strategy"].pop("panic_previous_session_news", None)
+                    if window is not None:
+                        request["strategy"]["panic_previous_session_news"] = window
+                    request["strategy"]["material_news"] = evidence
+                    path.write_text(json.dumps(request), encoding="utf-8")
+                    result = execute_process_request(load_research_process_request(path))
+                    events = repository.load_execution_events(result["run_id"])
+                    expected = [] if blocked else [("BUY", 915), ("SELL", 940)]
+                    self.assertEqual(expected, [(row["side"], row["price"]) for row in events if row["event_type"] == "FILL"])
+                    self.assertEqual(window, result["section12"].get("panic_previous_session_news"))
+                    if blocked:
+                        decisions = repository.load_evaluations(result["run_id"])
+                        self.assertTrue(any("panic_fundamental_adverse" in row["reasons"] for row in decisions))
             request["shadow_only"] = True
             path.write_text(json.dumps(request), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "invalid minute experiment fields"):
                 load_research_process_request(path)
+
+    def test_micro_archive_snapshot_runs_without_the_archive_database(self) -> None:
+        import sqlite3
+        from contextlib import closing
+        from scripts.import_krx_vi_history import initialize
+        from scripts.prepare_micro_historical_vi import prepare_scenario
+        from tests.unit.test_micro_execution_evidence import _kind_halt_receipt, _policy
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "historical_market_context.sqlite3"
+            with closing(sqlite3.connect(database)) as conn, conn:
+                initialize(conn)
+                conn.execute("INSERT INTO krx_vi_imports VALUES(?,?,?,?,?,?,?,?)",
+                    ("raw", "csv", "csv", "2026-09-11", "2026-09-11", 2, 2, "received"))
+                for event, code in (("wanted", "005930"), ("other", "000660")):
+                    conn.execute("INSERT INTO historical_vi_events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (event, "krx_data_marketplace", "2026-09-11", code, "fixture", "KOSPI",
+                         "2026-09-11T09:10:00+09:00", "2026-09-11T09:12:00+09:00", 100, 0, 0.0,
+                         90, 11.1, "동적VI", "raw", "csv"))
+            original = database.read_bytes()
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({"schema": "historical-market-context-nas/v1", "run": "test-run",
+                "database": {"name": database.name, "bytes": len(original),
+                             "sha256": hashlib.sha256(original).hexdigest(), "integrity_check": "ok"}}), encoding="utf-8")
+            from datetime import date
+            scenario = prepare_scenario(manifest, "005930", date(2026, 9, 11))
+            scenario["kind_halt_receipt"] = _kind_halt_receipt()
+            outside = prepare_scenario(manifest, "005930", date(2026, 9, 12))
+            self.assertEqual([], outside["historical_vi"]["events"])
+            self.assertEqual(original, database.read_bytes())
+            database.rename(root / "unavailable.sqlite3")
+            encoded = json.dumps(scenario).encode()
+            (root / "micro.json").write_bytes(encoded)
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps({"mode": "micro_experiment", "dataset": "micro.json",
+                "dataset_sha256": hashlib.sha256(encoded).hexdigest(), "policy": _policy(),
+                "database": "research.sqlite3", "runs_dir": "runs"}), encoding="utf-8")
+            response = execute_process_request(load_research_process_request(request_path))
+            result = response["result"]
+            self.assertEqual(("UNKNOWN", []), (result["status"], result["decisions"]))
+            halt = result["historical_kind_halt"]
+            self.assertEqual(("CONFIRMED_FULL_DAY_HALT", "retrospective_only", "frozen_receipt"),
+                             (halt["state"], halt["scope"], halt["basis"]))
+            self.assertEqual(scenario["kind_halt_receipt"], halt["receipt"])
+            episodes = result["historical_vi"]["episodes"]
+            self.assertEqual([("wanted", "UP")], [(row["event_id"], row["direction"]) for row in episodes])
+            self.assertEqual("2026-09-11T09:12:00+09:00", episodes[0]["released_at"])
+            self.assertEqual(result, json.loads(Path(response["manifest"]).read_text(encoding="utf-8"))["result"])
 
     def test_section12_micro_request_pins_receipts_and_persists_the_result(self) -> None:
         from kiwoom_monitor import research_process
@@ -1019,6 +1214,7 @@ class ResearchProcessTests(unittest.TestCase):
             self.assertEqual("synthetic_evidence", result["section12"]["execution_scope"])
 
     def test_section12_dd_native_setup_request_consumes_pinned_frozen_daily_rows_only(self) -> None:
+        from kiwoom_monitor.application.daily_decline import DailyDeclineSignalPolicy
         from dataclasses import asdict
         from datetime import datetime, time, timedelta
         from kiwoom_monitor import research_process
@@ -1070,12 +1266,12 @@ class ResearchProcessTests(unittest.TestCase):
             evidence = root / "dd-setup.json"
             request_path = root / "request.json"
 
-            def request(changes):
+            def request(changes, policy=SINGLE):
                 encoded = json.dumps({**descriptor, **changes}).encode()
                 evidence.write_bytes(encoded)
                 request_path.write_text(json.dumps({
                     "mode": "daily_decline_experiment", "dataset": evidence.name,
-                    "dataset_sha256": hashlib.sha256(encoded).hexdigest(), "policy": asdict(SINGLE),
+                    "dataset_sha256": hashlib.sha256(encoded).hexdigest(), "policy": asdict(policy),
                     "database": "research.sqlite3", "runs_dir": "runs",
                 }), encoding="utf-8")
                 return load_research_process_request(request_path)
@@ -1109,6 +1305,22 @@ class ResearchProcessTests(unittest.TestCase):
                 research_process._run_research_process([*cli_args, "--cancel", str(frozen_manifest)])
             self.assertEqual(manifest_sha, hashlib.sha256(frozen_manifest.read_bytes()).hexdigest())
 
+            signal_policy = DailyDeclineSignalPolicy(2, 2_000, 1_000, 20_000)
+            signal_request = request({}, signal_policy)
+            self.assertEqual(prepared.dataset_sha256, signal_request.dataset_sha256)
+            with patch("sys.stdout"):
+                self.assertEqual(0, research_process._run_research_process(cli_args))
+            signal_result = json.loads(cli_result.read_text(encoding="utf-8"))
+            self.assertEqual("native_setup_assessment", signal_result["section12"]["execution_scope"])
+            self.assertFalse(signal_result["order_authorized"])
+            self.assertNotIn("events", signal_result["result"])
+            signal_setup = signal_result["result"]["setup"]
+            self.assertEqual({key: value for key, value in trace["setup"].items() if key != "setup_id"},
+                             {key: value for key, value in signal_setup.items() if key != "setup_id"})
+            self.assertNotEqual(trace["setup"]["setup_id"], signal_setup["setup_id"])
+            signal_manifest = json.loads(Path(signal_result["manifest"]).read_text(encoding="utf-8"))
+            self.assertEqual(asdict(signal_policy), signal_manifest["spec"]["parameters"])
+
             from tests.unit.test_daily_decline import quote, quote_receipt
             entry, exit_quote = quote(1000, cost=1010), quote(740, session=2)
             rows = []
@@ -1126,6 +1338,8 @@ class ResearchProcessTests(unittest.TestCase):
                 "protection_provenance": {"source_ref": "absolute-raw-protection-17", "source_version": "raw-price/v1"},
                 "provenance": {"source_kind": "historical_reconstruction", "source_ref": "execution-17",
                                "source_version": "frozen-execution/v2"}, "events": normalized["events"]}
+            with self.assertRaisesRegex(ValueError, "explicit execution policy"):
+                execute_process_request(request({"execution_evidence": execution}, signal_policy))
             executed_request = request({"execution_evidence": execution})
             executed = execute_process_request(executed_request)
             trace = executed["result"]
@@ -1280,6 +1494,23 @@ class ResearchProcessTests(unittest.TestCase):
             market = {"kind": "market_relative_turnover", "scope": "KRX", "effective_at": at(11), "available_at": at(11),
                       "source": "fixture", "revision": "turnover", "basis": "point_in_time", "evidence_refs": ["market-r1"],
                       "value": {"observed_turnover_won": 2_000_000, "baseline_median_turnover_won": 1_000_000}}
+            b3 = {**base, "variant": "B3", "entry_filters": {
+                **b2, "minimum_daily_headroom_bps": None, "require_catalyst": True}}
+            award = {"symbol": "123456", "ref": "selected-contract", "revises": None, "stage": "CONFIRMED",
+                     "effect": "INTACT", "effective_at": at(4), "available_at": at(10),
+                     "source_ref": "fixture:official-contract", "source_version": "body:1"}
+            changed = {**award, "ref": "revised-contract", "revises": award["ref"], "stage": "CORRECTED",
+                       "effect": "DAMAGED", "effective_at": at(11), "available_at": at(11)}
+            for evidence, selected, expected in (
+                ([award], {}, []),
+                ([award], {"material_event_ref": award["ref"]}, [("BUY", 105), ("SELL", 98)]),
+                ([award, changed], {"material_event_ref": award["ref"]}, []),
+                ([award, {**changed, "available_at": at(12)}], {"material_event_ref": award["ref"]},
+                 [("BUY", 105), ("SELL", 98)]),
+            ):
+                events = run("breakout_study/v1", b3, entry_proofs=[market], material_news=evidence, **selected)
+                self.assertEqual(expected, [(event["side"], event["price"]) for event in events if event["event_type"] == "FILL"])
+            request["strategy"] = {"capital_won": 1000, "policy": base}
             request.update(mode="breakout_filter_comparison", breakout_variants=[
                 {"capital_won": 1000, "policy": {**base, "variant": "B1", "entry_filters": b1}},
                 {"capital_won": 1000, "policy": {**base, "variant": "B2", "entry_filters": b2}, "entry_proofs": [market]},
@@ -1299,6 +1530,14 @@ class ResearchProcessTests(unittest.TestCase):
             with patch("sys.stderr"), self.assertRaises(SystemExit):
                 research_process._run_research_process(["--request", str(path), "--result", str(comparison_manifest)])
             self.assertEqual(original_bytes, comparison_manifest.read_bytes())
+            selected_b3 = request["breakout_variants"][2]
+            selected_b3.update(material_news=[award], material_event_ref=award["ref"])
+            path.write_text(json.dumps(request), encoding="utf-8")
+            comparison_with_news = execute_process_request(load_research_process_request(path))
+            self.assertEqual([("B0", 1), ("B1", 1), ("B2", 1), ("B3", 1)],
+                             [(run["variant"], run["candidate_count"]) for run in comparison_with_news["runs"]])
+            self.assertFalse(comparison_with_news["order_authorized"])
+            del selected_b3["material_news"], selected_b3["material_event_ref"]
             request["breakout_variants"][1]["policy"]["entry_filters"]["minimum_price_progress_bps"] += 1
             path.write_text(json.dumps(request), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "previously selected filter"):

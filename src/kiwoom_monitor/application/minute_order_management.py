@@ -4,10 +4,10 @@ from collections.abc import Mapping
 from datetime import datetime
 import json
 
-from .market_session_schedule import KST, mock_order_entry_decision
-from .mock_automation_risk import mock_automation_risk_account_revision
+from .market_session_schedule import KST, automation_order_entry_decision
+from .mock_automation_risk import acknowledged_minute_quote, mock_automation_risk_account_revision
 from kiwoom_monitor.domain.order_contract import OrderSide, OrderState, TERMINAL_ORDER_STATES
-from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_legs
+from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_legs, execution_broker_venue
 
 
 @dataclass(frozen=True)
@@ -20,7 +20,8 @@ class MinuteOrderManagementClaim:
 
 
 def frozen_minute_candidate(event):
-    value = {key: item for key, item in event.items() if key != 'accepted_sequence'}
+    # Supplemental material is shown with Shadow decisions, outside the order proof.
+    value = {key: item for key, item in event.items() if key not in {'accepted_sequence', 'material_news'}}
     value['expires_at'] = datetime.fromisoformat(value['expires_at']).astimezone(KST).isoformat()
     return value
 
@@ -39,25 +40,6 @@ def minute_current_shadow_matches(spec, event, settings):
         'universe_max_age_seconds': settings['shadow_candidate_universe_max_age_seconds']})
     return (event['run_id'] == monitor and config.strategy.family == f"{event['strategy_id']}/{event['strategy_version']}"
             and (config.strategy.family != 'panic_rebound/v1' or event.get('panic_entry_parameters') == config.strategy.to_dict()))
-
-
-def acknowledged_minute_quote(spec, quote, decided_at, now):
-    at = quote.get("available_at")
-    if isinstance(at, str):
-        at = datetime.fromisoformat(at)
-    gap = spec.maximum_data_gap_seconds
-    if (not isinstance(at, datetime) or at.utcoffset() is None or decided_at.utcoffset() is None
-            or now.utcoffset() is None or gap is None or gap <= 0
-            or quote.get("durable") is not False or quote.get("market_status") != "TRADABLE"
-            or not isinstance(quote.get("input_ref"), str) or not quote["input_ref"].startswith("collector-trade:")
-            or type(quote.get("price_won")) is not int or quote["price_won"] <= 0
-            or not 0 <= (now - at).total_seconds() <= gap
-            or not 0 <= (now - decided_at).total_seconds() <= gap
-            or at > decided_at):
-        raise ValueError("CLOSE execution requires a fresh acknowledged 0B quote")
-    return {"price_won": quote["price_won"], "available_at": at.isoformat(),
-            "input_ref": quote["input_ref"], "durable": False, "market_status": "TRADABLE"}
-
 
 
 def verified_current_order_peers(record, recovery, risk, records, control, *,
@@ -195,7 +177,11 @@ def verified_current_order_peers(record, recovery, risk, records, control, *,
             'selected_management_context': context.to_dict(),
             'selected_plan': {'plan_id': head['plan_id'], 'policy_ref': head['policy_ref']},
             'legacy_evidence_scope': context.source_account_selection_id is None}
-    return {'account_selection_id': selection.selection_id, 'other_member_open_order_ids': sorted(peers)}
+    account_symbols = {symbol for symbol, quantity in recovery.account.positions.items() if quantity}
+    account_symbols.update(row.intent.symbol for row in records if row.intent.side is OrderSide.BUY)
+    return {'account_selection_id': selection.selection_id, 'other_member_open_order_ids': sorted(peers),
+            **({'account_position_limit_exceeded': True}
+               if len(account_symbols) > selection.limits.maximum_concurrent_positions else {})}
 
 
 def assess_current_minute_order(spec, *, run_id, record, head, order_events, recovery, risk,
@@ -239,6 +225,12 @@ def assess_current_minute_order(spec, *, run_id, record, head, order_events, rec
     if not available:
         return None  # No second cancellation/amendment while an earlier cancellation is unresolved.
     leg = available[0]
+    venue = execution_broker_venue(record)
+    if record.intent.venue == 'SOR':
+        route_facts = {detail.venue for detail in recovery.order_details
+                       if detail.broker_order_id == leg.broker_order_id}
+        if venue is None or route_facts != {venue}:
+            return None
     action, reason, current_quote = 'AMEND', 'current_conditions_valid', None
     quantities = (risk.owned_for_member(spec.spec_id) if selected is not None and selected.get('member_spec_id') is not None else
                   risk.owned_for_spec(spec.spec_id) if selected is not None else
@@ -267,11 +259,13 @@ def assess_current_minute_order(spec, *, run_id, record, head, order_events, rec
     elif sum(item.remaining_quantity for item in legs) > head.quantity:
         action, reason = 'CANCEL', 'current_sell_remainder_exceeds_plan_position'
     if action == 'AMEND':
-        if not mock_order_entry_decision(now, environment='mock', venue='KRX', order_type='LIMIT').allowed:
+        if not automation_order_entry_decision(now, venue=venue).allowed:
             return None
         if quote is None:
             return None
         current_quote = validate_quote(spec, quote, decided_at, now)
+        if record.intent.venue == 'SOR' and current_quote.get('venue', 'KRX') != venue:
+            raise ValueError('SOR amendment quote does not match the original order venue')
         price = current_quote['price_won']
         if record.intent.side is OrderSide.BUY:
             pending = sum(item.remaining_quantity for item in legs)
@@ -285,10 +279,13 @@ def assess_current_minute_order(spec, *, run_id, record, head, order_events, rec
                         else plan_entry_notional_won + pending * price) > capital_limit
                     or increase > account.available_cash_won - account.reserved_open_buy_won):
                 action, reason = 'CANCEL', 'current_buy_budget_unavailable'
-            elif (spec.maximum_concurrent_positions is None or
-                    len([q for q in account.positions.values() if q]) + int(not account.positions.get(record.intent.symbol, 0))
-                    > spec.maximum_concurrent_positions):
-                action, reason = 'CANCEL', 'current_position_limit'
+            else:
+                grouped = (verified_peer_orders or {}).get('account_selection_id') is not None
+                positions = dict(quantities) if grouped else account.positions
+                symbols = {symbol for symbol, quantity in positions.items() if quantity} | {record.intent.symbol}
+                if (spec.maximum_concurrent_positions is None or len(symbols) > spec.maximum_concurrent_positions
+                        or (verified_peer_orders or {}).get('account_position_limit_exceeded') is True):
+                    action, reason = 'CANCEL', 'current_position_limit'
         else:
             anchor = exit_anchor
             if price * 10_000 < anchor * (10_000 - terms.protective_slippage_bps):

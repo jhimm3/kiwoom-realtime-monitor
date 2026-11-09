@@ -1,15 +1,21 @@
 """Observation archive native receipts against an explicitly owned PostgreSQL fixture."""
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from kiwoom_monitor.central_server.database import PostgresQueryStore
-from kiwoom_monitor.domain.observation_archive import ObservationArchiveConflict, POSTGRES_ARCHIVE_DURABILITY
+from kiwoom_monitor.central_server.database import PostgresQueryStore, SQLiteQueryStore
+from kiwoom_monitor.central_server.program_flow_archive import ProgramFlowArchive
+from kiwoom_monitor.domain.observation_archive import (
+    ObservationArchiveBatch, ObservationArchiveConflict, POSTGRES_ARCHIVE_DURABILITY,
+)
 from kiwoom_monitor.infrastructure.persistence.postgres_test_target import explicit_dedicated_url
 from tests.integration.postgres_test_support import isolated_observation_schema
 from tests.unit.test_observation_archive import CUT, END, STREAM, fixture_batch
@@ -36,6 +42,30 @@ class PostgresObservationArchiveTests(unittest.TestCase):
     @staticmethod
     def accept(store, batch):
         return store.accept_observation_archive(batch.source_stream, batch.raw, batch.content_sha256)
+
+    def test_closed_pc_program_flow_stores_the_same_bytes_after_postgres_reopen(self):
+        root = Path(self.enterContext(TemporaryDirectory()))
+        source = SQLiteQueryStore(root / "pc.sqlite3", now_provider=lambda: CUT.replace(hour=14, minute=0))
+        self.addCleanup(source.close)
+        source.initialize()
+        source.save_dataset_snapshot("program_flow", "005930", "20261026:REALTIME:140000", {
+            "market": "KRX", "rows": [{"trade_time": "140000", "source": "kiwoom_realtime_0w"}],
+        })
+        day = CUT.date().isoformat()
+        archive = ProgramFlowArchive(source, root / "outbox", root / "unused.json", STREAM)
+        asyncio.run(archive.freeze_day(day, CUT.replace(hour=20, minute=5)))
+        [batch_path] = (root / "outbox" / day).glob("*.batch")
+        value = ObservationArchiveBatch.parse(batch_path.read_bytes())
+        self.store.prepare_observation_archive()
+        first = self.accept(self.store, value)
+        reopened = self.new_store(END)
+        self.assertEqual(("program_flow", 1, POSTGRES_ARCHIVE_DURABILITY),
+                         (first["kind"], first["revision_count"], first["durability"]))
+        self.assertEqual(first, self.accept(reopened, value))
+        self.assertEqual({"receipt": first, "batch": value.document()},
+                         reopened.load_observation_archive(STREAM, value.batch_id, include_body=True))
+        self.assertEqual([], reopened.load_dataset_snapshots("program_flow", "005930"))
+        self.assertEqual(1, len(source.load_dataset_snapshots("program_flow", "005930")))
 
     def test_sync_commit_and_rollback_then_commit_ack_loss_keeps_original_body_and_receipt(self):
         import psycopg

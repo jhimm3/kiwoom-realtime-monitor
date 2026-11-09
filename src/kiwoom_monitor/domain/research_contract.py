@@ -50,6 +50,7 @@ RESEARCH_IMPLEMENTATION_PATHS = (
     "src/kiwoom_monitor/application/account_risk_research.py",
     "src/kiwoom_monitor/application/close_and_ipo.py",
     "src/kiwoom_monitor/application/panic_rebound.py",
+    "src/kiwoom_monitor/application/news_material.py",
     "src/kiwoom_monitor/application/daily_decline.py",
     "src/kiwoom_monitor/application/micro_execution_evidence.py",
     "src/kiwoom_monitor/application/section12_minute_research.py",

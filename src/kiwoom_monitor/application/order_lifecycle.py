@@ -12,13 +12,14 @@ import math
 from typing import Any, Callable, Protocol
 
 
-from kiwoom_monitor.application.market_session_schedule import mock_order_entry_decision
+from kiwoom_monitor.application.market_session_schedule import automation_order_entry_decision, mock_order_entry_decision
 from kiwoom_monitor.domain.order_contract import (
     AccountSnapshot,
     BrokerFill,
     BrokerOrderSnapshot,
     BrokerSubmission,
     BrokerAmendmentSubmission,
+    LocalRehearsalOrderIntent,
     OrderIntent,
     OrderSide,
     OrderState,
@@ -27,10 +28,12 @@ from kiwoom_monitor.domain.order_contract import (
     TERMINAL_ORDER_STATES,
     order_event,
 )
-from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import AmendmentResponseUnknown, SubmissionRejected, SubmissionUnknown
+from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import (
+    AmendmentResponseUnknown, LocalAutomationOrderTransport, SubmissionRejected, SubmissionUnknown,
+)
 from kiwoom_monitor.infrastructure.persistence.execution_repository import (
     ExecutionAmendment, ExecutionBrokerLeg, ExecutionRecord, ExecutionRepository, amendment_from_recovery,
-    broker_fill_key, broker_legs_state, execution_broker_legs,
+    broker_fill_key, broker_legs_state, execution_broker_legs, execution_broker_venue,
 )
 
 
@@ -747,10 +750,25 @@ class OrderLifecycle:
     def __init__(
         self, repository: ExecutionRepository, transport: MockOrderTransport | None,
         *, now_provider: Callable[[], datetime] = lambda: kst_now(),
+        rehearsal_order_rejection: Callable[[OrderIntent, datetime], str | None] | None = None,
+        local_automation_order_rejection: Callable[[OrderIntent, datetime], str | None] | None = None,
     ) -> None:
         self._repository = repository
         self._transport = transport
         self._now = now_provider
+        self._rehearsal_order_rejection = rehearsal_order_rejection
+        self._local_automation_order_rejection = local_automation_order_rejection
+        if local_automation_order_rejection is not None and not isinstance(transport, LocalAutomationOrderTransport):
+            raise ValueError('local venue checks require a fake automation transport')
+
+    def supports_automation_venue(self, venue: str) -> bool:
+        return venue == 'KRX' or (venue in {'NXT', 'SOR'} and self._local_automation_order_rejection is not None)
+
+    def _local_automation_rejection(self, intent, now):
+        if self._local_automation_order_rejection is None:
+            return f'{intent.venue}_AUTOMATION_REQUIRES_LOCAL_FAKE_BROKER'
+        session = automation_order_entry_decision(now, venue=intent.venue)
+        return self._local_automation_order_rejection(intent, now) if session.allowed else session.evidence
 
     def queue(self, intent: OrderIntent) -> ExecutionRecord:
         return self._mark_queued(self._repository.create(intent))
@@ -772,6 +790,7 @@ class OrderLifecycle:
     def submit(
         self, intent_id: str, account: AccountSnapshot, *, reference_price: int | None = None,
         after_submission_claim: Callable[[], None] | None = None,
+        before_submission_claim: Callable[[], str | None] | None = None,
     ) -> ExecutionRecord:
         record = self._required(intent_id)
         if record.state is not OrderState.QUEUED:
@@ -781,6 +800,9 @@ class OrderLifecycle:
         if rejection:
             return self._apply(record, "PRECHECK_REJECTED", OrderState.REJECTED, reason=rejection)
         transport = self._required_transport()
+
+        if before_submission_claim is not None and (rejection := before_submission_claim()):
+            return self._apply(record, "PRECHECK_REJECTED", OrderState.REJECTED, reason=rejection)
 
         # Persist unknown before crossing the network boundary. A crash can then cause a
         # missed submission, but never an automatic duplicate order.
@@ -793,6 +815,15 @@ class OrderLifecycle:
             return self._apply(record, "SUBMISSION_RESPONSE_UNKNOWN", OrderState.SUBMISSION_UNKNOWN, reason=str(error))
         except SubmissionRejected as error:
             return self._apply(record, "SUBMISSION_REJECTED", OrderState.REJECTED, reason=str(error))
+        if record.intent.venue == 'SOR':
+            venue = getattr(submission, 'broker_venue', None)
+            if venue not in {'KRX', 'NXT'}:
+                return self._apply(record, 'SUBMISSION_RESPONSE_UNKNOWN', OrderState.SUBMISSION_UNKNOWN,
+                    broker_order_id=submission.broker_order_id, occurred_at=submission.accepted_at,
+                    reason='SOR physical venue awaits broker reconciliation')
+            return self._apply(record, 'ORDER_ACCEPTED', OrderState.ACCEPTED,
+                broker_order_id=submission.broker_order_id, broker_venue=venue,
+                occurred_at=submission.accepted_at, reason=f'broker_venue={venue}')
         return self._apply(
             record, "ORDER_ACCEPTED", OrderState.ACCEPTED,
             broker_order_id=submission.broker_order_id, occurred_at=submission.accepted_at,
@@ -813,13 +844,14 @@ class OrderLifecycle:
             return self.release_queued_plan(record)
         if record.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED} or not record.broker_order_id:
             raise ValueError("order must be reconciled and accepted before cancellation")
+        mutation_intent = self._mutation_intent(record)
         transport = self._required_transport()
         record = self._apply(record, "CANCEL_STARTED", OrderState.CANCEL_PENDING,
             **({"event_broker_order_id": broker_order_id} if broker_order_id is not None else {}))
         if after_cancel_claim is not None:
             after_cancel_claim()  # Durable claim precedes transport; later STOP must not block reconciliation.
         try:
-            transport.cancel(record.intent, record.broker_order_id, quantity)
+            transport.cancel(mutation_intent, record.broker_order_id, quantity)
         except SubmissionUnknown as error:
             return self._apply(record, "CANCEL_RESPONSE_UNKNOWN", OrderState.CANCEL_PENDING, reason=str(error))
         except SubmissionRejected as error:
@@ -830,6 +862,7 @@ class OrderLifecycle:
     def amend(
         self, intent_id: str, quantity: int, limit_price: int, *, broker_order_id: str | None = None,
         after_amendment_claim: Callable[[], None] | None = None,
+        before_amendment_claim: Callable[[], None] | None = None,
         assessment: dict | None = None,
     ) -> ExecutionRecord:
         """Claim once before transport. Strategy/current-Risk admission belongs to the caller/native owner."""
@@ -838,8 +871,14 @@ class OrderLifecycle:
             return record
         if record.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}:
             raise ValueError("order must be reconciled and accepted before amendment")
-        if record.intent.order_type is not OrderType.LIMIT or record.intent.venue != "KRX":
-            raise ValueError("amendment requires an accepted KRX limit order")
+        if record.intent.order_type is not OrderType.LIMIT:
+            raise ValueError("amendment requires an accepted limit order")
+        if isinstance(record.intent, LocalRehearsalOrderIntent) and (rejection := self._rehearsal_rejection(record.intent, self._now())):
+            raise ValueError(rejection)
+        mutation_intent = self._mutation_intent(record)
+        if record.intent.environment == 'mock' and record.intent.venue in {'NXT', 'SOR'}:
+            if rejection := self._local_automation_rejection(mutation_intent, self._now()):
+                raise ValueError(rejection)
         legs = execution_broker_legs(record)
         active = [leg for leg in legs if leg.state not in TERMINAL_ORDER_STATES and leg.remaining_quantity]
         selected = [leg for leg in active if leg.broker_order_id == broker_order_id] if broker_order_id else active
@@ -852,6 +891,8 @@ class OrderLifecycle:
         transport = self._required_transport()
         command = ExecutionAmendment(leg.broker_order_id, quantity, limit_price, self._now(),
             assessment=json.loads(json.dumps(assessment, allow_nan=False)) if assessment is not None else None)
+        if before_amendment_claim is not None:
+            before_amendment_claim()
         record = self._apply(record, "AMENDMENT_STARTED", OrderState.SUBMISSION_UNKNOWN, broker_legs=legs,
             amendment=command, event_broker_order_id=leg.broker_order_id, quantity=quantity, price=limit_price)
         if record.amendment != command or record.amendment.status != "PENDING":
@@ -866,7 +907,7 @@ class OrderLifecycle:
                     == (command.broker_order_id, command.quantity, command.limit_price, command.started_at))
             return latest, same
         try:
-            response = transport.amend(record.intent, leg.broker_order_id, quantity, limit_price)
+            response = transport.amend(mutation_intent, leg.broker_order_id, quantity, limit_price)
         except SubmissionUnknown as error:
             record, pending = pending_response()
             if not pending:
@@ -963,6 +1004,7 @@ class OrderLifecycle:
         leg = selected[0]
         if type(quantity) is not int or not 0 <= quantity <= leg.remaining_quantity:
             raise ValueError("cancellation exceeds the broker order remainder")
+        mutation_intent = self._mutation_intent(record)
         transport = self._required_transport()
         def apply(event_type, state, reason=""):
             nonlocal record
@@ -974,7 +1016,7 @@ class OrderLifecycle:
         if after_cancel_claim is not None:
             after_cancel_claim()
         try:
-            transport.cancel(record.intent, leg.broker_order_id, quantity)
+            transport.cancel(mutation_intent, leg.broker_order_id, quantity)
         except SubmissionUnknown as error:
             apply("CANCEL_RESPONSE_UNKNOWN", OrderState.CANCEL_PENDING, str(error))
         except SubmissionRejected as error:
@@ -990,13 +1032,24 @@ class OrderLifecycle:
         return self._apply(record, event_type, OrderState.REJECTED)
 
     def reconcile(
-        self, intent_id: str, snapshot: BrokerOrderSnapshot, *, _connection: Any = None,
+        self, intent_id: str, snapshot: BrokerOrderSnapshot, *, _connection: Any = None, broker_venue=None,
     ) -> ExecutionRecord:
         connection_args = {} if _connection is None else {"_connection": _connection}
         record = self._required(intent_id, **connection_args)
         intent = record.intent
         if snapshot.account_ref != intent.account_ref or snapshot.symbol != intent.symbol:
             raise ValueError("broker snapshot does not match the order account and symbol")
+        if intent.venue == 'SOR':
+            existing = execution_broker_venue(record)
+            if broker_venue not in {'KRX', 'NXT'} or existing not in {None, broker_venue}:
+                raise ValueError('SOR broker snapshot did not confirm the original venue')
+            if existing is None:
+                if (not record.broker_order_id or snapshot.broker_order_id != record.broker_order_id
+                        or snapshot.as_of < intent.created_at):
+                    raise ValueError('SOR venue evidence did not identify the acknowledged order')
+                record = self._apply(record, 'SOR_VENUE_CONFIRMED', record.state, broker_venue=broker_venue,
+                    event_broker_order_id=record.broker_order_id, broker_as_of=snapshot.as_of,
+                    reason=f'broker_venue={broker_venue}', **connection_args)
         if record.broker_legs:
             return self._reconcile_broker_legs(record, snapshot, **connection_args)
         if record.broker_order_id and snapshot.broker_order_id != record.broker_order_id:
@@ -1134,18 +1187,21 @@ class OrderLifecycle:
             return OrderState.CANCEL_PENDING
         return OrderState.PARTIALLY_FILLED if filled else OrderState.ACCEPTED
 
-    @staticmethod
     def _preflight_error(
-        intent: OrderIntent, account: AccountSnapshot, now: datetime, reference_price: int | None,
+        self, intent: OrderIntent, account: AccountSnapshot, now: datetime, reference_price: int | None,
     ) -> str:
-        session_decision = mock_order_entry_decision(
-            now,
-            environment=intent.environment,
-            venue=intent.venue,
-            order_type=intent.order_type.value,
-        )
-        if not session_decision.allowed:
-            return session_decision.evidence
+        if isinstance(intent, LocalRehearsalOrderIntent):
+            if rejection := self._rehearsal_rejection(intent, now):
+                return rejection
+        elif intent.venue in {'NXT', 'SOR'}:
+            if rejection := self._local_automation_rejection(intent, now):
+                return rejection
+        else:
+            session_decision = mock_order_entry_decision(
+                now, environment=intent.environment, venue=intent.venue, order_type=intent.order_type.value,
+            )
+            if not session_decision.allowed:
+                return session_decision.evidence
         if account.account_ref != intent.account_ref:
             return "account mismatch"
         if account.as_of > now:
@@ -1164,6 +1220,11 @@ class OrderLifecycle:
             return "insufficient available cash after open-order reservation"
         return ""
 
+    def _rehearsal_rejection(self, intent: OrderIntent, now: datetime) -> str | None:
+        if self._repository.local_order_rehearsal is not True or self._rehearsal_order_rejection is None:
+            return 'LOCAL_REHEARSAL_ROUTE_REQUIRED'
+        return self._rehearsal_order_rejection(intent, now)
+
     def _required(self, intent_id: str, *, _connection: Any = None) -> ExecutionRecord:
         connection_args = {} if _connection is None else {"_connection": _connection}
         record = self._repository.load(intent_id, **connection_args)
@@ -1175,6 +1236,15 @@ class OrderLifecycle:
         if self._transport is None:
             raise RuntimeError("order transport is not configured")
         return self._transport
+
+    @staticmethod
+    def _mutation_intent(record):
+        if record.intent.venue != 'SOR':
+            return record.intent
+        venue = execution_broker_venue(record)
+        if venue not in {'KRX', 'NXT'}:
+            raise ValueError('SOR original order venue is unconfirmed')
+        return replace(record.intent, venue=venue)
 
     def _apply(
         self, record: ExecutionRecord, event_type: str, state: OrderState, *,

@@ -12,7 +12,7 @@ from contextlib import AbstractContextManager, nullcontext
 from typing import Any, Mapping, Protocol
 
 from kiwoom_monitor.domain.strategy_contract import LEADER_BREAKOUT_FAMILY_ID, StrategyDecision
-from kiwoom_monitor.application.market_session_schedule import mock_order_entry_decision
+from kiwoom_monitor.application.market_session_schedule import automation_order_entry_decision
 from kiwoom_monitor.application.mock_automation_admission import (
     MockAutomationAdmission,
     MockAutomationControl,
@@ -781,12 +781,7 @@ def assess_mock_automation_decision(
     else:
         reasons.append("NON_ACTION_DECISION")
 
-    session = mock_order_entry_decision(
-        effective_now,
-        environment="mock",
-        venue=spec.supported_venue or "",
-        order_type=OrderType.LIMIT.value,
-    )
+    session = automation_order_entry_decision(effective_now, venue=spec.supported_venue or '')
     if not session.allowed:
         reasons.append("MARKET_SESSION_NOT_SUPPORTED")
     if session.session_profile != spec.session_profile:
@@ -1132,7 +1127,7 @@ def assess_mock_unfilled_gate_bundle_from_risk(repository, runtime, decision, re
             elif max(0, min(positions.get(child['symbol'], 0), owned)
                      - dict(metrics.pending_sell_quantities).get(child['symbol'], 0)) < child['quantity']:
                 reasons.append('INSUFFICIENT_POSITION')
-    session = mock_order_entry_decision(now, environment='mock', venue=spec.supported_venue or '', order_type='LIMIT')
+    session = automation_order_entry_decision(now, venue=spec.supported_venue or '')
     if not session.allowed or session.reason == 'mock_after_broker_probe':
         reasons.append('MARKET_SESSION_NOT_SUPPORTED')
     if session.session_profile != spec.session_profile:

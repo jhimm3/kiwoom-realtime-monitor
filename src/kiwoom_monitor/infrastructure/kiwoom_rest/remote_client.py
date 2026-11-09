@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
+from kiwoom_monitor.application.stock_enrichment import NXT_CATALOG_KIND, PREMARKET_MARKETS, PremarketCatalog
 from kiwoom_monitor.infrastructure.central_content_client import _http_operation_context
 from kiwoom_monitor.domain.order_contract import AccountEnvironment, AccountScope
 from kiwoom_monitor.domain.time_basis import aware_iso_kst
@@ -94,6 +95,8 @@ class RemoteKiwoomRestClient:
         self._command_lock = RLock()
         self._pending_submit = None
         self._server_clock: tuple[datetime, float] | None = None
+        self._nxt_catalog_lock = RLock()
+        self._nxt_catalog: tuple[str, float, dict[str, Any]] | None = None
 
     def require_query_access(self) -> dict[str, Any]:
         """Confirm this explicit connection is the server's dedicated query bearer."""
@@ -376,7 +379,10 @@ class RemoteKiwoomRestClient:
         items = payload.get("items") if isinstance(payload, dict) else None
         if not isinstance(items, list):
             raise KiwoomApiError("개인 중앙 서버 순위 snapshot 형식이 올바르지 않습니다.")
-        return {"item_inq_rank": items}
+        result = {"item_inq_rank": items}
+        if isinstance(document.get("stock_enrichment_codes"), list):
+            result["stock_enrichment_codes"] = document["stock_enrichment_codes"]
+        return result
 
     def load_stored_daily_bars(
         self, code: str, market: str = "", limit: int = 250,
@@ -470,8 +476,43 @@ class RemoteKiwoomRestClient:
     def load_stored_fundamentals(self, code: str) -> dict[str, Any] | None:
         return self._load_stored_stock_document("stock_fundamentals", code, "기본정보")
 
+    def _load_premarket_payload(self, day: str) -> dict[str, Any]:
+        with self._nxt_catalog_lock:
+            catalog = self._nxt_catalog
+            if catalog is None or catalog[0] != day or monotonic() >= catalog[1]:
+                snapshots = self._load_market_snapshots(NXT_CATALOG_KIND, day, 1, "장전 종목 목록")
+                payload = snapshots[0].get("payload") if snapshots else None
+                payload = payload if isinstance(payload, dict) else {}
+                expires = float("inf") if isinstance(payload.get("stocks"), dict) else monotonic() + 30
+                catalog = self._nxt_catalog = (day, expires, payload)
+            return catalog[2]
+
     def load_stored_nxt_eligibility(self, code: str) -> dict[str, Any] | None:
-        return self._load_stored_stock_document("stock_nxt_eligibility", code, "NXT 가능 여부")
+        day = self.server_now().date().isoformat()
+        flags = self._load_premarket_payload(day).get("flags")
+        flag = flags.get(code) if isinstance(flags, dict) and day == self.server_now().date().isoformat() else None
+        return {"nxtEnable": "Y" if flag else "N"} if isinstance(flag, bool) else {}
+
+    def load_stored_premarket_catalog(self, day: str) -> PremarketCatalog | None:
+        payload = self._load_premarket_payload(day)
+        rows = payload.get("stocks")
+        if rows is None:
+            return None
+        flags = payload.get("flags")
+        markets = set(PREMARKET_MARKETS.values())
+        if not isinstance(rows, dict) or not isinstance(flags, dict):
+            raise KiwoomApiError("개인 중앙 서버 장전 종목 목록 형식이 올바르지 않습니다.")
+        stocks = {}
+        for code, row in rows.items():
+            if (len(code) != 6 or not code.isalnum() or not isinstance(row, (list, tuple)) or len(row) != 2
+                    or not isinstance(row[0], str) or not row[0].strip() or row[1] not in PREMARKET_MARKETS.values()):
+                raise KiwoomApiError("개인 중앙 서버 장전 종목 정보가 올바르지 않습니다.")
+            stocks[code] = (row[0], row[1])
+        if {market for _, market in stocks.values()} != markets or any(
+            code not in stocks or type(flag) is not bool for code, flag in flags.items()
+        ):
+            raise KiwoomApiError("개인 중앙 서버 장전 종목 목록이 불완전합니다.")
+        return {"flags": flags, "stocks": stocks}
 
     def _load_stored_stock_document(self, collection: str, code: str, label: str) -> dict[str, Any]:
         query = urlencode({"owner": code, "limit": 1})

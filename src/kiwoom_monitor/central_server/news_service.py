@@ -5,10 +5,11 @@ import logging
 from time import perf_counter
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from typing import Any, Callable, Protocol
-from zoneinfo import ZoneInfo
+from typing import Any, Awaitable, Callable, Protocol
 
 from kiwoom_monitor.domain.news_ai_contract import decode_news_input_source, news_ai_article_input
+from kiwoom_monitor.domain.ranking import normalize_stock_code
+from kiwoom_monitor.domain.time_basis import aware_iso_kst, kst_now
 
 from kiwoom_monitor.application.news_analysis import NewsAssessment, assess_stock_news
 from kiwoom_monitor.application.news_grouping import group_similar_news
@@ -21,8 +22,11 @@ from kiwoom_monitor.infrastructure.news_ai import ANALYSIS_PROMPT_VERSION
 from kiwoom_monitor.infrastructure.naver_stock_news import NaverStockNewsClient
 
 from .market_news_sources import MarketFeedNewsCollector
-from .news_sources import DEFAULT_NEWS_QUERY_SET, QuerySetNewsCollector
-from .market_observations import KST, as_kst
+from .news_sources import (
+    DEFAULT_NEWS_QUERY_SET, QuerySetNewsCollector, automatic_news_open, automatic_news_wait,
+    load_premarket_stock_names, news_resume_at,
+)
+from .market_observations import as_kst
 from .news_read_routes import (
     load_cached_news, merge_confirmed_news, _identity, _serialize,
 )
@@ -63,6 +67,8 @@ class CentralNewsStore(Protocol):
 
     def save_news_source_page(self, value: dict[str, Any]) -> dict[str, Any]: ...
 
+    def load_document(self, collection: str, owner: str, key: str) -> dict[str, Any] | None: ...
+
 
 class CentralNewsService:
     """동일 종목의 동시 뉴스 요청을 하나의 네이버 호출로 합친다."""
@@ -83,10 +89,11 @@ class CentralNewsService:
         read_only_search: bool = False,
         prioritize_stock: Callable[[str], None] | None = None,
         enqueue_ai_jobs: Callable[[list[dict[str, Any]]], int] | None = None,
+        held_news_codes: Callable[[datetime], Awaitable[set[str]]] | None = None,
         now_provider: Callable[[], datetime] | None = None,
         workload_paused: Callable[[str], bool] | None = None,
     ) -> None:
-        self._now = (lambda: as_kst(now_provider())) if now_provider else (lambda: datetime.now(KST))
+        self._now = (lambda: as_kst(now_provider())) if now_provider else kst_now
         self._workload_paused = workload_paused or (lambda _workload: False)
         self._client = client
         self._stock_client = stock_client or NaverStockNewsClient()
@@ -106,6 +113,7 @@ class CentralNewsService:
         self._ai_service: Any = None
         self._prioritize_stock = prioritize_stock
         self._enqueue_ai_jobs = enqueue_ai_jobs
+        self._held_news_codes = held_news_codes
         self._request_hard_limit = max(1, min(24_000, int(request_hard_limit)))
         self._watchlist_request_limit = max(0, min(self._request_hard_limit, int(watchlist_request_limit)))
         self._processing_excluded_providers = _provider_values(processing_excluded_providers)
@@ -324,34 +332,64 @@ class CentralNewsService:
             task.exception()  # Observe orphan failures; active waiters still receive the exception.
 
     async def refresh_once(self) -> int:
-        if self._workload_paused("news_stock_refresh"):
+        now = self._now()
+        if not automatic_news_open(now) or self._workload_paused("news_stock_refresh"):
             return 0
         if not (self._naver_api_enabled or self._naver_stock_enabled or self._dart_enabled):
             return 0
         snapshots = await asyncio.to_thread(
             self._store.load_dataset_snapshots, "top20_membership", "", 1,
         ) if hasattr(self._store, "load_dataset_snapshots") else []
+        rank_fresh = bool(snapshots)
         if snapshots and snapshots[0].get("snapshot_key"):
             try:
                 observed_at = datetime.fromisoformat(str(snapshots[0]["snapshot_key"]))
-                if observed_at.tzinfo is None or self._now() - observed_at.astimezone(UTC) > timedelta(minutes=10):
+                morning = now.hour == 7
+                visible = observed_at.tzinfo is not None and observed_at <= now
+                rank_fresh = visible and now - observed_at <= timedelta(minutes=10)
+                if not visible or (not morning and not rank_fresh):
                     snapshots = []
             except ValueError:
                 snapshots = []
         membership = snapshots[0].get("payload", {}) if snapshots else {}
         ranking = membership.get("items", []) if isinstance(membership, dict) else []
         rows = [
-            {"document": {"stock_code": str(item.get("stk_cd") or item.get("stk_code") or "").lstrip("A"),
+            {"document": {"stock_code": normalize_stock_code(item.get("stk_cd") or item.get("stk_code")),
                           "stock_name": str(item.get("stk_nm") or "").strip()}}
             for item in ranking if isinstance(item, dict)
         ]
+        normal_ai_codes = {row["document"]["stock_code"] for row in rows} if rank_fresh else set()
+        if self._held_news_codes is not None:
+            try:
+                held = await self._held_news_codes(now)
+            except Exception:
+                LOGGER.exception("보유 종목 뉴스 입력을 읽지 못했습니다.")
+                held = set()
+            known = {row["document"]["stock_code"]: row["document"]["stock_name"] for row in rows}
+            if any(not known.get(code) for code in held):
+                premarket = await asyncio.to_thread(
+                    load_premarket_stock_names, self._store, now.date().isoformat(),
+                )
+            else:
+                premarket = {}
+            held_rows = []
+            for code in sorted(held):
+                name = known.get(code) or premarket.get(code)
+                if not name:
+                    entry = await asyncio.to_thread(self._store.load_document, "stock_catalog", "krx", code)
+                    data = (entry or {}).get("document", {})
+                    if data.get("instrument_type") in {"ETF", "ETN", "ELW"}:
+                        continue
+                    name = str(data.get("name") or code)
+                held_rows.append({"document": {"stock_code": code, "stock_name": name}})
+            rows = held_rows + rows
         if not self._read_only_search:
             rows.extend(await asyncio.to_thread(self._store.load_documents, "news_watchlist", "", 10_000))
         refreshed = 0
         since = self._now() - timedelta(days=2)
         seen: set[str] = set()
         for row in rows:
-            if self._workload_paused("news_stock_refresh"):
+            if not automatic_news_open(self._now()) or self._workload_paused("news_stock_refresh"):
                 break
             document = row.get("document")
             if not isinstance(document, dict):
@@ -363,7 +401,8 @@ class CentralNewsService:
                 continue
             seen.add(code)
             try:
-                if self._read_only_search:
+                automatic_analysis = not self._read_only_search or code in normal_ai_codes
+                if self._read_only_search and automatic_analysis:
                     saved = await asyncio.to_thread(
                         self._store.load_documents, "news_automation_settings", code, 1,
                     )
@@ -374,7 +413,8 @@ class CentralNewsService:
                     self._dart_client if self._dart_enabled else None,
                     owner_only=True,
                 )
-                await self._auto_analyze(code, name, owner_items, document)
+                if automatic_analysis:
+                    await self._auto_analyze(code, name, owner_items, document)
                 refreshed += 1
             except Exception:
                 # 한 종목 또는 공급자의 실패가 나머지 자동 수집을 중단하지 않는다.
@@ -461,7 +501,8 @@ class CentralNewsService:
             except Exception:
                 LOGGER.exception("NAS 종목뉴스 순위 갱신 실패")
             try:
-                await asyncio.wait_for(self._closing.wait(), timeout=self._refresh_seconds)
+                await asyncio.wait_for(self._closing.wait(),
+                                       timeout=automatic_news_wait(self._now(), self._refresh_seconds))
             except TimeoutError:
                 continue
 
@@ -469,31 +510,44 @@ class CentralNewsService:
         self, code: str, name: str, since: datetime | None, client, dart_client,
         *, owner_only: bool = False,
     ) -> list[dict[str, Any]]:
+        started = self._now()
         sync_rows = await asyncio.to_thread(self._store.load_documents, "news_sync", code, 1)
-        sync_document = sync_rows[0].get("document", {}) if sync_rows else {}
-        checked_at = None
-        if sync_rows:
-            try:
-                checked_at = datetime.fromisoformat(str(sync_rows[0]["document"]["checked_at"]))
-            except (KeyError, TypeError, ValueError):
-                checked_at = None
-            if (
-                checked_at is not None
-                and self._now() - checked_at.astimezone(UTC)
-                < timedelta(seconds=self.SELECTED_STOCK_CACHE_SECONDS)
-            ):
-                if owner_only:
-                    return await asyncio.to_thread(load_cached_news, self._store, code, name, since)
-                cached = await asyncio.to_thread(load_cached_news, self._store, code, name, None)
-                return await asyncio.to_thread(merge_confirmed_news, self._store, code, name, cached, since)
-        provider_since = since
-        if checked_at is not None:
-            last_checked = checked_at.astimezone(UTC)
-            if provider_since is None or last_checked > provider_since.astimezone(UTC):
-                provider_since = last_checked
+        state = dict(sync_rows[0].get("document") or {}) if sync_rows else {}
+        checked_at = _news_timestamp(state.get("checked_at"))
+        enabled = tuple(source for source, active in (("naver", client is not None),
+                        ("site", self._naver_stock_enabled), ("dart", dart_client is not None)) if active)
+        cache_recent = (checked_at is not None and timedelta(0) <= started - checked_at
+                        < timedelta(seconds=self.SELECTED_STOCK_CACHE_SECONDS)
+                        and (not owner_only or checked_at >= news_resume_at(started)))
+        if cache_recent and all(state.get(f"{source}_coverage_complete", not owner_only) for source in enabled):
+            if owner_only:
+                return await asyncio.to_thread(load_cached_news, self._store, code, name, since)
+            cached = await asyncio.to_thread(load_cached_news, self._store, code, name, None)
+            return await asyncio.to_thread(merge_confirmed_news, self._store, code, name, cached, since)
+
+        previous_day = started.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+
+        def scan_since(source):
+            last_success = _news_timestamp(state.get(f"{source}_success_at"))
+            if last_success is not None and last_success <= started:
+                return last_success - timedelta(minutes=2)
+            return previous_day if owner_only else since
+
+        def needs_scan(source):
+            last_success = _news_timestamp(state.get(f"{source}_success_at"))
+            return (not cache_recent or not state.get(f"{source}_coverage_complete")
+                    or last_success is None or not timedelta(0) <= started - last_success
+                    < timedelta(seconds=self.SELECTED_STOCK_CACHE_SECONDS))
+
+        def finished(source, complete):
+            state[f"{source}_checked_at"] = started.isoformat()
+            state[f"{source}_coverage_complete"] = complete
+            if complete:
+                state[f"{source}_success_at"] = started.isoformat()
+
         items: list[tuple[StockNewsItem, str]] = []
         errors: list[Exception] = []
-        if client is not None:
+        if client is not None and not self._naver_paused and needs_scan("naver"):
             try:
                 if isinstance(client, NaverNewsClient):
                     claim = lambda: self._store.claim_news_request(
@@ -501,49 +555,77 @@ class CentralNewsService:
                         hard_limit=self._request_hard_limit,
                         budget_date=self._now().date().isoformat(),
                     )
-                    found = await asyncio.to_thread(client.search, name, since=provider_since, request_claim=claim)
+                    found, complete = await asyncio.to_thread(
+                        client.search_with_coverage, name, since=scan_since("naver"), request_claim=claim,
+                    )
                 else:
-                    found = await asyncio.to_thread(client.search, name, since=provider_since)
+                    found = await asyncio.to_thread(client.search, name, since=scan_since("naver"))
+                    complete = True
                 items.extend((item, "naver") for item in found)
+                finished("naver", complete)
             except Exception as error:  # 외부 뉴스 공급자 하나의 실패는 다른 공급자를 막지 않는다.
+                finished("naver", False)
                 errors.append(error)
-        site_state = dict(sync_document) if isinstance(sync_document, dict) else {}
-        if self._naver_stock_enabled:
+        if self._naver_stock_enabled and not self._naver_paused and needs_scan("site"):
             try:
-                cursor_text = str(site_state.get("site_cursor_published_at") or "")
-                window_floor = self._now() - timedelta(days=2)
-                try:
-                    stock_since = datetime.fromisoformat(cursor_text).astimezone(UTC) if cursor_text else window_floor
-                except ValueError:
-                    stock_since = window_floor
+                window_floor = started - timedelta(days=2)
+                cursor_at = _news_timestamp(state.get("site_cursor_published_at"))
+                stock_since = scan_since("site") if state.get("site_success_at") else cursor_at
+                stock_since = stock_since or (previous_day if owner_only else window_floor)
                 expired_cursor = stock_since < window_floor
-                stock_since = max(stock_since, window_floor)
-                start_page = 1 if expired_cursor else max(1, int(site_state.get("site_next_page") or 1) - 1)
+                last_scan = _news_timestamp(state.get("site_checked_at"))
+                fresh_morning = owner_only and (last_scan is None or last_scan < news_resume_at(started))
+                if expired_cursor:
+                    state["site_gap_before"] = window_floor.isoformat()
+                restart = expired_cursor or fresh_morning
+                start_page = 1 if restart else max(1, int(state.get("site_next_page") or 1) - 1)
                 # The source clock has minute precision and pages can shift while paging.
                 found = await asyncio.to_thread(
                     self._stock_client.search, code, name,
                     since=max(window_floor, stock_since - timedelta(minutes=2)), start_page=start_page,
                 )
                 items.extend((item, "naver_stock") for item in found.items)
-                latest = "" if expired_cursor else str(site_state.get("site_pending_latest_published_at") or "")
+                latest = "" if restart else str(state.get("site_pending_latest_published_at") or "")
                 if found.latest_published_at is not None and not latest:
                     latest = found.latest_published_at.isoformat()
-                site_state["site_next_page"] = found.next_page
-                site_state["site_pending_latest_published_at"] = "" if found.complete or found.page_limit_reached else latest
-                site_state["site_coverage_complete"] = found.complete
+                state["site_next_page"] = found.next_page
+                state["site_pending_latest_published_at"] = "" if found.complete or found.page_limit_reached else latest
+                finished("site", found.complete)
                 if found.page_limit_reached:
-                    site_state["site_last_page_limit_at"] = self._now().isoformat()
-                if (found.complete or found.page_limit_reached) and latest:
-                    site_state["site_cursor_published_at"] = latest
+                    state["site_last_page_limit_at"] = started.isoformat()
+                if found.complete and latest:
+                    state["site_cursor_published_at"] = latest
             except Exception as error:
+                finished("site", False)
                 errors.append(error)
-        if dart_client is not None:
+        if dart_client is not None and not self._dart_paused and needs_scan("dart"):
             try:
+                since_dart = scan_since("dart")
+                bounds = ({"begin": as_kst(since_dart).date(), "end": started.date()}
+                          if since_dart is not None and isinstance(dart_client, DartDisclosureClient) else {})
                 items.extend((item, "dart") for item in await asyncio.to_thread(
-                    dart_client.search, code, name,
+                    dart_client.search, code, name, **bounds,
                 ))
+                finished("dart", True)
             except Exception as error:
+                finished("dart", False)
                 errors.append(error)
+        unique = {
+            item.original_link or item.link or f"{item.published_at!s}|{item.title}": (item, collector)
+            for item, collector in items
+        }
+        documents = [(_serialize(item), collector) for item, collector in unique.values()]
+        if documents:
+            await asyncio.to_thread(self._store.upsert_documents, "news_article", [
+                {"owner": code, "key": _identity(value),
+                 "document": {"stock_code": code, "stock_name": name, **value},
+                 "collector_id": collector, "collection_scope": "watchlist"}
+                for value, collector in documents
+            ])
+        await asyncio.to_thread(self._store.upsert_documents, "news_sync", [{
+            "owner": code, "key": "latest",
+            "document": {**state, "checked_at": started.isoformat()},
+        }])
         if not items and errors:
             cached = await asyncio.to_thread(load_cached_news, self._store, code, name, None)
             stored = await asyncio.to_thread(merge_confirmed_news, self._store, code, name, cached, since)
@@ -552,21 +634,6 @@ class CentralNewsService:
                     return await asyncio.to_thread(load_cached_news, self._store, code, name, since)
                 return stored
             raise RuntimeError(" / ".join(str(error) for error in errors))
-        unique = {
-            item.original_link or item.link or f"{item.published_at!s}|{item.title}": (item, collector)
-            for item, collector in items
-        }
-        documents = [(_serialize(item), collector) for item, collector in unique.values()]
-        await asyncio.to_thread(self._store.upsert_documents, "news_article", [
-            {"owner": code, "key": _identity(value),
-             "document": {"stock_code": code, "stock_name": name, **value},
-             "collector_id": collector, "collection_scope": "watchlist"}
-            for value, collector in documents
-        ])
-        await asyncio.to_thread(self._store.upsert_documents, "news_sync", [{
-            "owner": code, "key": "latest",
-            "document": {**site_state, "checked_at": self._now().isoformat()},
-        }])
         if owner_only:
             # Automatic AI consumes committed owner revisions, not the fresh/confirmed display merge.
             return await asyncio.to_thread(load_cached_news, self._store, code, name, since)
@@ -581,6 +648,42 @@ class CentralNewsService:
 
 
 
+
+
+def _news_timestamp(value: object) -> datetime | None:
+    try:
+        return aware_iso_kst(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+
+
+def load_held_news_codes(store, real_bindings, mock_account_refs, cut):
+    """Project only positive symbols from existing snapshots for admitted accounts."""
+    held = set()
+
+    def add(snapshot, received_at):
+        observed = _news_timestamp(snapshot.get("as_of"))
+        received = _news_timestamp(received_at)
+        if observed is None or received is None or not observed <= received <= cut:
+            return
+        for raw, quantity in snapshot.get("positions", {}).items():
+            code = normalize_stock_code(raw)
+            if type(quantity) is int and quantity > 0 and len(code) == 6 and code.isascii() and code.isalnum():
+                held.add(code)
+
+    for binding in real_bindings:
+        owner = f"kiwoom:real:{binding.scope.account_ref}"
+        rows = store.load_documents("real_account_recovery", owner, 1)
+        if rows:
+            document = rows[0]["document"]
+            if (document.get("binding_revision") == binding.binding_revision
+                    and document.get("credential_profile_id") == binding.credential_profile_id):
+                add(document["recovery"]["account"], document.get("received_at"))
+    for account_ref in mock_account_refs:
+        snapshot = store.load_mock_news_position_snapshot(account_ref, cut)
+        if snapshot is not None:
+            add(snapshot, snapshot.get("received_at"))
+    return held
 
 
 def _provider_values(values: tuple[str, ...]) -> tuple[str, ...]:

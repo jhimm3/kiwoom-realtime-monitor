@@ -11,6 +11,7 @@ import logging
 from contextlib import nullcontext
 from copy import deepcopy
 from .database_observation_readers import OBSERVATION_DELIVERY_PROTOCOL
+from .execution_runtime import AutomationViBuyBlocked
 from .observation_frame_recovery import (
     ObservationFrameRecovery, drain_thread_call,
 )
@@ -456,10 +457,12 @@ class MockAutomationEpisode:
         spec: MockAutomationOperatingSpec,
         *,
         price_source=None,
+        nxt_price_source=None,
         leader_context_source=None,
         now_provider=None,
         member_admission: MockAutomationAdmission | None = None,
         proposed_selection=None,
+        minute_candidate_current=None, close_calendar=None,
     ) -> None:
         context = bundle.automation_context
         if (
@@ -469,6 +472,9 @@ class MockAutomationEpisode:
             or member_admission is None and context.spec_id != spec.spec_id
         ):
             raise ValueError("MOCK_AUTOMATION_RUNNER_CONTEXT_MISMATCH")
+        if spec.supported_venue in {'NXT', 'SOR'} and (
+                nxt_price_source is None or not bundle.runtime.supports_automation_venue(spec.supported_venue)):
+            raise ValueError(f'{spec.supported_venue}_AUTOMATION_REQUIRES_LOCAL_FAKE_BROKER_AND_QUOTE_SOURCE')
         if member_admission is not None and (
                 not isinstance(member_admission, MockAutomationAdmission)
                 or member_admission.version not in {MOCK_AUTOMATION_ACCOUNT_ADMISSION_VERSION, MOCK_AUTOMATION_ADMISSION_VERSION}
@@ -479,6 +485,8 @@ class MockAutomationEpisode:
                     spec.final_result_hash, spec.final_batch_id, spec.final_run_id)):
             raise ValueError("MOCK_AUTOMATION_MEMBER_CONTEXT_MISMATCH")
         self._store = store
+        self._minute_candidate_current = minute_candidate_current
+        self._close_calendar = close_calendar
         self._now = (lambda: as_kst(now_provider())) if now_provider else (lambda: datetime.now(KST))
         self._bundle = bundle
         self._spec = spec
@@ -526,7 +534,8 @@ class MockAutomationEpisode:
         self._leader_plan_reprepare_requested = None
         self._planned_protection_restore = None
         self._planned_protection_readback = None
-        self._price_source = price_source
+        self._price_source = nxt_price_source if spec.supported_venue == 'NXT' else price_source
+        self._nxt_price_source = nxt_price_source
         self._unfilled_cost_model = None
         self._unfilled_population = None
         self._unfilled_evidence_cache = None
@@ -953,7 +962,8 @@ class MockAutomationEpisode:
         self._input_progress.use_native_protocol(protocol)
         self._minute_management = MinutePlanManagement(self._store, self._bundle, self._spec, self._repository,
             parameters=candidate['parameters'], price_source=self._price_source, now_provider=self._now,
-            family=candidate['family'])
+            family=candidate['family'], candidate_current=self._minute_candidate_current, close_calendar=self._close_calendar,
+            nxt_price_source=self._nxt_price_source)
         self._episode_position.set_plan_fill_listener(self._minute_management.observe_fill)
         document = self._checkpoint_document('execution_mock_automation_runner_current')
         matching = isinstance(document, Mapping) and (
@@ -1029,6 +1039,11 @@ class MockAutomationEpisode:
             **{field.name: getattr(base, field.name) for field in fields(PositionAccountObservation)},
             runner_state=state,
         )
+
+    def held_close_decisions(self):
+        if self._minute_management is None:
+            return ()
+        return self._minute_management.held_close_decisions()
 
     @property
     def status(self) -> dict[str, Any]:
@@ -1269,7 +1284,8 @@ class MockAutomationEpisode:
             if previous_stop is not None:
                 price = {'symbol':previous_stop['symbol'], 'price_won':previous_stop['price_won'],
                     'available_at':datetime.fromisoformat(previous_stop['available_at']),
-                    'input_ref':previous_stop['input_ref'], 'durable':False, 'market_status':'TRADABLE'}
+                    'input_ref':previous_stop['input_ref'], 'durable':False, 'market_status':'TRADABLE',
+                    **({'venue': previous_stop['venue']} if 'venue' in previous_stop else {})}
                 self.observe_automation_price(previous_stop['symbol'], price)
             else:
                 for symbol, _ in risk.entry_prices_for_spec(self._spec.spec_id):
@@ -1460,8 +1476,10 @@ class MockAutomationEpisode:
                 if position_action and record is not None:
                     self._episode_position.replace_strategy_state(evaluation.state, position_time=self._position_state_time)
                     await drain_thread_call(self._save_checkpoint, force=True)
-                self._status = {"state": "ORDER_SUBMITTED" if record is not None else "BLOCKED",
-                    "reason": ";".join(gate.reasons) if gate.reasons else "approved", "last_decision_id": decision.decision_id,
+                submitted = record is not None and record.state is not OrderState.REJECTED
+                self._status = {"state": "ORDER_SUBMITTED" if submitted else "BLOCKED",
+                    "reason": ";".join(gate.reasons) if gate.reasons else "approved" if submitted else "order_rejected",
+                    "last_decision_id": decision.decision_id,
                     "pending_intent_id": record.intent.intent_id if record is not None else "", "input_mode": "0B", "orders_enabled": False}
             except (TypeError, ValueError, KeyError) as error:
                 self._strategy_inputs.reset_evaluations()
@@ -1473,6 +1491,8 @@ class MockAutomationEpisode:
 
     def observe_automation_price(self, symbol, price):
         """RAM-only immediate stop cue; transport remains in the existing Runner."""
+        if price.get('venue', 'KRX') != ('NXT' if self._spec.supported_venue == 'NXT' else 'KRX'):
+            return
         if self._panic_plan_mode:
             if (not self._closing and self._minute_management is not None
                     and self._minute_management.observe_price(symbol, price)):
@@ -1498,7 +1518,8 @@ class MockAutomationEpisode:
             proof = previous_trigger.get('stop_loss')
             if proof is not None:
                 price = {'price_won':proof['price_won'], 'available_at':datetime.fromisoformat(proof['available_at']),
-                    'input_ref':proof['input_ref'], 'durable':False, 'market_status':'TRADABLE'}
+                    'input_ref':proof['input_ref'], 'durable':False, 'market_status':'TRADABLE',
+                    **({'venue': proof['venue']} if 'venue' in proof else {})}
         from kiwoom_monitor.application.mock_automation_risk import mock_automation_stop_loss_trigger
         now = self._bundle.runtime.server_now()
         trigger = mock_automation_stop_loss_trigger(self._spec, risk, execution_run_id=self._bundle.run_id,
@@ -1655,12 +1676,15 @@ class MockAutomationEpisode:
         quote = self._strategy_inputs.latest_stop_quote
         if quote is not None and not self._strategy_inputs.stop_quote_generation_is_current(quote):
             quote = None
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_venue
+        route_quote = self._nxt_price_source(record.intent.symbol) if execution_broker_venue(record) == 'NXT' else None
         now = self._now()
         deadline = min(datetime.fromisoformat(self._leader_position_proof['context']['valid_until']),
                        record.intent.created_at + timedelta(seconds=terms.maximum_management_seconds))
         token = (revision, record.intent.intent_id, control.control_revision,
                  current.get('revision') if isinstance(current, Mapping) else None,
                  quote.raw['input_ref'] if quote is not None else None,
+                 route_quote['input_ref'] if route_quote is not None else None,
                  quote is not None and 0 <= (now - quote.envelope.received_at).total_seconds() <= terms.max_snapshot_age_seconds,
                  now >= deadline, notice.get('revision') if notice.get('state') == 'PENDING' else None)
         if self._leader_management_input == token:
@@ -1685,6 +1709,8 @@ class MockAutomationEpisode:
             claim = prepare_leader_order_management_claim(self._store, self._bundle.runtime, execution, self._spec,
                 updated, config=self._config, quote=current_quote, recovery=cut['recovery'], risk=cut['risk'],
                 entry_enabled=enabled, protection_notice=protection,
+                route_quote=(self._nxt_price_source(updated.intent.symbol)
+                             if execution_broker_venue(updated) == 'NXT' else None),
                 verified_peer_orders=cut.get('verified_peer_orders'),
                 selected_management_context=self._selected_management_context,
                 selected_management_policy=(self._repository.selected_management_policy
@@ -1762,7 +1788,11 @@ class MockAutomationEpisode:
                 self._leader_staged_facts is None or self._leader_staged_facts['confirmed_at'] is None
                 or quote.envelope.received_at < self._leader_staged_facts['confirmed_at']):
             return
-        if cut is None or cut["risk"].observed_at < quote.envelope.received_at:
+        route_quote = self._price_source(root.intent.symbol) if root.intent.venue == 'NXT' else None
+        if root.intent.venue == 'NXT' and route_quote is None:
+            return
+        required_at = max(quote.envelope.received_at, route_quote['available_at']) if route_quote is not None else quote.envelope.received_at
+        if cut is None or cut["risk"].observed_at < required_at:
             if self._leader_plan_refresh_quote is None:
                 # Keep this cut while Risk catches up, even during continuous 0B delivery.
                 self._leader_plan_refresh_quote = quote
@@ -1789,6 +1819,7 @@ class MockAutomationEpisode:
                 leader_config=self._config, position_proof=self._leader_position_proof,
                 confirmed_root_state=root.state.value, confirmed_root_at=confirmed_at, now=now,
                 selected_management_context=self._selected_management_context,
+                route_quote=route_quote,
             )
             plan, decision = read_planned_leader_protection_checkpoint(workflow, notice, self._spec, self._bundle.run_id)
             await drain_thread_call(self._record_recovery, recovery, risk)
@@ -3816,10 +3847,16 @@ class MockAutomationEpisode:
                 return
         if await self._pause_for_protection_review():
             return False
-        gate, record, _ = await drain_thread_call(self._dispatch_original_and_register, decision, recovery, risk)
+        try:
+            gate, record, _ = await drain_thread_call(self._dispatch_original_and_register, decision, recovery, risk)
+        except AutomationViBuyBlocked as error:
+            self._status = {"state": "BLOCKED", "reason": str(error), "last_decision_id": decision.decision_id,
+                            "orders_enabled": False, "updated_at": decision.decided_at}
+            return
+        submitted = record is not None and record.state is not OrderState.REJECTED
         self._status = {
-            "state": "ORDER_SUBMITTED" if record is not None else "BLOCKED",
-            "reason": ";".join(gate.reasons) if gate.reasons else "approved",
+            "state": "ORDER_SUBMITTED" if submitted else "BLOCKED",
+            "reason": ";".join(gate.reasons) if gate.reasons else "approved" if submitted else "order_rejected",
             "last_decision_id": decision.decision_id,
             "last_gate_id": gate.gate_id,
             "pending_intent_id": record.intent.intent_id if record is not None else "",

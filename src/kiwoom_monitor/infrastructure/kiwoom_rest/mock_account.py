@@ -71,6 +71,7 @@ class BrokerOrderDetails:
     venue: str
     reasons: tuple[str, ...] = ()
     original_broker_order_id: str | None = None
+    venue_confirmed: bool = True
 
 
 @dataclass(frozen=True)
@@ -313,7 +314,8 @@ def _broker_order_details(row, ordered, default_venue):
                 default_venue if not venue_value else "UNKNOWN")
     original = str(row.get('orig_ord_no') or '').strip()
     return BrokerOrderDetails(str(row.get("ord_no") or "").strip(), ordered, side, price or None, venue, tuple(reasons),
-                              original if original and set(original) != {'0'} else None)
+                              original if original and set(original) != {'0'} else None,
+                              venue_confirmed=venue_value in {'1', '2', 'KRX', 'NXT'})
 
 
 def merge_order_snapshots(

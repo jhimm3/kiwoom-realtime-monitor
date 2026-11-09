@@ -199,7 +199,10 @@ class MockAccountBundleTests(unittest.IsolatedAsyncioTestCase):
         )
         self.bundles.append(old)
         await old.start(); await asyncio.wait_for(old.monitor._queue.join(), 2)
-        owner = MockCredentialOwner(self.store, object(), hmac_key=self.hmac_key)
+        def buy_vi_rejection(symbol, _observed_at):
+            return "vi_active" if symbol == "005930" else None
+
+        owner = MockCredentialOwner(self.store, object(), hmac_key=self.hmac_key, buy_vi_rejection=buy_vi_rejection)
         owner._contexts["profile-a"] = owner._bundles["profile-a"] = old
         owner._revisions["profile-a"] = 1
         owner._settings_revisions["profile-a"] = settings["revision"]
@@ -217,6 +220,8 @@ class MockAccountBundleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(new.runtime._active)
         self.assertEqual(MockAccountRuntimeMode.AUTOMATIC, new.runtime_mode)
         self.assertFalse(new.runtime._new_orders_enabled)
+        with self.assertRaisesRegex(ValueError, "^vi_active$"):
+            new.runtime.check_automation_buy_vi("005930", new.runtime.server_now())
         with self.assertRaisesRegex(RuntimeError, "AUTOMATIC_MODE"):
             await new.gateway.submit_limit(
                 request_id="manual-during-auto", symbol="005930",

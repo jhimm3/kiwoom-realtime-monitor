@@ -37,6 +37,16 @@ def _frozen_scenario(events, **changes):
                            "source_version": "joined-reconstruction/v2"}, **changes}
 
 
+def _kind_halt_receipt():
+    day = _START.date().isoformat()
+    completed = _START.replace(hour=20, minute=5)
+    return {"owner": f"{day}:005930:KRX", "key": "complete", "updated_at": completed.timestamp(),
+            "document": {"kind": "minute_no_trade", "reason": "krx_full_day_halt", "as_of": day,
+                         "scope": "full_day", "window_closed": True, "session_finalized": True,
+                         "daily_volume": 0, "daily_revision_id": "daily/fixture", "completed_at": completed.isoformat(),
+                         "halt_proof": {"source": "krx-kind", "halt_notice_url": "https://kind.krx.co.kr/fixture"}}}
+
+
 def _policy(variant="VI_GAP_UP"):
     policy = {"version": "micro-policy/v1", "variant": variant, "quantity": 5,
               "min_reaction_bps": 50, "max_spread_bps": 125, "stop_loss_bps": 100, "take_profit_bps": 200}
@@ -55,6 +65,40 @@ def _entry_market(*, direction="UP", release_price=101, trade_price=103):
 
 
 class MicroExecutionEvidenceTests(unittest.TestCase):
+    def test_historical_vi_supplies_activation_without_duplicating_an_ordered_vi(self):
+        events = _entry_market()
+        document = {"version": "micro-historical-vi/v1", "symbol": "005930", "trading_date": "2026-09-11",
+                    "archive_start": "2019-01-02", "archive_end": "2026-09-22", "source_ref": "archive/run",
+                    "source_version": "sha256:snapshot", "events": [{"event_id": "archive-event-1",
+                        "triggered_at": events[0]["observed_at"], "released_at": events[1]["observed_at"],
+                        "trigger_price_won": 100, "direction": "UP", "vi_type": "동적VI", "source_sha256": "raw-hash"}]}
+        end = events[-1]["available_at"]
+        recovered = replay_micro_execution(_frozen_scenario(events[1:], decision_at=end, historical_vi=document), _policy())
+        self.assertEqual(1, len(recovered["decisions"]))
+        self.assertEqual(["krx-archive-vi:archive-event-1:activation", "release", "book", "trade"],
+                         recovered["decisions"][0]["evidence_refs"])
+        self.assertEqual(events[1:], recovered["evidence"])
+        self.assertFalse(recovered["order_authorized"])
+        native = replay_micro_execution(_frozen_scenario(events, decision_at=end, historical_vi=document), _policy())
+        self.assertEqual(1, len(native["decisions"]))
+        self.assertEqual(["activation", "release", "book", "trade"], native["decisions"][0]["evidence_refs"])
+
+        for case, market, archive in (
+            ("missing_release", events[2:], document),
+            ("unknown_release_price", [events[1] | {"data": {"episode_id": "vi"}}, *events[2:]], document),
+            ("ambiguous_release", events[1:], document | {"events": document["events"] + [
+                document["events"][0] | {"event_id": "different-event"}]}),
+        ):
+            with self.subTest(case=case):
+                result = replay_micro_execution(_frozen_scenario(market, decision_at=end, historical_vi=archive), _policy())
+                self.assertEqual([], result["decisions"])
+                self.assertIsNone(result["input_assessment"]["vi_release_execution_price"])
+        early = replay_micro_execution(_frozen_scenario(events[1:], decision_at=events[0]["observed_at"],
+            historical_vi=document | {"events": document["events"] * 2}), _policy())
+        self.assertEqual(1, len(early["historical_vi"]["episodes"]))
+        self.assertIsNone(early["historical_vi"]["episodes"][0]["released_at"])
+        self.assertEqual([], early["decisions"])
+
     def test_frozen_research_consumes_recorded_inputs_without_native_confirmation(self):
         events = _entry_market() + [
             _event("ORDER_ARRIVED", "arrive", 4, order_id="entry"),
@@ -189,6 +233,20 @@ class MicroExecutionEvidenceTests(unittest.TestCase):
         ])
         self.assertEqual(result, replay_micro_execution(json.loads(json.dumps(_scenario(events))), _policy()))
 
+        for row in events:
+            data = row["data"]
+            for key in ("price_won", "trigger_price_won", "release_price_won"):
+                if key in data:
+                    data[key] *= 100
+            for key in ("bids", "asks"):
+                if key in data:
+                    data[key] = [[price * 100, size] for price, size in data[key]]
+        result = replay_micro_execution(_scenario(events), _policy())
+        self.assertEqual((44, -1044), (result["total_cost_won"], result["realized_pnl_won"]))
+        events[-1]["data"]["fee_won"] = 8
+        result = replay_micro_execution(_scenario(events), _policy())
+        self.assertEqual((11, -1011), (result["total_cost_won"], result["realized_pnl_won"]))
+
     def test_cancel_aggregate_waits_for_late_detailed_fill_and_deduplicates_it(self):
         events = _entry_market() + [
             _event("ORDER_ARRIVED", "arrive", 4, order_id="entry"),
@@ -269,6 +327,79 @@ class MicroExecutionEvidenceTests(unittest.TestCase):
 
 
 class MicroNativeShadowInputTests(unittest.TestCase):
+    def test_last_pre_release_book_matches_only_same_second_krx_trades_without_an_exact_price(self):
+        release = _START + timedelta(minutes=2)
+        cases = (
+            ("match", {"23": "102", "291": "102"}, "091200", False, "INDICATIVE_MATCH", "matching_price_only"),
+            ("auction only", {"291": "102"}, "091200", False, "INDICATIVE_MATCH", "matching_price_only"),
+            ("mismatch", {"23": "109"}, "091200", False, "UNKNOWN", "no_matching_release_second_0b"),
+            ("next second only", {"23": "102"}, "091201", False, "UNKNOWN", "no_matching_release_second_0b"),
+            ("conflicting fields", {"23": "102", "291": "103"}, "091200", False, "UNKNOWN", "conflicting_0d_prices"),
+            ("cleared indication", {"23": "0"}, "091200", False, "UNKNOWN", "missing_0d_prices"),
+            ("unconfirmed book time", {"21": "091200", "23": "102"}, "091200", False, "UNKNOWN",
+             "unconfirmed_pre_release_0d_clock"),
+            ("tied quote receipts", {"23": "102"}, "091200", False, "UNKNOWN", "ambiguous_last_pre_release_0d"),
+            ("multiple matching trades", {"23": "102"}, "091200", False, "INDICATIVE_MATCH", "matching_price_only"),
+            ("capture gap", {"23": "102"}, "091200", True, "UNKNOWN", "no_pre_release_0d"),
+        )
+        for name, values, matched_second, gap, state, reason in cases:
+            with self.subTest(name=name):
+                clock = [_START]
+                collector = CentralRealtimeCollector(lambda: self.fail("MICRO must not request a token"),
+                    "mock", RealtimeHub(), lambda: clock[0], micro_book_codes=("005930",))
+                collector._apply_trade_source_approval({("005930", "KRX"), ("005930", "NXT")}, _START, reset_all=False)
+
+                def quote(price_fields, reported_time):
+                    collector._observe_micro_books({"trnm": "REAL", "data": [
+                        {"type": "0D", "item": "005930", "values": {"21": reported_time, **price_fields}},
+                    ]})
+
+                clock[0] = release - timedelta(seconds=2)
+                quote({"23": "111"}, "091158")
+                clock[0] = release - timedelta(milliseconds=500)
+                quote(values, "091159")
+                if name == "tied quote receipts":
+                    quote({"23": "101"}, "091159")
+                clock[0] = release + timedelta(milliseconds=250)
+                quote({"23": "103"}, "091200")
+                if gap:
+                    collector._mark_capture_gap()
+                    quote({"23": "103"}, "091200")
+                clock[0] = release + timedelta(seconds=2)
+                trades = [
+                    {"type": "0B", "item": "005930", "values": {"10": "103", "15": "2", "20": "091200"}},
+                    {"type": "0B", "item": "005930", "values": {"10": "102", "15": "1", "20": matched_second}},
+                    {"type": "0B", "item": "005930_NX", "values": {"10": "109", "15": "1", "20": "091200"}},
+                ]
+                if name == "multiple matching trades":
+                    trades.append({"type": "0B", "item": "005930", "values": {"10": "102", "15": "4", "20": "091200"}})
+                collector._publish_parsed({"trnm": "REAL", "data": trades})
+                raw = {"9001": "A005930", "9068": "2", "1225": "1", "1490": "1",
+                       "1223": "091000", "1224": "091200", "9081": "KRX"}
+                history = [{"event_id": "release", "stock_code": "005930", "exchange": "KRX",
+                            "source": "kiwoom-websocket-1h", "raw_values": raw,
+                            "received_at": clock[0].timestamp(), "available_at": clock[0].timestamp()}]
+                snapshot = collector.ram_observation_snapshot(("005930",), seconds=8, include_micro_books=True)
+                self.assertEqual(len(trades) - 1, len(snapshot["rows"]))  # KRX only, no separate trade owner.
+                self.assertEqual((), collector.ram_observation_snapshot(("005930",), seconds=8)["rows"])
+                result = assess_micro_shadow_inputs(symbol="005930", venue="KRX", variant="VI_GAP_UP",
+                    decision_at=clock[0], trading_date=clock[0].date(), trade_snapshot=snapshot, vi_history=history)
+                comparison = result["trade"]["release_comparison"]
+                self.assertEqual(103, result["book"]["latest"]["indicative_price_won"])
+                self.assertEqual((state, reason), (comparison["indicative_match"]["state"], comparison["indicative_match"]["reason"]))
+                self.assertEqual(102 if state == "INDICATIVE_MATCH" else None,
+                                 comparison["indicative_match"]["candidate_price_won"])
+                if state == "INDICATIVE_MATCH":
+                    multiple = name == "multiple matching trades"
+                    self.assertEqual(2 if multiple else 1, comparison["indicative_match"]["matching_trade_count"])
+                    single = comparison["indicative_match"]["single_matching_trade"]
+                    self.assertEqual(None if multiple else 102, single["price_won"] if single else None)
+                    self.assertEqual((release - timedelta(milliseconds=500)).isoformat(),
+                                     comparison["indicative_match"]["book_available_at"])
+                self.assertIsNone(comparison["release_execution_price_won"])
+                self.assertIsNone(result["candidate"])
+                self.assertIn("native_vi_release_execution_price", result["missing_inputs"])
+
     def test_frozen_http_inputs_use_sha_bound_research_without_changing_native_inputs(self):
         import hashlib
         from fastapi import FastAPI, Header, HTTPException
@@ -305,6 +436,57 @@ class MicroNativeShadowInputTests(unittest.TestCase):
                 self.assertIn("native_cross_stream_order", native.json()["missing_inputs"])
                 self.assertIn("native_vi_release_execution_price", native.json()["missing_inputs"])
 
+    def test_frozen_http_connects_saved_kind_halt_as_retrospective_evidence_only(self):
+        import hashlib
+        from unittest.mock import patch
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from kiwoom_monitor.central_server.research_read_routes import create_research_read_router
+        from kiwoom_monitor.infrastructure.krx.kind_trading_halts import KindTradingHalts
+
+        clock = [_START]
+        with closing(SQLiteQueryStore(Path(":memory:"), now_provider=lambda: clock[0])) as store:
+            store.initialize()
+            app = FastAPI()
+            app.include_router(create_research_read_router(store, lambda: None, lambda: None, now_provider=lambda: clock[0]))
+            receipt = _kind_halt_receipt()
+            scenario = _frozen_scenario([], decision_at=_START.isoformat())
+            with TestClient(app) as client, patch.object(KindTradingHalts, '_request') as kind:
+                def run(value):
+                    body = json.dumps({"scenario": value, "policy": _policy()}).encode()
+                    response = client.post("/api/v1/research/micro-inputs",
+                        params={"evidence_sha256": hashlib.sha256(body).hexdigest()}, content=body)
+                    self.assertEqual(200, response.status_code, response.text)
+                    return response.json()
+
+                missing = run(scenario)
+                self.assertEqual("UNKNOWN", missing["historical_kind_halt"]["state"])
+                clock[0] = datetime.fromisoformat(receipt["document"]["completed_at"])
+                store.upsert_documents("market_data_coverage", [receipt])
+                recorded = run(scenario)
+                proof = recorded.pop("historical_kind_halt")
+                self.assertEqual(("CONFIRMED_FULL_DAY_HALT", "retrospective_only", "local_archive", clock[0].isoformat()),
+                    (proof["state"], proof["scope"], proof["basis"], proof["available_at"]))
+                self.assertEqual(receipt, proof["receipt"])
+                self.assertEqual({k: v for k, v in missing.items() if k != "historical_kind_halt"}, recorded)
+                self.assertFalse(recorded["order_authorized"])
+                for other in ({"symbol": "000660"}, {"venue": "NXT"},
+                              {"decision_at": (_START - timedelta(days=1)).isoformat()}):
+                    self.assertEqual("UNKNOWN", run(scenario | other)["historical_kind_halt"]["state"])
+                self.assertEqual("UNKNOWN", run(scenario | {"kind_halt_receipt": receipt | {
+                    "document": receipt["document"] | {"session_finalized": False},
+                }})["historical_kind_halt"]["state"])
+                conflict = run(scenario | {"events": _entry_market()})
+                self.assertEqual("CONFLICT", conflict["historical_kind_halt"]["state"])
+                self.assertEqual([], conflict["decisions"])
+                self.assertEqual(["activation"], [row["ref"] for row in conflict["evidence"]])
+                self.assertIn("trade", conflict["input_assessment"]["unavailable_event_refs"])
+                clock[0] = _START
+                self.assertEqual("kind_receipt_not_yet_available", run(scenario)["historical_kind_halt"]["reason"])
+                self.assertEqual("frozen_receipt", run(scenario | {"kind_halt_receipt": proof["receipt"]})[
+                    "historical_kind_halt"]["basis"])
+                kind.assert_not_called()
+
     def test_actual_collector_and_native_vi_store_expose_observations_without_a_candidate(self):
         now = [_START]
 
@@ -317,6 +499,8 @@ class MicroNativeShadowInputTests(unittest.TestCase):
         collector.set_ram_observation_retention(10, owner=retention_owner)
         now[0] += timedelta(seconds=5)
         collector._publish_parsed({"trnm": "REAL", "data": [
+            {"type": "0B", "item": "005930", "values": {"10": "101", "15": "1", "20": "091002"}},
+            {"type": "0B", "item": "005930", "values": {"10": "102", "15": "1", "20": "091002"}},
             {"type": "0B", "item": "005930", "values": {"10": "104", "15": "2", "20": "091003"}},
             {"type": "0B", "item": "005930_NX", "values": {"10": "106", "15": "1", "20": "091004"}},
         ]})
@@ -326,21 +510,21 @@ class MicroNativeShadowInputTests(unittest.TestCase):
         with closing(SQLiteQueryStore(Path(":memory:"))) as store:
             store.initialize()
             vi = MarketEventService(None, store, now_provider=lambda: now[0])
-            base = {"9001": "A005930", "9068": "1", "1225": "1", "1221": "+100",
-                    "1223": "091000", "1224": "091002", "1490": "1", "9081": "KRX"}
+            base = {"9001": "A005930", "9068": "2", "1225": "1", "1221": "+100",
+                    "1223": "091000", "1224": "000000", "1490": "1", "9081": "KRX"}
 
             def receipt(values):
                 event, = parse_vi_events({"trnm": "REAL", "data": [{"type": "1h", "values": values}]})
                 return vi._vi_value(event)
 
             activation = receipt(base)
-            release = receipt(base | {"9068": "2"})
-            other_venue = receipt(base | {"9068": "2", "9081": "NXT"})
-            unknown_venue = receipt(base | {"9068": "2", "9081": ""})
+            release = receipt(base | {"1224": "091002"})
+            other_venue = receipt(base | {"1224": "091002", "9081": "NXT"})
+            unknown_venue = receipt(base | {"1224": "091002", "9001": "A005930_AL", "9081": ""})
             rest = vi._backfill_vi_value({"stk_cd": "A005930", "motn_tp": "2", "motn_tm": "091002",
                                           "motn_pric": "100", "stex_tp": "KRX"})
             now[0] += timedelta(seconds=1)
-            late = receipt(base | {"9068": "2", "1490": "2"})
+            late = receipt(base | {"1224": "091002", "1490": "2"})
             self.assertEqual(6, store.append_vi_events([activation, release, other_venue, unknown_venue, rest, late]))
             history = store.load_market_event_history("vi", code="005930", limit=6)
             result = assess_micro_shadow_inputs(symbol="005930", venue="KRX", variant="VI_GAP_UP",
@@ -351,14 +535,24 @@ class MicroNativeShadowInputTests(unittest.TestCase):
                 "native_quote_depth", "native_instrument_tradability", "native_cross_stream_order",
                 "native_vi_release_execution_price",
             ], result["missing_inputs"])
-            self.assertEqual(("OBSERVED", 1, snapshot["rows"][0]["input_ref"]), (
+            self.assertEqual(("OBSERVED", 3, snapshot["rows"][2]["input_ref"]), (
                 result["trade"]["state"], result["trade"]["count"], result["trade"]["latest"]["ref"],
             ))
+            comparison = result["trade"]["release_comparison"]
+            self.assertEqual((2, None, None), (comparison["same_second_count"],
+                comparison["single_same_second_trade"], comparison["release_execution_price_won"]))
             self.assertEqual({
                 (activation["event_id"], "ACTIVATED", "1223", "2026-09-11T09:10:00+09:00"),
                 (release["event_id"], "RELEASED", "1224", "2026-09-11T09:10:02+09:00"),
             }, {(row["ref"], row["kind"], row["fid"], row["observed_at"]) for row in result["vi"]["observations"]})
             self.assertEqual(history, store.load_market_event_history("vi", code="005930", limit=6))
+            now[0] = cut
+            newer = receipt(base | {"1223": "091005", "1490": "2"})
+            unpaired = assess_micro_shadow_inputs(symbol="005930", venue="KRX", variant="VI_GAP_UP",
+                decision_at=cut, trading_date=cut.date(), trade_snapshot=snapshot, vi_history=[newer, *history])
+            self.assertIsNone(unpaired["vi"]["latest_episode"]["release"])
+            self.assertIn("native_vi_activation_release_observations", unpaired["missing_inputs"])
+            self.assertNotIn("release_comparison", unpaired["trade"])
         self.assertIs(collector._ram_observation_owner, retention_owner)
         self.assertEqual(10, collector._ram_trade_retention_seconds)
         self.assertEqual({("005930", "KRX"), ("005930", "NXT")}, collector._approved_trade_sources)

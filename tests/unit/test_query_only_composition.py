@@ -249,10 +249,10 @@ class ObservedWindow(MainWindow):
                 patch.object(self, '_start_historical_high_loading', wraps=self._start_historical_high_loading) as high:
             self._app_controller.start_secondary_loading(codes)
             assert phases == [(True, 'after_hours')]
-            assert catalog_callbacks == ['secondary.start_catalog']
-            self._app_controller._start_catalog_after_nxt()
+            assert not catalog_callbacks
+            self._app_controller.nxt_eligibility.finished.emit()
             MainWindow._start_daily_krx_catalog_sync(self)
-            assert catalog_callbacks == ['secondary.start_catalog'] * 2
+            assert not catalog_callbacks
             start_catalog.assert_not_called()
             high.assert_not_called()
         assert not stamp_reads and not catalog_fetch_calls
@@ -409,7 +409,10 @@ class ObservedWindow(MainWindow):
                     self.assert_selected_current_state(restarted=True)
                 else:
                     self._theme_store.set_theme_alias('원테마', '사용자편집')
-            self._app_controller.queue_price_cache('000001', price=123456)
+            # This price belongs to the explicit shutdown-drain probe. A night rank
+            # may render the code but must never insert the stock cache row for it.
+            self._stock_lookup.cache_ranking_stocks((('999999', 'shutdown fixture', 'KRX'),))
+            self._app_controller.queue_price_cache('999999', price=123456)
             outcome.update(rows=self._table.rowCount(), chart_sum=9.0,
                             source=str(Path(bootstrap.__file__).resolve()), pid=os.getpid(),
                             connection_required=connection_required, runtime_sources=runtime_sources)
@@ -900,7 +903,7 @@ class QueryOnlyCompositionTests(unittest.TestCase):
                             catalog_evidence = [json.loads(line.split('=', 1)[1])['query_auto_catalog']
                                 for line in result.stdout.splitlines() if line.startswith('QUERY_EVIDENCE=')]
                             self.assertEqual([dict(fetch_attempts=0, secondary_after_hours=[[True, 'after_hours']],
-                                catalog_callback_hits=2, real_default_controller=True, public_method_called=True)],
+                                catalog_callback_hits=0, real_default_controller=True, public_method_called=True)],
                                 catalog_evidence)
                             print('QUERY_CONNECTION_CHILD=' + json.dumps({'policy': policy, 'native_barrier': attempt < len(source_cases), 'stdout': result.stdout, 'stderr': result.stderr}, ensure_ascii=False))
                             self.assertEqual(before, {path.name: path.read_bytes() for path in research.iterdir() if path.is_file()})
@@ -912,7 +915,7 @@ class QueryOnlyCompositionTests(unittest.TestCase):
                             self.assertEqual(b'query-must-not-read-account-bindings', (data / 'account-bindings.dat').read_bytes())
                             self.assertEqual(settings_before, research_settings.read_bytes())
                             actual_cache = data / ('query-role.sqlite3' if role_kind else 'monitor.sqlite3')
-                            self.assertEqual(123456, StockRepository(actual_cache).load_last_prices(('000001',))['000001'])
+                            self.assertEqual(123456, StockRepository(actual_cache).load_last_prices(('999999',))['999999'])
                             if role_kind:
                                 self.assertEqual(role_protected, {path: path.read_bytes() for path in role_protected})
                                 self.assertTrue((data / 'query-windows.ini').is_file())

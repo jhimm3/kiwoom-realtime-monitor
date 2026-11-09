@@ -27,6 +27,35 @@ class FakeClient:
 
 
 class RankingServiceTests(unittest.TestCase):
+    def test_products_are_rank_only_and_unknown_ipo_still_enriches(self):
+        now = datetime(2026, 11, 5, 9, tzinfo=timezone(timedelta(hours=9)))
+        records = [
+            {"stk_cd": code, "stk_nm": name, "cur_prc": "100", "dt": "20261105", "tm": "090000"}
+            for code, name in (("069500", "KODEX 200"), ("550043", "ETN"), ("0161M0", "새 상장종목"))
+        ]
+        calls, saved = [], []
+
+        def page(api_id, path, body, *, cont_yn, next_key):
+            market = body["mrkt_tp"]
+            calls.append((api_id, market, cont_yn, next_key))
+            if market == "8" and cont_yn == "N":
+                return {"list": []}, True, "next-etf"
+            codes = {"8": "069500", "60": "550043"}
+            return {"list": [{"code": codes[market], "marketCode": market}] if market in codes else []}, False, ""
+
+        loader = RankingService(SimpleNamespace(server_now=lambda: now, request_with_continuation=page,
+            request=lambda *_: {"item_inq_rank": records}), SimpleNamespace(cache_ranking_stocks=saved.append),
+            stock_only_enrichment=True)
+        loader.EXPECTED_STOCKS = 3
+        for _ in range(2):
+            rows = loader.load_top_stocks()
+            self.assertEqual([("069500", False), ("550043", False), ("0161M0", True)],
+                             [(row.code, row.enrich) for row in rows])
+            self.assertEqual([100, 100, 100], [row.current_price for row in rows])
+        self.assertEqual(6, len(calls))
+        self.assertEqual(("ka10099", "8", "Y", "next-etf"), calls[1])
+        self.assertEqual([(("0161M0", "새 상장종목", ""),)] * 2, saved)
+
     def _native_ranking_fixture(self):
         directory = self.enterContext(tempfile.TemporaryDirectory())
         path = Path(directory) / "query-role.sqlite3"
@@ -57,6 +86,23 @@ class RankingServiceTests(unittest.TestCase):
         client = SimpleNamespace(load_stored_ranking=lambda query_type: {"item_inq_rank": records},
                                  server_now=lambda: now.replace(tzinfo=None), request=forbidden_request)
         return path, StockRepository(path, now_provider=clock), client, clock_calls, now
+
+    def test_night_ranking_displays_without_touching_local_stock_cache(self):
+        _, repository, client, clock_calls, now = self._native_ranking_fixture()
+        records = client.load_stored_ranking("5")["item_inq_rank"]
+        for clock in ("200000", "075930"):
+            now = now.replace(hour=int(clock[:2]), minute=int(clock[2:4]), second=int(clock[4:]))
+            client.server_now = lambda: now.replace(tzinfo=None)
+            for record in records:
+                record["tm"] = clock
+            with self.subTest(clock=clock), patch(
+                "kiwoom_monitor.infrastructure.persistence.stock_repository.sqlite3.connect",
+                side_effect=AssertionError("night ranking opened the local stock database"),
+            ):
+                stocks = RankingService(client, stocks=repository).load_top_stocks()
+                self.assertEqual(20, len(stocks))
+                self.assertEqual(("005930", "삼성전자"), (stocks[0].code, stocks[0].name))
+        self.assertEqual([], clock_calls)
 
     def test_real_ranking_cache_preserves_aliases_and_records_only_observed_rename(self):
         path, repository, client, clock_calls, now = self._native_ranking_fixture()

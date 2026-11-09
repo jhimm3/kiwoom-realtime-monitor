@@ -587,6 +587,13 @@ class MockAutomationPublicationDialog(QDialog):
             )
         top = QFormLayout()
         top.addRow("Shadow 증거", self._shadow)
+        self._venue = None
+        if _minute_research_family(candidate) or staged:
+            self._venue = QComboBox()
+            self._venue.addItem('SOR (기본 · 로컬 검증)', 'SOR')
+            self._venue.addItem('KRX 직접 지정', 'KRX')
+            self._venue.addItem('NXT 직접 지정 (로컬 검증)', 'NXT')
+            top.addRow('주문 거래소', self._venue)
         self._close_inputs = {}
         self._close_management = None
         if _minute_research_family(candidate):
@@ -689,6 +696,9 @@ class MockAutomationPublicationDialog(QDialog):
                 policy = MockUnfilledExecutionPolicy(**json.loads(Path(policy_path).read_text(encoding="utf-8")))
             except (OSError, TypeError, ValueError) as error:
                 raise ValueError(f"계획형 모의 정책을 읽을 수 없습니다. {error}") from error
+        venue = str(self._venue.currentData()) if self._venue is not None else 'KRX'
+        if venue != 'KRX' and policy is None and close_policy is None and panic_policy is None:
+            raise ValueError('SOR·NXT 주문은 현재 조건 재판단·정정 정책 파일이 필요합니다.')
         return build_mock_automation_publication_documents(
             candidate_publication=self._candidate, binding=self._binding,
             credential_profile_id=self._profile_id, shadow_event=event,
@@ -699,6 +709,7 @@ class MockAutomationPublicationDialog(QDialog):
                                  CLOSE_NATIVE_PLAN_MODE if close_policy is not None else
                                  LEADER_NATIVE_PLAN_MODE if policy is not None else None),
             close_execution_policy=close_policy,
+            **({'supported_venue': venue} if self._venue is not None else {}),
             **({"panic_execution_policy": panic_policy} if panic_policy is not None else {}),
         )
 
@@ -709,6 +720,7 @@ class MockAutomationDialog(QDialog):
         content_client: CentralContentClient,
         credentials_client: CentralCredentialsClient,
         parent=None,
+        *, rehearsal_root: Path | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("모의 자동운용")
@@ -721,6 +733,8 @@ class MockAutomationDialog(QDialog):
         self._context: dict[str, Any] = {}
         self._management_packet = None
         self._management_status = None
+        self._rehearsal_root = rehearsal_root
+        self._rehearsal_dialog = None
 
         self._profile = QComboBox()
         self._profile.currentIndexChanged.connect(self._profile_changed)
@@ -741,12 +755,22 @@ class MockAutomationDialog(QDialog):
         self._readiness = QLabel("READY 명세를 확인하는 중입니다…")
         self._readiness.setWordWrap(True)
         self._runtime = QLabel("-")
+        self._runtime.setTextFormat(Qt.TextFormat.PlainText)
         self._runtime.setWordWrap(True)
         self._reason = QLineEdit()
         self._reason.setPlaceholderText("중지·재개 이유를 입력하세요")
 
         form = QFormLayout()
-        form.addRow("모의계좌", self._profile)
+        self._account_setup = None
+        if getattr(getattr(credentials_client, "source", None), "mode", None) == "local_server":
+            self._account_setup = QPushButton("모의계좌·주문 설정")
+            self._account_setup.clicked.connect(self._open_local_account_setup)
+            profile_row = QHBoxLayout()
+            profile_row.addWidget(self._profile)
+            profile_row.addWidget(self._account_setup)
+            form.addRow("모의계좌", profile_row)
+        else:
+            form.addRow("모의계좌", self._profile)
         form.addRow("계좌 식별자", self._account)
         candidate_row = QHBoxLayout()
         candidate_row.addWidget(self._candidate)
@@ -779,6 +803,10 @@ class MockAutomationDialog(QDialog):
         management_buttons.addWidget(self._management_stop)
         form.addRow('보관 주문 관리', management_buttons)
         form.addRow('관리 준비·실행', self._management_label)
+        if rehearsal_root is not None:
+            rehearsal_button = QPushButton('KRX·NXT 로컬 주문 리허설')
+            rehearsal_button.clicked.connect(self._open_rehearsal)
+            form.addRow('전략 검증', rehearsal_button)
 
         self._refresh = QPushButton("새로 확인")
         self._publish = QPushButton("새 READY 명세 작성")
@@ -831,6 +859,14 @@ class MockAutomationDialog(QDialog):
         super().showEvent(event)
         if not self._context:
             self._request("refresh")
+
+    def _open_rehearsal(self):
+        if self._rehearsal_dialog is None:
+            from kiwoom_monitor.presentation.local_strategy_rehearsal_dialog import LocalStrategyRehearsalDialog
+
+            self._rehearsal_dialog = LocalStrategyRehearsalDialog(self._rehearsal_root, self._window_settings, self)
+        self._rehearsal_dialog.show()
+        self._rehearsal_dialog.raise_()
 
     def _profile_changed(self) -> None:
         if self._profile.signalsBlocked() or self._worker is not None:
@@ -1008,6 +1044,16 @@ class MockAutomationDialog(QDialog):
                 or {value.get('spec_id') for value in refs} != set(active.get('member_spec_ids', []))):
             raise ValueError('현재 구성의 원입장 정보를 새로 확인한 뒤 교체 구성을 작성하세요.')
         return dict(current_selection=active, admission_refs=refs)
+
+    def _open_local_account_setup(self) -> None:
+        if self._worker is not None:
+            return
+        from .nas_credentials_dialog import NasCredentialsDialog
+
+        dialog = NasCredentialsDialog(self._credentials, self)
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.finished.connect(lambda _: self._request("refresh"))
+        dialog.open()
 
     def _request(self, operation: str) -> None:
         if self._worker is not None:
@@ -1262,6 +1308,8 @@ class MockAutomationDialog(QDialog):
                 continue
             spec = row["spec"]
             label = f"{spec.get('strategy_ref', '')} · {row.get('readiness', 'BLOCKED')}"
+            if spec.get('supported_venue') in {'NXT', 'SOR'}:
+                label += f" · {spec['supported_venue']} (로컬 가짜 브로커)"
             if spec.get("execution_plan_mode") == LEADER_NATIVE_PLAN_MODE:
                 label += " · 계획형 0B 모의"
                 if (spec.get('unfilled_execution_policy') or {}).get('version') == 'mock-unfilled-execution-policy/v2':
@@ -1372,12 +1420,30 @@ class MockAutomationDialog(QDialog):
                 self._runtime.setToolTip("\n".join(f"{text} {value}" for field, text in (
                     ("plan_id", "계획 ID"), ("plan_revision", "계획 판본"), ("intent_id", "보호 주문 의도 ID"),
                 ) if (value := protection.get(field)) is not None))
+            close_material_lines = []
+            for material in status.get("held_close_material", ()):
+                if not isinstance(material, dict):
+                    continue
+                cut = format_kst_time(material.get("cut"), "%m-%d %H:%M:%S")
+                prefix = f"종가베팅 {material.get('symbol', '')} · {cut} 판단 시점 공시"
+                if material.get("status") == "UNAVAILABLE":
+                    close_material_lines.append(f"{prefix} · 조회 불가")
+                    continue
+                changes = material.get("changes_after_entry", ())
+                close_material_lines.append(f"{prefix} · 진입 이후 변경 {len(changes)}건" +
+                                            (" · 일부 자료" if material.get("partial") else ""))
+                for event in changes:
+                    effect = {"FUNDAMENTAL_ADVERSE": "악재 확인", "INTACT": "해지 철회",
+                              "UNKNOWN": "효과 미확인"}.get(event["effect"], event["effect"])
+                    available = format_kst_time(event["available_at"], "%m-%d %H:%M:%S")
+                    close_material_lines.append(f"{event['title'] or event['revision_ref']} · {effect} · {available} 저장")
             self._runtime.setText(
                 f"모드 {status.get('runtime_mode') or '수동'} · 제어 {desired} · "
                 + ("실행 상태 " if runner_state == "계좌 공통 실행" else "runner ") + str(runner_state)
                 + (f" · 복원 오류 {error}" if error else "")
                 + latency_text
                 + protection_text
+                + ("\n" + "\n".join(close_material_lines) if close_material_lines else "")
             )
         else:
             self._runtime.setText("상태를 확인할 수 없습니다.")
@@ -1459,6 +1525,8 @@ class MockAutomationDialog(QDialog):
         self._replace_selection.setEnabled(replacement_available(self._context) and self._worker is None)
 
     def _set_busy(self, busy: bool) -> None:
+        if self._account_setup is not None:
+            self._account_setup.setEnabled(not busy)
         self._management_file.setEnabled(not busy)
         if busy:
             self._management_prepare.setEnabled(False)
@@ -1488,6 +1556,8 @@ class MockAutomationDialog(QDialog):
         self._context.pop("_publication_request", None)
         if self._candidate_files_dialog is not None:
             self._candidate_files_dialog.stop()
+        if self._rehearsal_dialog is not None:
+            self._rehearsal_dialog.stop()
         if self._worker is not None and self._worker.isRunning():
             self._worker.requestInterruption()
             self._worker.wait(12_000)
@@ -1495,5 +1565,7 @@ class MockAutomationDialog(QDialog):
     def closeEvent(self, event) -> None:
         self._window_settings.setValue("geometry", self.saveGeometry())
         self._context.pop("_publication_request", None)
+        if self._rehearsal_dialog is not None:
+            self._rehearsal_dialog.close()
         event.ignore()
         self.hide()

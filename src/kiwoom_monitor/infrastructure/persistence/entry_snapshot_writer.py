@@ -233,7 +233,9 @@ class EntrySnapshotWriter(QThread):
                 eligible = [row for row in rows if str(row.get("trade_time", "")) <= target]
                 if not eligible:
                     continue
-                nearest = max(eligible, key=lambda row: str(row.get("trade_time", "")))
+                nearest = max(eligible, key=lambda row: (
+                    str(row.get("trade_time", "")), row.get("source") == "kiwoom_realtime_0w",
+                ))
                 repository.save_program_trade_backfill(snapshot.execution_key, {**nearest, "backfilled": True})
 
     def _backfill_investor(self, repository: JournalRepository, trade_date: date, codes: tuple[str, ...]) -> None:

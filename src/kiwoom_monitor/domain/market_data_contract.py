@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from enum import StrEnum
 from typing import Generic, TypeVar
 
@@ -132,6 +132,9 @@ class MarketDataObservation(Generic[ValueT]):
 
 class ListingType(StrEnum):
     IPO = "ipo"
+    TRANSFER = "transfer"
+    KONEX_TO_KOSDAQ = "konex_to_kosdaq"
+    RELISTING = "relisting"
     SPAC = "spac"
     SPAC_MERGER = "spac_merger"
     UNKNOWN = "unknown"
@@ -180,6 +183,15 @@ class ListingEvidenceSelection:
     status: ListingEvidenceStatus
     evidence: tuple[ListingEvidence, ...] = ()
     phase: ListingPhase = ListingPhase.UNKNOWN
+
+    @property
+    def supports_ipo_strategy(self) -> bool:
+        if self.status != ListingEvidenceStatus.AVAILABLE:
+            return False
+        listing_type = self.evidence[0].listing_type
+        return listing_type == ListingType.IPO or (
+            listing_type == ListingType.KONEX_TO_KOSDAQ and self.phase == ListingPhase.LISTING_DAY
+        )
 
 
 def select_listing_evidence(
@@ -279,6 +291,51 @@ def trading_venue(value: object) -> TradingVenue:
     if normalized in TradingVenue._value2member_map_:
         return TradingVenue(normalized)
     return aliases.get(normalized, TradingVenue.UNKNOWN)
+
+
+def kiwoom_hhmmss(value: object) -> time | None:
+    raw = str(value or "").strip()
+    if len(raw) != 6 or not raw.isascii() or not raw.isdigit():
+        return None
+    try:
+        return time.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class KiwoomViPhase:
+    trigger_time: time
+    release_time: time | None
+    extended: bool
+
+
+def kiwoom_vi_phase(values: Mapping[str, object], *, received_clock: time) -> KiwoomViPhase | None:
+    """Interpret 1h without changing the stored wire event label."""
+    category = str(values.get("9068", "")).strip()
+    if category not in {"1", "2", "3", "4"}:
+        return None
+    trigger = kiwoom_hhmmss(values.get("1223"))
+    if trigger is None or not time.min < trigger <= received_clock:
+        return None
+    release = kiwoom_hhmmss(values.get("1224"))
+    extended = category == "4"
+    # The same 9068 category can appear at activation and release.
+    if extended or release is None or not trigger < release <= received_clock:
+        release = None
+    return KiwoomViPhase(trigger, release, extended)
+
+
+def kiwoom_vi_venue(exchange: object, wire_code: object) -> TradingVenue:
+    venue = str(exchange or "").strip()
+    if venue:
+        return TradingVenue._value2member_map_.get(venue, TradingVenue.UNKNOWN)
+    code = str(wire_code or "").strip()
+    if not code:
+        return TradingVenue.UNKNOWN
+    if code.endswith("_NX"):
+        return TradingVenue.NXT
+    return TradingVenue.SOR if code.endswith("_AL") else TradingVenue.KRX
 
 
 _LEGACY_CAPTURE_STATES: dict[str, tuple[ObservationOrigin, DataCompleteness]] = {

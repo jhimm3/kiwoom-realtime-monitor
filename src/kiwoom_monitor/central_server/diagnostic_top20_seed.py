@@ -31,7 +31,7 @@ _SERVICE_EMPTY = {
         "_fundamentals_ready": dict, "_entry_stage_ready": dict, "_entry_data_ready": dict,
     },
     "catalog_subscription": {
-        "_markets": dict, "_nxt_eligible": dict, "_nxt_checked_on": dict,
+        "_markets": dict,
     },
     "ranking_entrants": {
         "_last_aux_ranking_slots": dict, "_entrant_first_seen": dict,
@@ -189,6 +189,9 @@ def _cold_state(service, clock, outbox_fixture=None):
             raise ValueError("top20_seed_durable_outbox_adapter_missing")
         outbox_identity = outbox_fixture.identity()
     state = {name: _empty(service, fields) for name, fields in _SERVICE_EMPTY.items()}
+    _empty(service, {"_nxt_catalogs": dict, "_nxt_catalog_task": None})
+    _scalars(service, {"_nxt_catalog_retry_at": 0.0})
+    state["catalog_subscription"].update(_nxt_eligible="empty_dict", _nxt_checked_on="empty_dict")
     daily_reference = service.daily_reference
     if type(daily_reference) is not DailyReferenceState:
         raise ValueError("top20_seed_daily_reference_owner_required")
@@ -217,7 +220,7 @@ def _cold_state(service, clock, outbox_fixture=None):
     # Keep v1's semantic seed document while its native state owner moves.
     state["pending_storage"]["_pending_program_snapshots"] = _empty(writer, {"_pending": dict})["_pending"]
     state["lifecycle"]["_program_save_task"] = _empty(writer, {"_save_task": None})["_save_task"]
-    for owner, names in ((service, ("_collector_lock", "_index_outbox_lock", "_index_flush_lock")),
+    for owner, names in ((service, ("_collector_lock", "_index_outbox_lock", "_index_flush_lock", "_nxt_catalog_lock")),
                          (daily_reference, ("_daily_input_lock",)),
                          (broker, ("_guard",))):
         if any(getattr(owner, name).locked() for name in names):

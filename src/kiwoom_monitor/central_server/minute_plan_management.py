@@ -10,9 +10,10 @@ from kiwoom_monitor.application.mock_automation_recovery import record_mock_auto
 from kiwoom_monitor.application.minute_order_management import frozen_minute_candidate, minute_current_shadow_matches
 from kiwoom_monitor.domain.order_contract import TERMINAL_ORDER_STATES, OrderSide, OrderState
 from kiwoom_monitor.domain.execution_activation import (
-    CLOSE_INPUT_PROTOCOL, PANIC_INPUT_PROTOCOL, allows_stopped_close_management, allows_stopped_panic_management,
+    CLOSE_INPUT_PROTOCOL, PANIC_INPUT_PROTOCOL, CloseExitCalendarRecheck,
+    allows_stopped_close_management, allows_stopped_panic_management,
 )
-from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_legs
+from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_legs, execution_broker_venue
 from .observation_frame_recovery import drain_thread_call
 
 
@@ -20,10 +21,13 @@ class MinutePlanManagement:
     """Own the Shadow cursor and retained plan inputs, without a worker or order authority."""
 
     def __init__(self, store, bundle, spec, repository, *, parameters, price_source, now_provider,
-                 family='close_betting/v1'):
+                 family='close_betting/v1', candidate_current=None, close_calendar=None, nxt_price_source=None):
         self._store, self._bundle, self._spec, self._repository = store, bundle, spec, repository
         self._parameters, self._price, self._now = parameters, price_source, now_provider
+        self._nxt_price = nxt_price_source
         self._family = family
+        self._candidate_current = candidate_current if family in {'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'} else None
+        self._close_calendar = close_calendar
         self._panic = family == 'panic_rebound/v1'
         if self._panic:
             import kiwoom_monitor.application.panic_mock_execution as adapter
@@ -39,6 +43,12 @@ class MinutePlanManagement:
         self._cursor = 0
         self._plans = {}
         self.status = {'state': 'WARMUP', 'reason': f'awaiting_new_{self._tag}_shadow', 'orders_enabled': False}
+
+    def needs_close_calendar(self):
+        if self._family != 'close_betting/v1':
+            return False
+        with self._state_lock:
+            return any(self._adapter.uses_official_close_calendar(context['event']) for context in self._plans.values())
 
     def checkpoint_fields(self):
         with self._state_lock:
@@ -87,6 +97,25 @@ class MinutePlanManagement:
             events = (context['event'] for context in self._plans.values())
             return next((event for event in (*events, self._pending_entry)
                          if event is not None and (symbol is None or event['symbol'] == symbol)), None)
+
+    def held_close_decisions(self):
+        """Expose the latest held-plan cuts for read-only news context."""
+        with self._state_lock:
+            return tuple(dict(context['held_close_decision']) for context in self._plans.values()
+                         if 'held_close_decision' in context)
+
+    def _note_held_close_decision(self, context, plan_id, next_open, cut, reason):
+        if self._family != 'close_betting/v1':
+            return
+        with self._state_lock:
+            if next_open is not None and cut >= next_open:
+                context['held_close_decision'] = {
+                    'plan_id': plan_id, 'symbol': context['event']['symbol'],
+                    'entry_cut': context['proof']['decision']['decided_at'],
+                    'cut': cut.isoformat(), 'reason': reason,
+                }
+            else:
+                context.pop('held_close_decision', None)
 
     def prepare(self, document):
         if document is not None:
@@ -173,6 +202,14 @@ class MinutePlanManagement:
             **({'observation': cut['observation']} if cut is not None else {}))
         return recovery, risk
 
+    def _working_order_price(self, record):
+        if record.intent.venue == 'SOR':
+            venue = execution_broker_venue(record)
+            source = self._nxt_price if venue == 'NXT' else self._price if venue == 'KRX' else None
+        else:
+            source = self._price
+        return source(record.intent.symbol) if source is not None else None
+
     def _management_input(self, record, control, quote, enabled, notice):
         cut = self._bundle.monitor.latest_automation_execution_cut
         risk = cut['risk'] if cut is not None else None
@@ -208,14 +245,15 @@ class MinutePlanManagement:
                     if record.intent.side is OrderSide.BUY else None)
         enabled = (record.intent.side is OrderSide.BUY and control.desired_state.value == 'RUNNING' and not control.entry_resume_required
                    and (control.account_selection is None or control.account_selection.allows_entry(self._spec.spec_id))
+                   and (self._candidate_current is None or self._candidate_current(context['event']))
                    and minute_current_shadow_matches(self._spec, context['event'], settings['document'] if settings else None))
-        quote = self._price(record.intent.symbol) if self._price is not None else None
+        quote = self._working_order_price(record)
         token = self._management_input(record, control, quote, enabled, notice)
         if context.get('management_input') == token:
             return True
         outcome = {}
         def prepare(current, cut):
-            current_quote = self._price(current.intent.symbol) if self._price is not None else None
+            current_quote = self._working_order_price(current)
             prepare_claim = self._adapter.prepare_panic_order_management_claim if self._panic else self._adapter.prepare_close_order_management_claim
             claim = prepare_claim(self._repository, self._bundle.runtime, self._bundle.repository,
                 self._spec, current, parameters=self._parameters, event=context['event'], quote=current_quote,
@@ -258,7 +296,11 @@ class MinutePlanManagement:
         elif root.state in TERMINAL_ORDER_STATES:
             active = await drain_thread_call(execution.active_intents, 'mock', self._bundle.account_ref, self._bundle.run_id)
             pending = [row for row in active if getattr(row.intent, 'plan', None) is not None and row.intent.plan.plan_id == plan_id]
+            automatic = not self._panic and self._adapter.uses_official_close_calendar(event)
             if pending:
+                if automatic and pending[0].state is OrderState.QUEUED:
+                    await drain_thread_call(self._bundle.runtime.release_unsent_plan, pending[0])
+                    return
                 if await self._manage_current_order(pending[0], context, control, None):
                     return
                 self.status = {'state': 'WAITING_ORDER', 'reason': f'{self._tag}_exit_reconciliation', 'orders_enabled': False}
@@ -268,6 +310,7 @@ class MinutePlanManagement:
                 # existing account-event cue can restore this exact plan later.
                 with self._state_lock: del self._plans[plan_id]
                 return
+            calendar = self._close_calendar(now) if automatic and self._close_calendar is not None else ()
             quote = self._price(root.intent.symbol) if self._price is not None else None
             if quote is None:
                 self.status = {'state': 'MANAGING', 'reason': 'awaiting_current_0B', 'orders_enabled': False}
@@ -292,9 +335,13 @@ class MinutePlanManagement:
                 return
             setup = event['close_ipo_entry_setup']
             next_open = datetime.fromisoformat(setup['next_open_at']) if setup['next_open_at'] is not None else None
+            if automatic:
+                effective, _ = self._adapter.effective_close_exit_schedule(
+                    self._adapter.CloseIpoSetup.from_document(setup), now, calendar)
+                next_open = effective.next_open_at if effective is not None else None
             policy = self._parameters['policy']
             gap = None
-            if (next_open is not None
+            if (protection_notice is None and next_open is not None
                     and next_open + timedelta(minutes=1) <= now < next_open + timedelta(minutes=policy['exit_minutes_after_open'])
                     and setup.get('next_session') is not None):
                 auction = setup['close_auction']
@@ -303,7 +350,7 @@ class MinutePlanManagement:
                 if rows:
                     gap = list(rows)
             args = dict(parameters=self._parameters, event=event, trigger_quote=quote, quote=quote,
-                        gap_observations=gap, protection_notice=protection_notice)
+                        gap_observations=gap, protection_notice=protection_notice, calendar=calendar)
             stop_risk = (await drain_thread_call(self._repository.load_mock_automation_risk_snapshot,
                 self._bundle.account_ref, protection_notice['risk_trigger']['snapshot_id'])
                 if protection_notice is not None else None)
@@ -313,16 +360,28 @@ class MinutePlanManagement:
             if prepared is None:
                 self.status = {'state': 'MANAGING', 'reason': 'ipo_intraday_hold' if self._family == 'ipo_breakout/v1'
                                else 'planned_overnight_hold', 'orders_enabled': False}
+                self._note_held_close_decision(context, plan_id, next_open, now, self.status['reason'])
                 return
             recovery, risk = await self._fresh_cut()
             # Broker reconciliation can advance the plan revision even when
             # its detailed quantity is unchanged. Submit against that fresh head.
             _, head = await drain_thread_call(self._read_plan, context)
-            gate, sell, _ = await drain_thread_call(self._adapter.dispatch_close_exit, self._repository, self._bundle.runtime,
-                execution, self._spec, head.plan, recovery=recovery, risk=risk, **args)
+            if (prepared[0]['snapshot'].get('calendar_basis') is not None and self._close_calendar is not None
+                    and self._close_calendar(self._now()) != calendar):
+                return  # Rebuild the opening observation at the revised schedule on the next advance.
+            try:
+                gate, sell, _ = await drain_thread_call(self._adapter.dispatch_close_exit, self._repository, self._bundle.runtime,
+                    execution, self._spec, head.plan, recovery=recovery, risk=risk, **args)
+            except CloseExitCalendarRecheck as error:
+                self.status = {'state': 'MANAGING', 'reason': str(error), 'orders_enabled': False}
+                return
+            if gate is None:
+                return
             self.status = {'state': 'ORDER_SUBMITTED' if sell is not None else 'BLOCKED',
                 'reason': ';'.join(gate.reasons) if gate.reasons else 'close_exit_submitted', 'orders_enabled': False,
                 'pending_intent_id': sell.intent.intent_id if sell is not None else ''}
+            cut = sell.intent.created_at if sell is not None else now
+            self._note_held_close_decision(context, plan_id, next_open, cut, self.status['reason'])
             return
         elif root.state in {OrderState.CANCEL_PENDING, OrderState.SUBMISSION_UNKNOWN}:
             if await self._manage_current_order(root, context, control, protection_notice):
@@ -362,7 +421,8 @@ class MinutePlanManagement:
                 if (self._adapter.matches_panic_shadow(self._parameters, event) if self._panic
                         else self._adapter.matches_close_shadow(self._parameters, event, family=self._family)):
                     now = self._now()
-                    if datetime.fromisoformat(event['available_at']) <= now < datetime.fromisoformat(event['expires_at']):
+                    if (datetime.fromisoformat(event['available_at']) <= now < datetime.fromisoformat(event['expires_at'])
+                            and (self._candidate_current is None or self._candidate_current(event))):
                         quote = self._price(event['symbol']) if self._price is not None else None
                         if quote is None:
                             self.status = {'state': 'WARMUP', 'reason': 'awaiting_current_0B', 'orders_enabled': False}
@@ -371,6 +431,10 @@ class MinutePlanManagement:
                             recovery, risk = await self._fresh_cut()
                             if not allow_entry():
                                 break
+                            if self._candidate_current is not None and not self._candidate_current(event):
+                                self._cursor = event['accepted_sequence']
+                                consumed += 1
+                                continue
                             with self._state_lock: self._pending_entry = frozen_minute_candidate(event)
                             try:
                                 dispatch = self._adapter.dispatch_panic_entry if self._panic else self._adapter.dispatch_close_entry
@@ -382,8 +446,10 @@ class MinutePlanManagement:
                                     with self._state_lock: self._plans[record.intent.plan.plan_id] = context
                             finally:
                                 with self._state_lock: self._pending_entry = None
-                            self.status = {'state': 'ORDER_SUBMITTED' if record is not None else 'BLOCKED',
-                                'reason': ';'.join(gate.reasons) if gate.reasons else f'{self._tag}_entry_submitted',
+                            submitted = record is not None and record.state is not OrderState.REJECTED
+                            self.status = {'state': 'ORDER_SUBMITTED' if submitted else 'BLOCKED',
+                                'reason': ';'.join(gate.reasons) if gate.reasons else
+                                    f'{self._tag}_entry_submitted' if submitted else f'{self._tag}_entry_rejected',
                                 'pending_intent_id': record.intent.intent_id if record is not None else '', 'orders_enabled': False}
             except ValueError as error:
                 self.status = {'state': 'BLOCKED', 'reason': str(error), 'orders_enabled': False}

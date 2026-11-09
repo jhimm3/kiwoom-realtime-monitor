@@ -13,6 +13,8 @@ from datetime import datetime
 from html.parser import HTMLParser
 from io import BytesIO
 
+from kiwoom_monitor.domain.time_basis import KST, aware_iso_kst
+
 
 _DATE = re.compile(r"(?<!\d)(?:(20\d{2})|(?:'?(\d{2})))\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})(?:일)?")
 _TIME = re.compile(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?(?!\d)")
@@ -55,6 +57,12 @@ class _Rows(HTMLParser):
             self._cell.append(data)
 
 
+def document_rows(document: str) -> list[list[str]]:
+    parser = _Rows()
+    parser.feed(document)
+    return parser.rows
+
+
 def archive_rows(archive_bytes: bytes) -> list[list[str]]:
     if len(archive_bytes) > 8_000_000 or not zipfile.is_zipfile(BytesIO(archive_bytes)):
         raise ValueError("DART original document is not a supported ZIP")
@@ -70,9 +78,7 @@ def archive_rows(archive_bytes: bytes) -> list[list[str]]:
                 decoded = raw.decode("utf-8")
             except UnicodeDecodeError:
                 decoded = raw.decode("cp949")
-            parser = _Rows()
-            parser.feed(decoded)
-            result.extend(parser.rows)
+            result.extend(document_rows(decoded))
     return result
 
 
@@ -126,3 +132,76 @@ def _date_time(value: str) -> tuple[str, str] | None:
     clock = (f"{int(clock_match.group(1)):02d}:{clock_match.group(2)}"
              + (f":{clock_match.group(3)}" if clock_match.group(3) else "")) if clock_match else ""
     return normalized, clock
+
+
+def kind_trading_notice(rows: list[list[str]], title: str, stock_name: str) -> dict | None:
+    """Keep timed exchange notices for the exact share class of the news target."""
+    title = "".join(title.split())
+    if "매매거래정지" not in title or "예고" in title or not stock_name:
+        return None
+
+    def issuer(name: str) -> str:
+        name = re.sub(r"\s+|주식회사|\(주\)|㈜", "", name)
+        return re.sub(r"(?:보통주권|보통주|주권)$", "", name)
+
+    fields = [(re.sub(r"^\d+\.|\s+", "", row[0]), row[1:]) for row in rows if len(row) > 1]
+    names = [name for label, cells in fields if label in {"종목명", "대상종목"} for name in cells]
+    if not any(issuer(name) and issuer(name) == issuer(stock_name) for name in names):
+        return None
+
+    def exact_time(*labels: str) -> datetime | None:
+        values = {_date_time(" ".join(cells[:2])) for label, cells in fields if label in labels}
+        if len(values) != 1:
+            return None
+        value = values.pop()
+        if value is None or not value[1]:
+            return None
+        return datetime.fromisoformat("T".join(value)).replace(tzinfo=KST)
+
+    start = exact_time("매매거래정지일시", "매매거래정지일")
+    end = exact_time("매매거래정지해제일시", "매매거래정지해제일", "매매거래재개일시")
+    return {"starts_at": start.isoformat() if start else None, "ends_at": end.isoformat() if end else None,
+            "verified_interval": "정정" not in title and bool(start and end and start < end)}
+
+
+def kind_trading_state(notices: list[dict] | None, cut: datetime) -> dict:
+    """Describe the committed interval independently of VI and order eligibility."""
+    missing = {"state": "UNKNOWN", "reason": "no_visible_kind_trading_notice"}
+    if notices is None:
+        return {**missing, "reason": "kind_notice_window_incomplete"}
+    visible = []
+    for notice in notices:
+        try:
+            accepted = aware_iso_kst(notice["available_at"])
+            start = aware_iso_kst(notice["starts_at"]) if notice.get("starts_at") else None
+            end = aware_iso_kst(notice["ends_at"]) if notice.get("ends_at") else None
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        if accepted <= cut:
+            visible.append((notice, accepted, start, end))
+    active = [
+        (row, accepted, start, end) for row, accepted, start, end in visible
+        if row.get("verified_interval") is True and start is not None and end is not None and start <= cut < end
+    ]
+    if len({(start, end) for _, _, start, end in active}) > 1:
+        return {**missing, "reason": "conflicting_kind_intervals"}
+    relevant = active or [
+        (row, accepted, start, end) for row, accepted, start, end in visible
+        if row.get("verified_interval") is True and start is not None and end is not None
+        and cut.date() in {start.date(), end.date()}
+    ]
+    if not relevant:
+        if any(not row.get("verified_interval") and accepted.date() == cut.date()
+               for row, accepted, _, _ in visible):
+            return {**missing, "reason": "unverified_kind_trading_interval"}
+        return missing
+    row, accepted, start, end = max(relevant, key=lambda item: item[1])
+    if any(other is not row and other_accepted >= accepted and (
+        other.get("original_filing_ref") == row["filing_ref"]
+        or (not other.get("verified_interval") and other_accepted.date() == cut.date())
+    ) for other, other_accepted, _, _ in visible):
+        return {**missing, "reason": "kind_notice_changed_or_unresolved"}
+    state = "HALTED" if active else "SCHEDULED" if cut < start else "RESUME_TIME_REACHED"
+    return {"state": state, "source": "krx-kind", "starts_at": start.isoformat(),
+            "ends_at": end.isoformat(), "available_at": accepted.isoformat(),
+            "source_ref": row["source_ref"], "body_ref": row["body_ref"]}

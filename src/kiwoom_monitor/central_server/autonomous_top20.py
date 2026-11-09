@@ -11,9 +11,13 @@ from contextlib import asynccontextmanager, nullcontext
 from datetime import date, datetime, time as clock_time, timedelta, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, AsyncIterator, Awaitable, Callable, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Protocol, Sequence
 
 from kiwoom_monitor.application.minute_trade_value import MinuteTradeValueAggregator
+from kiwoom_monitor.application.program_trade_service import program_trade_rows
+from kiwoom_monitor.application.stock_enrichment import (
+    NXT_CATALOG_KIND, load_excluded_product_codes, load_premarket_catalog, nxt_catalog_refresh_due,
+)
 from kiwoom_monitor.application.market_session_schedule import (
     KRX_AFTER_MARKET_EFFECTIVE_DATE,
     full_day_close_at,
@@ -29,6 +33,7 @@ from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import (
 )
 from kiwoom_monitor.infrastructure.krx.stock_catalog import fetch_krx_stock_catalog
 from kiwoom_monitor.domain.ranking import normalize_stock_code
+from kiwoom_monitor.domain.time_basis import as_kst
 from kiwoom_monitor.domain.market_data_contract import MarketDataObservation
 from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind
 from kiwoom_monitor.domain.top20_reconciliation import (
@@ -36,10 +41,10 @@ from kiwoom_monitor.domain.top20_reconciliation import (
     build_top20_reconciliation, metadata_fingerprint,
 )
 from kiwoom_monitor.infrastructure.market_data_metadata_codec import market_metadata_document
-from kiwoom_monitor.application.ranking_schedule import ranking_snapshot_archive_due
+from kiwoom_monitor.application.ranking_schedule import ranking_history_due, ranking_snapshot_archive_due
 
 from .market_ingest import (
-    fundamentals_document_is_current, fundamentals_refresh_key, nxt_eligibility_document_is_current,
+    fundamentals_document_is_current, fundamentals_refresh_key,
     parse_minute_response,
 )
 from .market_observations import ranking_observation, top20_index_observation
@@ -47,6 +52,10 @@ from .persistent_outbox import JsonRecordOutbox
 from .program_snapshot_writer import ProgramSnapshotWriter
 from .realtime_hub import RealtimeHub, RealtimeSubscriber
 from .rest_broker import CentralRestBroker
+
+if TYPE_CHECKING:
+    from .listing_evidence import KindListingEvidence
+    from .program_flow_archive import ProgramFlowArchive
 
 
 logger = logging.getLogger(__name__)
@@ -179,7 +188,7 @@ class Top20AfterCloseWorkflow:
         self, store: AutonomousTop20Store, *, now_provider: Callable[[], datetime],
         minute_backfill_enabled: bool, capture_identity: str,
         backfill_market_indexes: Callable[[str], Awaitable[None]],
-        nxt_enabled: Callable[[str], Awaitable[bool]],
+        nxt_enabled: Callable[[str, str], Awaitable[bool | None]],
         backfill_daily: Callable[[str, str, str], Awaitable[None]],
         backfill_minutes: Callable[[str, str, str], Awaitable[None]],
         backfill_candidate_flows: Callable[[str, str], Awaitable[None]],
@@ -189,6 +198,9 @@ class Top20AfterCloseWorkflow:
         previous_observed_krx_trading_day: Callable[[datetime], Awaitable[str]],
         capture_scope: Callable[..., Any] | None = None,
         workload_paused: Callable[[str], bool] | None = None,
+        archive_program_flow: Callable[[str], Awaitable[None]] | None = None,
+        archive_observations: Callable[[str, datetime], Awaitable[None]] | None = None,
+        filter_after_close_codes: Callable[[tuple[str, ...], str], Awaitable[tuple[str, ...]]] | None = None,
     ) -> None:
         self._store = store
         self._now = now_provider
@@ -205,6 +217,9 @@ class Top20AfterCloseWorkflow:
         self._persist_missing_daily_entrants = persist_missing_daily_entrants
         self._is_observed_krx_trading_day = is_observed_krx_trading_day
         self._previous_observed_krx_trading_day = previous_observed_krx_trading_day
+        self._archive_program_flow = archive_program_flow
+        self._archive_observations = archive_observations
+        self._filter_after_close_codes = filter_after_close_codes
         self._last_backfill_day = ""
         self._backfill_task: asyncio.Task[bool] | None = None
         self._backfill_retry_day = ""
@@ -231,16 +246,17 @@ class Top20AfterCloseWorkflow:
     async def consider(self, now: datetime) -> None:
         if now.weekday() < 5 and now.time().replace(tzinfo=None) >= clock_time(20, 5):
             day = now.date().isoformat()
+            if self._last_backfill_day == day:
+                return
             if await self._is_observed_krx_trading_day(day):
-                if self._last_backfill_day != day:
-                    self.schedule(day)
+                self.schedule(day)
             elif day not in self._calendar_unknown_logged_days:
                 self._calendar_unknown_logged_days.add(day)
                 logger.info(
                     "KRX 장후 보완 대기: %s의 0s 거래일 증거가 없어 종목별 TR을 시작하지 않습니다",
                     day,
                 )
-        elif now.weekday() < 5 and now.time().replace(tzinfo=None) < clock_time(7, 40):
+        elif now.weekday() < 5 and clock_time(7) <= now.time().replace(tzinfo=None) < clock_time(7, 40):
             day = await self._previous_observed_krx_trading_day(now)
             if day and self._last_backfill_day != day:
                 self.schedule(day)
@@ -281,7 +297,6 @@ class Top20AfterCloseWorkflow:
             persisted = self._backfill_entrant_persisted_codes
             # Re-read documents on every retry so newly admitted symbols join the backfill.
             persisted.update(str(row["key"]).strip() for row in documents if row.get("key"))
-            await self._persist_missing_daily_entrants(day, first_seen, persisted)
             account_entries = await owned_to_thread(
                 self._store.load_documents, "account_entry_symbols_daily", day, 5000,
             )
@@ -290,6 +305,12 @@ class Top20AfterCloseWorkflow:
                 *(str(value.get("key", "")) for value in documents if value.get("key")),
                 *(str(value.get("key", "")) for value in account_entries if value.get("key")),
             ]))
+            if self._filter_after_close_codes is not None:
+                codes = await self._filter_after_close_codes(codes, day)
+            allowed = set(codes)
+            await self._persist_missing_daily_entrants(
+                day, {code: seen for code, seen in first_seen.items() if code in allowed}, persisted,
+            )
             for code in codes:
                 if self._now().time().replace(tzinfo=None) >= clock_time(7, 40) and self._now().date().isoformat() != day:
                     succeeded = False
@@ -297,16 +318,19 @@ class Top20AfterCloseWorkflow:
                 completed = self._backfill_completed_steps.setdefault(code, set())
                 if "bars" not in completed:
                     try:
-                        eligible = await self._nxt_enabled(code)
-                        await self._backfill_daily(code, day, "KRX")
                         from .postgres_access import db_call_source
-                        with db_call_source("top20.after_close_minutes"):
-                            await self._backfill_minutes(code, day, "KRX")
+                        if "krx_bars" not in completed:
+                            await self._backfill_daily(code, day, "KRX")
+                            with db_call_source("top20.after_close_minutes"):
+                                await self._backfill_minutes(code, day, "KRX")
+                            if self._minute_backfill_enabled and not self._workload_paused("minute_backfill"):
+                                completed.add("krx_bars")
+                        eligible = await self._nxt_enabled(code, day)
                         if eligible:
                             await self._backfill_daily(code, day, "NXT")
                             with db_call_source("top20.after_close_minutes"):
                                 await self._backfill_minutes(code, day, "NXT")
-                        if self._minute_backfill_enabled and not self._workload_paused("minute_backfill"):
+                        if eligible is not None and "krx_bars" in completed and not self._workload_paused("minute_backfill"):
                             completed.add("bars")
                         else:
                             succeeded = False
@@ -328,6 +352,13 @@ class Top20AfterCloseWorkflow:
                     logger.warning("TOP20 장후 재계산 실패(재시도): %s %s", day, error)
             completed_day = succeeded and not self._workload_paused("minute_backfill") and not self._workload_paused("top20_after_close")
             if completed_day:
+                completed_at = as_kst(self._now())
+                if self._archive_program_flow is not None:
+                    if completed_at.date() == target_day and completed_at.time() >= clock_time(20, 5):
+                        # Only the local freeze is part of this completion. NAS I/O runs independently.
+                        await self._archive_program_flow(day)
+                if self._archive_observations is not None:
+                    await self._archive_observations(day, completed_at)
                 self._backfill_progress_day = ""
                 self._backfill_completed_steps.clear()
             return completed_day
@@ -417,6 +448,10 @@ class AutonomousTop20Service:
         flow_input_observer: Any = None,
         catalog_input_observer: Any = None,
         workload_paused: Callable[[str], bool] | None = None,
+        program_flow_archive: ProgramFlowArchive | None = None,
+        full_day_halt: Callable[[str, date], dict[str, str] | None] | None = None,
+        stock_master_required: bool = False,
+        listing_evidence: KindListingEvidence | None = None,
     ) -> None:
         self._broker = broker
         self._hub = hub
@@ -429,6 +464,13 @@ class AutonomousTop20Service:
         self._catalog_input_observer = catalog_input_observer
         self._workload_paused = workload_paused or (lambda _workload: False)
         self._minute_backfill_enabled = minute_backfill_enabled
+        self._full_day_halt = full_day_halt
+        self._stock_master_required = stock_master_required
+        self._listing_evidence = listing_evidence
+        self._excluded_product_codes: frozenset[str] | None = None
+        self._stock_master_day = ""
+        self._stock_master_retry_at = 0.0
+        self._stock_master_lock = asyncio.Lock()
         self._on_membership_changed = on_membership_changed
         if not minute_backfill_enabled:
             logger.info("NAS TOP20 자동 분봉 백필 비활성화: ka10080 보완 조회를 건너뜁니다.")
@@ -441,8 +483,12 @@ class AutonomousTop20Service:
         self._trade_values = MinuteTradeValueAggregator(max_minutes=1_440)
         self._markets: dict[str, str] = {}
         self._market_catalog_day = ""
-        self._nxt_eligible: dict[str, bool] = {}
-        self._nxt_checked_on: dict[str, str] = {}
+        self._nxt_catalogs: dict[str, dict[str, bool] | None] = {}
+        self._premarket_catalog_day = ""
+        self._premarket_markets: dict[str, str] = {}
+        self._nxt_catalog_lock = asyncio.Lock()
+        self._nxt_catalog_task: asyncio.Task[None] | None = None
+        self._nxt_catalog_retry_at = 0.0
         self._fundamentals_ready: dict[str, str] = {}
         # Success belongs to each stock/day/stage; aggregate flags are summaries only.
         self._entry_stage_ready: dict[tuple[str, str], str] = {}
@@ -466,6 +512,11 @@ class AutonomousTop20Service:
         self._index_flush_lock = asyncio.Lock()
         self._index_save_task: asyncio.Task[None] | None = None
         self._program_snapshots = ProgramSnapshotWriter(store)
+        self._program_flow_archive = program_flow_archive
+        self._pending_program_gaps: dict[tuple[str, str], dict[str, Any]] = {}
+        self._program_gap_lock = asyncio.Lock()
+        self._program_ready_codes: set[str] = set()
+        self._program_outage: tuple[datetime, set[str]] | None = None
         self._close_task: asyncio.Task[None] | None = None
         self._latest_membership_snapshot: dict[str, Any] | None = None
         self.after_close = Top20AfterCloseWorkflow(
@@ -481,12 +532,58 @@ class AutonomousTop20Service:
             previous_observed_krx_trading_day=self._previous_observed_krx_trading_day,
             capture_scope=capture_scope,
             workload_paused=workload_paused,
+            archive_program_flow=self._freeze_program_flow if program_flow_archive is not None else None,
+            archive_observations=self._freeze_observation_day if program_flow_archive is not None else None,
+            filter_after_close_codes=self._filter_after_close_codes if stock_master_required else None,
         )
 
-    def latest_membership_snapshot(self, subject: str = "") -> dict[str, Any] | None:
+    async def _freeze_program_flow(self, day: str) -> None:
+        await self._program_snapshots.drain()
+        await self._program_flow_archive.freeze_day(day, self._now(),
+                                                    excluded_codes=self._excluded_product_codes or frozenset())
+
+    async def _freeze_observation_day(self, day: str, completed_at: datetime) -> None:
+        await self._program_flow_archive.freeze_observations(day, completed_at,
+                                                             excluded_codes=self._excluded_product_codes or frozenset())
+
+    def stock_enrichment_codes(self, codes: Sequence[str], *, day: str = "") -> tuple[str, ...]:
+        if not self._stock_master_required:
+            return tuple(codes)
+        excluded = self._excluded_product_codes
+        if excluded is None or self._stock_master_day < (day or self._now().date().isoformat()):
+            return ()
+        return tuple(code for code in codes if normalize_stock_code(code) not in excluded)
+
+    async def _filter_after_close_codes(self, codes: tuple[str, ...], day: str) -> tuple[str, ...]:
+        if codes:
+            await self._ensure_stock_master(day)
+            if self._excluded_product_codes is None or self._stock_master_day < day:
+                raise RuntimeError("product list unavailable for after-close stock backfill")
+        return self.stock_enrichment_codes(codes, day=day)
+
+    async def _ensure_stock_master(self, day: str) -> None:
+        async with self._stock_master_lock:
+            if self._stock_master_day >= day or time.monotonic() < self._stock_master_retry_at:
+                return
+            adapter = _AsyncBrokerChartAdapter(self._broker, asyncio.get_running_loop())
+            try:
+                codes = await await_owned_task(owned_create_task(owned_to_thread(
+                    load_excluded_product_codes, adapter.request_with_continuation,
+                ), name="top20-product-list"))
+            except Exception as error:
+                self._stock_master_retry_at = time.monotonic() + 300
+                logger.warning("키움 ETF·ETN·ELW 제외 목록 갱신 실패: %s", type(error).__name__)
+                return
+            self._excluded_product_codes = codes
+            self._stock_master_day = max(day, self._now().date().isoformat())
+
+    def latest_membership_snapshot(
+        self, subject: str = "", *, include_memory_only: bool = True,
+    ) -> dict[str, Any] | None:
         """Return the latest validated 20-slot projection without waiting for persistence."""
         value = self._latest_membership_snapshot
-        if value is None or (subject and str(value["subject"]) != subject):
+        if (value is None or (subject and str(value["subject"]) != subject)
+                or (not include_memory_only and value.get("persistence_state") == "memory_only")):
             return None
         payload = value["payload"]
         return {
@@ -519,6 +616,8 @@ class AutonomousTop20Service:
             owned_create_task(self._index_loop(), name="nas-top20-index"),
             owned_create_task(self._persistence_loop(), name="nas-top20-persistence"),
         ]
+        if self._program_flow_archive is not None:
+            self._program_flow_archive.start()
 
     async def close(self) -> None:
         # Cancelling a shutdown waiter must not abandon an actual DB write.
@@ -543,6 +642,8 @@ class AutonomousTop20Service:
             except asyncio.CancelledError:
                 pass
         await self.after_close.join()
+        if self._program_flow_archive is not None:
+            await self._program_flow_archive.close()
         self._fundamentals_tasks.clear()
         self._fundamentals_pending.clear()
         for task in self._tasks:
@@ -554,6 +655,8 @@ class AutonomousTop20Service:
         if self._subscriber is not None:
             self._hub.disconnect(self._subscriber)
             self._subscriber = None
+        self._finish_program_outage(self._now())
+        self._program_ready_codes.clear()
         # A cancelled persistence waiter must not outlive its actual save owner.
         # Failed/newer index input stays in the outbox for the existing start recovery.
         if self._index_save_task is not None:
@@ -562,6 +665,7 @@ class AutonomousTop20Service:
             except Exception as error:
                 logger.warning("NAS TOP20 지수 종료 저장 실패(영속 재시도 보존): %s", error)
         await self._program_snapshots.drain()
+        await self._persist_program_gaps()
 
     async def _select_ranking_response(self, now: datetime):
         """Shared live/offline ranking validation; no subscription or store effects."""
@@ -614,7 +718,9 @@ class AutonomousTop20Service:
         observer = self._ranking_input_observer
         with observer.ranking_refresh_scope(self, now) if observer is not None else nullcontext():
             refresh_started_at = time.monotonic()
-            self._schedule_market_catalog(now.date().isoformat())
+            history_due = ranking_history_due(now)
+            if history_due:
+                self._schedule_market_catalog(now.date().isoformat())
             result, items, stale_response, partial_response = await self._select_ranking_response(now)
             if stale_response or partial_response:
                 logger.warning(
@@ -624,6 +730,7 @@ class AutonomousTop20Service:
             codes = tuple(dict.fromkeys(filter(None, (_stock_code(row) for row in items))))[:20]
             snapshot_key = _ranking_snapshot_key(items, now, result.payload)
             day = snapshot_key[:10]
+            history_due = history_due and ranking_history_due(datetime.fromisoformat(snapshot_key))
             membership = {
                 "observed_at": snapshot_key, "codes": list(codes), "items": items,
             }
@@ -631,6 +738,7 @@ class AutonomousTop20Service:
             # that validated projection before PostgreSQL persistence so the
             # desktop's live limit=1 read is not delayed by storage latency.
             projection_time = self._now()
+            history_due = history_due and ranking_history_due(projection_time)
             if projection_time.tzinfo is None:
                 projection_time = projection_time.replace(tzinfo=KST)
             projection_saved_at = projection_time.timestamp()
@@ -639,13 +747,11 @@ class AutonomousTop20Service:
                 "snapshot_key": snapshot_key,
                 "saved_at": projection_saved_at,
                 "payload": membership,
-                "persistence_state": "pending",
+                "persistence_state": "pending" if history_due else "memory_only",
             }
-            if self._on_membership_changed is not None:
-                try:
-                    self._on_membership_changed()
-                except Exception:
-                    logger.exception("validated TOP20 projection notification failed")
+            if not history_due:
+                return codes
+            enrichment_codes = self.stock_enrichment_codes(codes)
             # The validated live projection and its KRX 0B subscription use the
             # same in-memory codes. Neither waits for membership/entrant/index DB
             # writes; the websocket still reports readiness only after REG ACK.
@@ -654,10 +760,19 @@ class AutonomousTop20Service:
                 # Sampling at that old time rewinds the collector and fabricates a
                 # >2s gap on its next advance despite uninterrupted index sampling.
                 collection_now = self._now()
+                if not ranking_history_due(collection_now):
+                    self._latest_membership_snapshot["persistence_state"] = "memory_only"
+                    return codes
                 update = self._advance(collection_now)
                 self._collector.prepare(
-                    codes, collection_now, enabled=True, collection_open=_collection_open(collection_now),
+                    enrichment_codes, collection_now, enabled=True,
+                    collection_open=_collection_open(collection_now),
                 )
+            if self._on_membership_changed is not None:
+                try:
+                    self._on_membership_changed()
+                except Exception:
+                    logger.exception("validated TOP20 projection notification failed")
             self._schedule_subscription_update(day)
             # The collector has already moved to the next minute. Preserve its
             # completed record before any unrelated membership/entrant DB write.
@@ -696,13 +811,13 @@ class AutonomousTop20Service:
                 round((persistence_started_at - refresh_started_at) * 1000),
                 round((time.monotonic() - persistence_started_at) * 1000),
             )
-            if codes:
+            if enrichment_codes:
                 if self._entrants_day != day:
                     first_seen, persisted = await self._load_daily_entrant_state(day)
                     self._entrant_first_seen = first_seen
                     self._entrant_persisted_codes = persisted
                     self._entrants_day = day
-                for code in codes:
+                for code in enrichment_codes:
                     self._entrant_first_seen.setdefault(code, snapshot_key)
                 await self._persist_missing_daily_entrants(
                     day, self._entrant_first_seen, self._entrant_persisted_codes,
@@ -712,8 +827,8 @@ class AutonomousTop20Service:
                     await self._flush_pending_indexes()
                 except Exception as error:
                     logger.warning("NAS TOP20 지수 저장 실패(재시도 예정): %s", error)
-            if self._tasks:
-                self._schedule_fundamentals(codes, day)
+            if self._tasks and ranking_history_due(self._now()):
+                self._schedule_fundamentals(enrichment_codes, day)
                 self._schedule_aux_rankings(now)
             return codes
 
@@ -765,7 +880,7 @@ class AutonomousTop20Service:
     ) -> None:
         documents = [
             {"owner": day, "key": code, "document": {"code": code, "first_seen_at": seen}}
-            for code, seen in first_seen.items() if code not in persisted
+            for code, seen in first_seen.items() if code not in persisted and self.stock_enrichment_codes((code,), day=day)
         ]
         if not documents:
             return
@@ -794,6 +909,63 @@ class AutonomousTop20Service:
         if error is not None:
             logger.warning("NAS KRX 종목 카탈로그 준비 실패(순위 수집 계속): %s", error)
 
+    def _schedule_nxt_catalog(self, now: datetime) -> None:
+        day = as_kst(now).date().isoformat()
+        task = self._nxt_catalog_task
+        if (not nxt_catalog_refresh_due(now) or self._premarket_catalog_day == day
+                or (task is not None and not task.done()) or time.monotonic() < self._nxt_catalog_retry_at):
+            return
+        task = owned_create_task(self._prepare_nxt_catalog(day), name="top20-nxt-catalog")
+        self._nxt_catalog_task = task
+        self._fundamentals_tasks.add(task)
+        task.add_done_callback(self._fundamentals_tasks.discard)
+
+    async def _prepare_nxt_catalog(self, day: str) -> None:
+        try:
+            await self._load_nxt_catalog(day)
+            if self._premarket_catalog_day == day:
+                return
+            adapter = _AsyncBrokerChartAdapter(self._broker, asyncio.get_running_loop())
+
+            def request_page(*args, **kwargs):
+                now = as_kst(self._now())
+                if now.date().isoformat() != day or not nxt_catalog_refresh_due(now):
+                    raise ValueError("NXT 종목 목록 수집 시간이 종료됐습니다.")
+                return adapter.request_with_continuation(*args, **kwargs)
+
+            catalog = await owned_to_thread(load_premarket_catalog, request_page)
+            if as_kst(self._now()).date().isoformat() != day:
+                return
+            async with self._nxt_catalog_lock:
+                await owned_to_thread(self._store.save_dataset_snapshot, NXT_CATALOG_KIND, day, day, catalog)
+                self._nxt_catalogs[day] = catalog["flags"]
+                self._install_premarket_markets(day, catalog["stocks"])
+            if ranking_history_due(self._now()):
+                self._publish_known_subscription()
+        except Exception as error:
+            self._nxt_catalog_retry_at = time.monotonic() + 300
+            logger.warning("NXT 종목 목록 준비 실패: %s", error)
+
+    async def _load_nxt_catalog(self, day: str) -> dict[str, bool] | None:
+        async with self._nxt_catalog_lock:
+            if day not in self._nxt_catalogs:
+                values = await owned_to_thread(self._store.load_dataset_snapshots, NXT_CATALOG_KIND, day, 1)
+                payload = values[0].get("payload", {}) if values else {}
+                flags = payload.get("flags")
+                stocks = payload.get("stocks")
+                if isinstance(stocks, dict) and stocks and isinstance(flags, dict):
+                    self._install_premarket_markets(day, stocks)
+                self._nxt_catalogs[day] = flags if isinstance(flags, dict) else None
+                if len(self._nxt_catalogs) > 2:
+                    del self._nxt_catalogs[min(self._nxt_catalogs)]
+                return flags if isinstance(flags, dict) else None
+            return self._nxt_catalogs[day]
+
+    def _install_premarket_markets(self, day: str, stocks: dict[str, tuple[str, str]]) -> None:
+        if day >= self._premarket_catalog_day:
+            self._premarket_markets = {code: market for code, (_, market) in stocks.items()}
+            self._premarket_catalog_day = day
+
     def _schedule_subscription_update(self, day: str) -> None:
         self._subscription_revision += 1
         self._subscription_day = day
@@ -820,12 +992,14 @@ class AutonomousTop20Service:
             logger.warning("NAS TOP20 구독 보완 실패(순위 수집 계속): %s", error)
 
     async def _refresh_subscription_until_current(self) -> None:
-        while True:
+        while ranking_history_due(self._now()):
             revision = self._subscription_revision
             day = self._subscription_day
             account_entry_codes = await self._load_account_entry_codes(day)
+            if not ranking_history_due(self._now()):
+                return
             await self._update_subscription()
-            if self._tasks and account_entry_codes:
+            if self._tasks and account_entry_codes and ranking_history_due(self._now()):
                 self._schedule_fundamentals(account_entry_codes, day)
             if revision == self._subscription_revision:
                 return
@@ -864,8 +1038,17 @@ class AutonomousTop20Service:
                 logger.warning("NAS 순위 기준 %s 갱신 실패: %s", query_type, error)
 
     async def _ensure_market_catalog(self, day: str) -> None:
-        if self._market_catalog_day == day and self._markets:
+        if self._stock_master_required:
+            await self._ensure_stock_master(day)
+        now = self._now()
+        if self._listing_evidence is not None and self._listing_evidence.refresh_due(now):
+            await await_owned_task(owned_create_task(owned_to_thread(
+                self._listing_evidence.refresh, now,
+            ), name="kind-listing-evidence"))
+        if self._market_catalog_day == day and (self._markets or self._premarket_catalog_day == day):
             return
+        if self._premarket_catalog_day != day:
+            await self._load_nxt_catalog(day)
         stored = await owned_to_thread(
             self._store.load_documents, "stock_catalog", "krx", 10_000,
         )
@@ -884,8 +1067,12 @@ class AutonomousTop20Service:
                 markets[code] = market
         if markets:
             self._markets = markets
-        if meta_day == day and markets:
+        if self._premarket_catalog_day == day or (meta_day == day and markets):
             self._market_catalog_day = day
+            return
+        # A late startup can now collect the Kiwoom list during ranking hours.
+        # The ranking loop can retry KIND fallback after the Kiwoom task finishes.
+        if self._nxt_catalog_task is not None and not self._nxt_catalog_task.done():
             return
         observer = self._catalog_input_observer
         loader = observer.captured_catalog_loader(self) if observer is not None else self._catalog_loader
@@ -926,6 +1113,7 @@ class AutonomousTop20Service:
             first_iteration = True
             while True:
                 now = self._now()
+                self._schedule_nxt_catalog(now)
                 slot = _ranking_expected_at(now).strftime("%Y-%m-%dT%H:%M:%S")
                 if first_iteration or slot != self._last_ranking_slot:
                     self._last_ranking_slot = slot
@@ -1032,6 +1220,8 @@ class AutonomousTop20Service:
                             })
                         except TypeError:
                             continue
+                        if not self.stock_enrichment_codes((tick.code,)):
+                            continue
                         observed_at = self._now()
                         self._program_snapshots.enqueue({
                             "subject": tick.code,
@@ -1066,6 +1256,9 @@ class AutonomousTop20Service:
                     now = self._now()
                     async with self._collector_lock:
                         update = self._advance(now)
+                        subscriber = self._subscriber
+                        if subscriber is not None and subscriber.codes and not ranking_history_due(now):
+                            self._hub.update_subscription(subscriber, [], [], program_codes=[], priority_codes=[])
                     # Register the immutable result durably; native save latency belongs
                     # to the separate persistence driver, not the sampling clock.
                     if update.completed is not None:
@@ -1088,6 +1281,7 @@ class AutonomousTop20Service:
                     logger.warning("NAS TOP20 지수 저장 실패(재시도 예정): %s", error)
                 try:
                     await self._program_snapshots.flush()
+                    await self._persist_program_gaps()
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -1096,11 +1290,16 @@ class AutonomousTop20Service:
 
     def _advance(self, now: datetime):
         subscriber = self._subscriber
-        if subscriber is not None and subscriber.dropped_events != self._observed_dropped_events:
-            lost = subscriber.dropped_events - self._observed_dropped_events
-            self._observed_dropped_events = subscriber.dropped_events
-            self._collector.mark_gap()
-            logger.warning("recording_gap: TOP20 실시간 소비자 큐에서 %d건 누락", lost)
+        if subscriber is not None:
+            self._observe_program_connection(now, subscriber)
+            if subscriber.dropped_events != self._observed_dropped_events:
+                lost = subscriber.dropped_events - self._observed_dropped_events
+                self._observed_dropped_events = subscriber.dropped_events
+                self._collector.mark_gap()
+                for gap in subscriber.take_gap(lost).ranges:
+                    if gap.event_type == "program_trade":
+                        self._remember_program_gap(gap.code, gap.start, gap.end)
+                logger.warning("recording_gap: TOP20 실시간 소비자 큐에서 %d건 누락", lost)
         return self._collector.advance(
             now, enabled=True,
             # 순위 요청 성공만으로는 1분 거래대금이 완전하지 않다. NAS와
@@ -1108,7 +1307,7 @@ class AutonomousTop20Service:
             # 과거 분석에서 실제 수집 공백으로 드러나게 한다.
             collection_open=_collection_open(now) and self._hub.upstream_ready,
             value_provider=lambda code, minute: self._trade_values.bucket_trade_value_eok(code, 1, minute),
-            market_provider=lambda code: self._markets.get(code, ""),
+            market_provider=lambda code: self._premarket_markets.get(code) or self._markets.get(code, ""),
         )
 
     async def _save_index(self, record: Top20MinuteRecord) -> None:
@@ -1187,9 +1386,9 @@ class AutonomousTop20Service:
             *top20_codes,
             *self._account_entry_codes,
         )))
-        today = self._now().date().isoformat()
-        nxt_codes = [code for code in realtime_codes
-                     if self._nxt_checked_on.get(code) == today and self._nxt_eligible.get(code, False)]
+        today = as_kst(self._now()).date().isoformat()
+        flags = self._nxt_catalogs.get(today) or {}
+        nxt_codes = [code for code in realtime_codes if flags.get(code) is True]
         self._hub.update_subscription(
             self._subscriber, list(realtime_codes), nxt_codes,
             program_codes=list(realtime_codes),
@@ -1199,17 +1398,9 @@ class AutonomousTop20Service:
     async def _update_subscription(self) -> None:
         if self._subscriber is None:
             return
-        realtime_codes = tuple(dict.fromkeys((
-            *self._collector.realtime_codes((), enabled=True),
-            *self._account_entry_codes,
-        )))
-        for code in realtime_codes:
-            if self._nxt_checked_on.get(code) != self._now().date().isoformat():
-                try:
-                    await self._nxt_enabled(code)
-                except Exception as error:
-                    logger.warning("NXT 적격 조회 미완료(다음 구독 갱신 때 재시도): %s %s", code, error)
-        self._publish_known_subscription()
+        await self._load_nxt_catalog(as_kst(self._now()).date().isoformat())
+        if ranking_history_due(self._now()):
+            self._publish_known_subscription()
 
     async def _load_account_entry_codes(self, day: str) -> tuple[str, ...]:
         """실제 매수 체결 종목을 순위 계산과 분리된 시장자료 수집 대상으로 읽는다."""
@@ -1219,37 +1410,13 @@ class AutonomousTop20Service:
         codes = tuple(dict.fromkeys(filter(None, (
             normalize_stock_code(value.get("key")) for value in values
         ))))
-        self._account_entry_codes = codes
-        return codes
+        self._account_entry_codes = self.stock_enrichment_codes(codes)
+        return self._account_entry_codes
 
-    async def _nxt_enabled(self, code: str) -> bool:
-        today = self._now().date()
-        if self._nxt_checked_on.get(code) == today.isoformat():
-            return self._nxt_eligible[code]
-        stored = await owned_to_thread(
-            self._store.load_documents, "stock_nxt_eligibility", code, 1,
-        )
-        if stored:
-            document = stored[0].get("document", {})
-            if nxt_eligibility_document_is_current(document, today):
-                payload = document.get("payload", {})
-                enabled = document.get("enabled")
-                if isinstance(payload, dict) and enabled is None:
-                    raw = payload.get("nxtEnable", payload.get("nxt_enable"))
-                    if raw is not None:
-                        enabled = str(raw).strip().upper() == "Y"
-                if isinstance(enabled, bool):
-                    self._nxt_eligible[code] = enabled
-                    self._nxt_checked_on[code] = today.isoformat()
-                    return enabled
-        result = await self._broker.request("ka10100", "/api/dostk/stkinfo", {"stk_cd": code})
-        raw_enabled = str(result.payload.get("nxtEnable", result.payload.get("nxt_enable", ""))).strip().upper()
-        if raw_enabled not in {"Y", "N"}:
-            raise RuntimeError(f"{code} NXT 대상 여부가 응답에 없습니다.")
-        enabled = raw_enabled == "Y"
-        self._nxt_eligible[code] = enabled
-        self._nxt_checked_on[code] = today.isoformat()
-        return enabled
+    async def _nxt_enabled(self, code: str, day: str = "") -> bool | None:
+        flags = await self._load_nxt_catalog(day or as_kst(self._now()).date().isoformat())
+        value = flags.get(code) if flags is not None else None
+        return value if isinstance(value, bool) else None
 
     def _schedule_fundamentals(self, codes: tuple[str, ...], day: str) -> None:
         minutes_due = (self._minute_backfill_enabled and not self._workload_paused("minute_backfill")
@@ -1315,7 +1482,7 @@ class AutonomousTop20Service:
                                         continue
                             else:
                                 result = await prepare(code, target_day)
-                                if stage == "flow" and result is False:
+                                if stage in {"flow", "daily"} and result is False:
                                     continue
                             if stage == "daily":
                                 if not self.daily_reference.stage_is_current(code, stage):
@@ -1362,11 +1529,12 @@ class AutonomousTop20Service:
             if result.recording_succeeded is False or not result.payload:
                 raise RuntimeError(f"{code} 기본정보 응답 또는 중앙 저장이 완료되지 않았습니다.")
 
-    async def _ensure_entry_daily_history(self, code: str, day: str) -> None:
+    async def _ensure_entry_daily_history(self, code: str, day: str) -> bool:
         """Verify the source window, even when old canonical rows already exist."""
         # Each market retains success even when the other market fails.
         failure: Exception | None = None
         markets = ["KRX"]
+        eligible = None
         try:
             if not self._entry_stage_is_ready(code, "daily:KRX", day):
                 await self._ensure_daily_history(code, day, "KRX", scope="initial")
@@ -1374,7 +1542,8 @@ class AutonomousTop20Service:
         except Exception as error:
             failure = error
         try:
-            if await self._nxt_enabled(code):
+            eligible = await self._nxt_enabled(code, day)
+            if eligible is True:
                 markets.append("NXT")
                 if not self._entry_stage_is_ready(code, "daily:NXT", day):
                     await self._ensure_daily_history(code, day, "NXT", scope="initial")
@@ -1384,7 +1553,10 @@ class AutonomousTop20Service:
                 failure = error
         if failure is not None:
             raise failure
+        if eligible is None:
+            return False
         self.daily_reference.accept_daily(code, markets)
+        return True
 
     async def _ensure_daily_history(self, code: str, day: str, market: str, *, scope: str) -> dict[str, Any]:
         async with self.daily_reference.history_lease(code, market):
@@ -1454,7 +1626,8 @@ class AutonomousTop20Service:
                 or not _entry_minute_query_due(day, self._now())):
             return False
         markets = ["KRX"]
-        if await self._nxt_enabled(code):
+        eligible = await self._nxt_enabled(code, day)
+        if eligible is True:
             markets.append("NXT")
         for market in markets:
             owner = f"{day}:{code}:{market}"
@@ -1496,7 +1669,7 @@ class AutonomousTop20Service:
                     "as_of": day, "completed_at": self._now().isoformat(),
                 },
             }])
-        return True
+        return eligible is not None
 
     async def _capture_candidate_investor_flow(self, code: str, day: str) -> bool:
         """프리·정규·애프터장 후보 최초 편입 때 외국인·기관 수급을 확보한다."""
@@ -1565,7 +1738,7 @@ class AutonomousTop20Service:
             (int(value.get("high", 0)) for value in verified_bars if value.get("high") is not None),
             default=0,
         ) or None) if coverage["periods"]["250"]["status"] in {"ready", "provisional"} else None
-        include_nxt = await self._nxt_enabled(code)
+        include_nxt = await self._nxt_enabled(code, day)
         daily_inputs = {"schema_version": 1, "markets": {
             "KRX": self._historical_daily_identity(bars, coverage),
         }}
@@ -1608,36 +1781,128 @@ class AutonomousTop20Service:
             )
         }}
 
+    def _observe_program_connection(self, now: datetime, subscriber: RealtimeSubscriber) -> None:
+        now = as_kst(now)
+        if not _collection_open(now):
+            self._finish_program_outage(now)
+            self._program_ready_codes.clear()
+        elif self._hub.upstream_ready:
+            self._finish_program_outage(now)
+            if self._program_ready_codes != subscriber.program_codes:
+                self._program_ready_codes = set(subscriber.program_codes)
+        elif self._program_ready_codes:
+            self._program_outage = (now, self._program_ready_codes)
+            self._program_ready_codes = set()
+
+    def _finish_program_outage(self, now: datetime) -> None:
+        if self._program_outage is None:
+            return
+        start, codes = self._program_outage
+        end = min(as_kst(now), start.replace(hour=20, minute=0, second=0, microsecond=0))
+        for code in codes:
+            self._remember_program_gap(code, start, end)
+        self._program_outage = None
+
+    def _remember_program_gap(self, code: str, start: datetime, end: datetime) -> None:
+        start, end = as_kst(start), as_kst(end)
+        if not code or not _collection_open(start) or not start <= end or start.date() != end.date():
+            return
+        first, last = start.strftime("%H%M%S"), end.strftime("%H%M%S")
+        owner, key = f"{start.date().isoformat()}:{code}", f"gap:{first}:{last}"
+        self._pending_program_gaps[(owner, key)] = {
+            "owner": owner, "key": key, "document": {"start": first, "end": last},
+        }
+
+    async def _persist_program_gaps(self) -> None:
+        if not self._pending_program_gaps:
+            return
+        async with self._program_gap_lock:
+            pending = self._pending_program_gaps.copy()
+            if not pending:
+                return
+            await await_owned_task(owned_create_task(owned_to_thread(
+                self._store.upsert_documents, "candidate_flow_finalization", list(pending.values()),
+            ), name="nas-program-gap-save"))
+            for key in pending:
+                self._pending_program_gaps.pop(key, None)
+
     async def _backfill_candidate_flows(self, code: str, day: str) -> None:
-        """장후 프로그램매매와 0W 누락분을 종목당 한 번 보완한다."""
+        """Only the current day's missing program-flow ranges need Kiwoom REST."""
+        now = as_kst(self._now())
+        if now.date().isoformat() != day or now.time() < clock_time(20, 5):
+            return
+        await self._program_snapshots.flush()
+        await self._persist_program_gaps()
         owner = f"{day}:{code}"
         coverage = await owned_to_thread(
-            self._store.load_documents, "candidate_flow_finalization", owner, 1,
+            self._store.load_documents, "candidate_flow_finalization", owner, 5000,
         )
-        if coverage:
+        if any(row.get("key") == "complete" for row in coverage):
             return
+        ranges = [(row["document"]["start"], row["document"]["end"])
+                  for row in coverage if str(row.get("key", "")).startswith("gap:")]
         raw_day = day.replace("-", "")
-        program_body = {"amt_qty_tp": "1", "stk_cd": f"{code}_AL", "date": raw_day}
-        try:
-            program = await self._broker.request("ka90008", "/api/dostk/mrkcond", program_body)
-        except Exception:
-            program_body["stk_cd"] = code
-            program = await self._broker.request("ka90008", "/api/dostk/mrkcond", program_body)
-        # ka90008 may legitimately return no program trades. Its date argument is
-        # ignored by Kiwoom, so only attribute an empty observation to this day
-        # while the requested calendar day is still current.
-        program_rows = program.payload.get("stk_tm_prm_trde_trnsn")
-        self._verify_flow_result(
-            program, "ka90008", "stk_tm_prm_trde_trnsn", raw_day,
-            allow_empty=self._now().date().isoformat() == day,
-        )
+        if not ranges:
+            # The legacy SOR and recovery documents sort ahead of the latest REALTIME row.
+            snapshots = await owned_to_thread(self._store.load_dataset_snapshots, "program_flow", code, 3)
+            if any(str(value.get("snapshot_key", "")).startswith(f"{raw_day}:REALTIME:")
+                   and any(row.get("net_buy_quantity") is not None or row.get("net_buy_amount_million_won") is not None
+                           for row in value.get("payload", {}).get("rows", ())) for value in snapshots):
+                return
+            first_seen = self._entrant_first_seen.get(code, "")
+            first = datetime.fromisoformat(first_seen).strftime("%H%M%S") if first_seen.startswith(day + "T") else "080000"
+            ranges = [(first, "235959")]
+        market, rows = await self._load_program_recovery(code, day, ranges)
+        if as_kst(self._now()).date().isoformat() != day:
+            raise RuntimeError("프로그램매매 보완 도중 조회 가능 거래일이 바뀌었습니다.")
+        await owned_to_thread(self._store.save_dataset_snapshot, "program_flow", code,
+                              f"{raw_day}:RECOVERY:{market}", {"market": market, "rows": rows})
         await owned_to_thread(self._store.upsert_documents, "candidate_flow_finalization", [{
             "owner": owner, "key": "complete", "document": {
                 "as_of": day, "completed_at": self._now().isoformat(),
-                "scope": "program_after_close",
-                "program_flow_rows": len(program_rows),
+                "scope": "program_after_close", "ranges": ranges, "program_flow_rows": len(rows),
             },
         }])
+
+    async def _load_program_recovery(self, code: str, day: str, ranges: list[tuple[str, str]]) -> tuple[str, list[dict[str, object]]]:
+        raw_day = day.replace("-", "")
+        request = (self._broker.request_unrecorded if isinstance(self._broker, CentralRestBroker)
+                   else self._broker.request)
+        body = {"amt_qty_tp": "1", "stk_cd": f"{code}_AL", "date": raw_day}
+        market = "SOR"
+        try:
+            result = await request("ka90008", "/api/dostk/mrkcond", body)
+        except Exception:
+            if as_kst(self._now()).date().isoformat() != day:
+                raise
+            market = "KRX"
+            body = {**body, "stk_cd": code}
+            result = await request("ka90008", "/api/dostk/mrkcond", body)
+        first_required = min(first for first, _ in ranges)
+        seen_keys: set[str] = set()
+        recovered: list[dict[str, object]] = []
+        last_clock = "235959"
+        while True:
+            if as_kst(self._now()).date().isoformat() != day:
+                raise RuntimeError("프로그램매매 보완 도중 조회 가능 거래일이 바뀌었습니다.")
+            self._verify_flow_result(result, "ka90008", "stk_tm_prm_trde_trnsn", raw_day,
+                                     allow_empty=not seen_keys and not result.has_next,
+                                     require_recording=False)
+            for row in program_trade_rows(result.payload["stk_tm_prm_trde_trnsn"]):
+                clock = str(row["trade_time"])
+                datetime.strptime(clock, "%H%M%S")
+                if len(clock) != 6 or clock > last_clock:
+                    raise RuntimeError("프로그램매매 연속조회 시각 순서가 올바르지 않습니다.")
+                last_clock = clock
+                if any(first <= clock <= last for first, last in ranges):
+                    recovered.append(row)
+            if not result.has_next or last_clock < first_required:
+                return market, recovered
+            key = result.next_key
+            if not key or key in seen_keys:
+                raise RuntimeError("프로그램매매 연속조회 키가 누락되거나 반복되었습니다.")
+            seen_keys.add(key)
+            result = await request("ka90008", "/api/dostk/mrkcond", body, cont_yn="Y", next_key=key)
 
     async def _backfill_market_indexes(self, day: str) -> None:
         """코스피·코스닥 분봉과 일봉을 NAS에서 거래일당 한 번 확정한다."""
@@ -1709,6 +1974,12 @@ class AutonomousTop20Service:
         )
         if coverage:
             document = coverage[0].get("document", {})
+            if (isinstance(document, dict) and market == "KRX" and document.get("kind") == "minute_no_trade"
+                    and document.get("as_of") == day and document.get("reason") == "krx_full_day_halt"
+                    and document.get("session_finalized") is True and document.get("daily_revision_id")
+                    and document.get("halt_proof")
+                    and not await owned_to_thread(self._store.load_minute_bars, code, day, market)):
+                return
             if (
                 isinstance(document, dict)
                 and document.get("kind") == "minute"
@@ -1756,6 +2027,8 @@ class AutonomousTop20Service:
             continuations.add(next_key)
         if not complete:
             raise RuntimeError("분봉 연속조회 8페이지 안에 대상일 종료점을 확인하지 못했습니다.")
+        if not expected_minutes and market == "KRX" and await self._record_halt_without_minutes(code, day, pages):
+            return
         await self._verify_backfilled_minutes(code, day, market, expected_minutes)
         receipt: dict[str, Any] = {}
         if set(expected_bars) == expected_minutes and expected_bars:
@@ -1786,12 +2059,44 @@ class AutonomousTop20Service:
         }])
         return True
 
+    async def _record_halt_without_minutes(self, code: str, day: str, pages: int) -> bool:
+        if self._full_day_halt is None:
+            return False
+        daily = await owned_to_thread(self._store.load_documents, "market_data_coverage_daily", f"{code}:KRX", 1)
+        coverage = daily[0]["document"] if daily else {}
+        if (coverage.get("kind") != "daily" or coverage.get("as_of") != day or coverage.get("scope") != "full_day"
+                or coverage.get("window_closed") is not True or coverage.get("session_finalized") is not True):
+            return False
+        revisions = await owned_to_thread(self._store.load_observation_revisions, "daily_bar", f"{code}:KRX", 500)
+        exact = next((row for row in revisions if row["observation_key"] == day), None)
+        if (exact is None or exact["completeness"] != "complete" or exact["source_id"] != "kiwoom-ka10081"
+                or type(exact["payload"].get("volume")) is not int or exact["payload"]["volume"] != 0):
+            return False
+        if await owned_to_thread(self._store.load_minute_bars, code, day, "KRX"):
+            return False
+        try:
+            proof = await owned_to_thread(self._full_day_halt, code, date.fromisoformat(day))
+        except (OSError, ValueError) as error:
+            logger.warning("KRX 거래정지 근거 조회 실패: %s %s (%s)", code, day, type(error).__name__)
+            return False
+        if proof is None:
+            return False
+        await owned_to_thread(self._store.upsert_documents, "market_data_coverage", [{
+            "owner": f"{day}:{code}:KRX", "key": "complete", "document": {
+                "kind": "minute_no_trade", "reason": "krx_full_day_halt", "as_of": day,
+                "scope": "full_day", "window_closed": True, "session_finalized": True,
+                "pages": pages, "daily_revision_id": exact["revision_id"], "daily_volume": 0,
+                "halt_proof": proof, "completed_at": self._now().isoformat(),
+            },
+        }])
+        return True
+
     def _verify_flow_result(
         self, result: Any, api_id: str, rows_key: str, raw_day: str,
-        *, allow_empty: bool = False,
+        *, allow_empty: bool = False, require_recording: bool = True,
     ) -> None:
         if result.recording_succeeded is False or (
-            isinstance(self._broker, CentralRestBroker) and result.recording_succeeded is not True
+            require_recording and isinstance(self._broker, CentralRestBroker) and result.recording_succeeded is not True
         ):
             raise RuntimeError(f"{api_id} 수급 원본 저장이 확인되지 않았습니다.")
         rows = result.payload.get(rows_key)
@@ -1957,8 +2262,9 @@ class _AsyncBrokerChartAdapter:
         self, api_id: str, path: str, body: dict[str, Any], *,
         cont_yn: str = "N", next_key: str = "",
     ) -> tuple[dict[str, Any], bool, str]:
+        request = self._broker.request_unrecorded if api_id == "ka10099" else self._broker.request
         future = asyncio.run_coroutine_threadsafe(
-            self._broker.request(
+            request(
                 api_id, path, body, cont_yn=cont_yn, next_key=next_key,
             ),
             self._loop,

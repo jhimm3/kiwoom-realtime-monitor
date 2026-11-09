@@ -489,6 +489,75 @@ class OrderLifecycleTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.directory.cleanup()
 
+    def test_sor_ack_without_physical_venue_recovers_from_exact_order_evidence_after_restart(self):
+        from types import SimpleNamespace
+        from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import BrokerOrderDetails
+        from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import LocalAutomationOrderTransport
+        from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_venue
+
+        clock = [NOW + timedelta(minutes=5)]
+        intent = replace(_intent(), venue='SOR', created_at=clock[0], expires_at=clock[0] + timedelta(minutes=1))
+        account = replace(_account(), as_of=clock[0])
+        calls = []
+
+        def request_once(api, path, body):
+            calls.append((api, body))
+            if api == 'kt10000':
+                return {'ord_no': 'broker-sor', 'dmst_stex_tp': 'SOR'}
+            self.assertEqual(('kt10003', 'NXT', 'broker-sor'), (api, body['dmst_stex_tp'], body['orig_ord_no']))
+            return {'ord_no': 'cancelled-sor', 'dmst_stex_tp': 'NXT'}
+
+        transport = LocalAutomationOrderTransport(SimpleNamespace(request_once=request_once), now_provider=lambda: clock[0])
+
+        def open_runtime(store, owner):
+            store._execution_wall_now = lambda: clock[0]
+            repository = ExecutionRepository(store)
+            lifecycle = OrderLifecycle(repository, transport, now_provider=lambda: clock[0],
+                                       local_automation_order_rejection=lambda _intent, _now: None)
+            runtime = ExecutionRuntime(lifecycle, repository, account_ref=intent.account_ref, run_id=intent.run_id,
+                                       owner_token=owner, now_provider=lambda: clock[0])
+            runtime.start()
+            return runtime
+
+        first = open_runtime(self.store, 'sor-initial')
+        pending = first.submit(intent, account)
+        self.assertEqual((OrderState.SUBMISSION_UNKNOWN, 'broker-sor', None),
+                         (pending.state, pending.broker_order_id, execution_broker_venue(pending)))
+        self.assertTrue(first.stop())
+        self.store.close()
+        self.store = SQLiteQueryStore(Path(self.directory.name) / 'central.sqlite3')
+        self.store.initialize()
+        second = open_runtime(self.store, 'sor-reopened')
+        self.assertEqual(pending, second.submit(intent, account))
+        with self.assertRaisesRegex(ValueError, 'reconciled and accepted'):
+            second.cancel(intent.intent_id)
+        self.assertEqual(1, len(calls))
+        clock[0] += timedelta(seconds=1)
+        snapshot = BrokerOrderSnapshot('broker-sor', intent.account_ref, intent.symbol, OrderState.PARTIALLY_FILLED,
+            1, intent.quantity - 1, clock[0], (BrokerFill('sor-fill', 1, intent.limit_price, clock[0]),))
+        detail = BrokerOrderDetails('broker-sor', intent.quantity, intent.side, intent.limit_price, 'NXT')
+        self.assertIsNone(second.reconcile_by_broker_order(snapshot, broker_venue='NXT'))
+        fallback = replace(detail, venue='KRX', venue_confirmed=False)
+        self.assertIsNone(second.reconcile_by_broker_order(snapshot, broker_venue='KRX', broker_details=(fallback,)))
+        self.assertIsNone(second.reconcile_by_broker_order(snapshot, broker_venue='NXT',
+                                                          broker_details=(replace(detail, side=OrderSide.SELL),)))
+        recovered = second.reconcile_by_broker_order(snapshot, broker_venue='NXT', broker_details=(detail,))
+        self.assertEqual(('NXT', 1, OrderState.PARTIALLY_FILLED),
+                         (execution_broker_venue(recovered), recovered.detailed_filled_quantity, recovered.state))
+        self.assertIsNone(second.reconcile_by_broker_order(snapshot, broker_venue='KRX',
+                                                          broker_details=(replace(detail, venue='KRX'),)))
+        second.cancel(intent.intent_id)
+        self.assertEqual(['SOR', 'NXT'], [body['dmst_stex_tp'] for _, body in calls])
+        clock[0] += timedelta(seconds=1)
+        late = replace(snapshot, as_of=clock[0], filled_quantity=2, remaining_quantity=intent.quantity - 2,
+                       fills=(BrokerFill('late-fill', 1, intent.limit_price, clock[0]),))
+        self.assertIsNone(second.reconcile_by_broker_order(late, broker_venue='KRX'))
+        self.assertEqual(2, second.reconcile_by_broker_order(late, broker_venue='NXT').detailed_filled_quantity)
+        self.assertEqual(2, second.reconcile_by_broker_order(late, broker_venue='NXT').detailed_filled_quantity)
+        self.assertEqual(2, len(calls))
+        self.assertTrue(second.stop())
+        self.store.close()
+
     def test_unknown_submission_is_never_automatically_retried_after_restart(self) -> None:
         first_transport = _Transport(SubmissionUnknown("timeout"))
         lifecycle = OrderLifecycle(self.repository, first_transport, now_provider=lambda: NOW)
@@ -1404,6 +1473,172 @@ class UnfilledPairedEvidenceTests(unittest.TestCase):
         rows=tuple(replace(row,input_resolution='minute') for row in rows)
         self.assertIsNotNone(self.prepare(rows,policy=policy)[0])
         with self.assertRaises(ValueError):replace(rows[0],horizon_seconds=10)
+
+
+class LocalRehearsalTests(unittest.TestCase):
+    class Broker:
+        environment = 'real'
+
+        def __init__(self, clock, venue):
+            self.clock, self.venue = clock, venue
+            self.calls, self.orders = [], {}
+            self.lose_amendment_reply = False
+
+        def request_once(self, api_id, path, body):
+            from kiwoom_monitor.infrastructure.kiwoom_rest.client import KiwoomSubmissionUnknownError
+            assert path == '/api/dostk/ordr' and body['dmst_stex_tp'] == self.venue and body['stk_cd'] == '005930'
+            self.calls.append((api_id, dict(body)))
+            number = f'{len(self.calls):07d}'
+            response = {'ord_no': number, 'dmst_stex_tp': self.venue, 'return_code': 0}
+            if api_id in {'kt10000', 'kt10001'}:
+                self.orders[number] = dict(side=OrderSide.BUY if api_id == 'kt10000' else OrderSide.SELL,
+                    quantity=int(body['ord_qty']), remaining=int(body['ord_qty']), price=int(body['ord_uv']),
+                    parent=None, fills=[], state=OrderState.ACCEPTED)
+            elif api_id == 'kt10002':
+                original = body['orig_ord_no']
+                source = self.orders[original]
+                quantity = int(body['mdfy_qty'])
+                assert quantity == source['remaining']
+                source.update(remaining=0, state=OrderState.FILLED if source['fills'] else OrderState.CANCELLED)
+                self.orders[number] = dict(side=source['side'], quantity=quantity, remaining=quantity,
+                    price=int(body['mdfy_uv']), parent=original, fills=[], state=OrderState.ACCEPTED)
+                if self.lose_amendment_reply:
+                    raise KiwoomSubmissionUnknownError('test peer accepted amendment but dropped reply')
+                response.update(base_orig_ord_no=original, mdfy_qty=f'+{quantity:011d}')
+            else:
+                assert api_id == 'kt10003' and body['cncl_qty'] == '0'
+                assert self.orders[body['orig_ord_no']]['remaining'] > 0
+            return response
+
+        def fill(self, number, quantity):
+            order = self.orders[number]
+            assert 0 < quantity <= order['remaining']
+            order['remaining'] -= quantity
+            order['fills'].append(BrokerFill(f'fill-{len(order["fills"])}', quantity, order['price'], self.clock[0]))
+            order['state'] = OrderState.PARTIALLY_FILLED if order['remaining'] else OrderState.FILLED
+
+        def read_recovery(self):
+            from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import AccountRecovery, BrokerOrderDetails
+            positions, reserved, orders, details = 0, 0, [], []
+            for number, row in self.orders.items():
+                filled = sum(fill.quantity for fill in row['fills'])
+                positions += filled if row['side'] is OrderSide.BUY else -filled
+                reserved += row['remaining'] * row['price'] if row['side'] is OrderSide.BUY else 0
+                orders.append(BrokerOrderSnapshot(number, 'fixture-real', '005930', row['state'],
+                    filled, row['remaining'], self.clock[0], tuple(row['fills'])))
+                details.append(BrokerOrderDetails(number, row['quantity'], row['side'], row['price'], self.venue,
+                                                  original_broker_order_id=row['parent']))
+            return AccountRecovery(AccountSnapshot('fixture-real', 1_000_000, reserved,
+                {'005930': positions} if positions else {}, self.clock[0]), tuple(orders), tuple(details))
+
+    def test_real_krx_and_nxt_rehearse_orders_and_recover_physical_remainder_without_resending(self):
+        from kiwoom_monitor.application.market_session_schedule import MarketPhase, MarketSession
+        from kiwoom_monitor.central_server.local_order_rehearsal import LocalOrderRehearsal, RehearsalConditions
+        routes = (('KRX', MarketSession.KRX_REGULAR, 0, 5),
+                  ('NXT', MarketSession.NXT_PRE_MARKET, -1, 15),
+                  ('NXT', MarketSession.NXT_MAIN_MARKET, 0, 5),
+                  ('NXT', MarketSession.NXT_AFTER_MARKET, 7, 0))
+        for venue, session, hours, minutes in routes:
+            with self.subTest(venue=venue, session=session), tempfile.TemporaryDirectory() as directory:
+                clock = [NOW + timedelta(hours=hours, minutes=minutes)]
+                peer = self.Broker(clock, venue)
+                settings = dict(account_ref='fixture-real', run_id='local-run', symbol='005930', venue=venue,
+                    sessions=(session,), maximum_age=timedelta(seconds=3), now_provider=lambda: clock[0])
+
+                def open_run():
+                    return LocalOrderRehearsal(Path(directory), peer, **settings)
+
+                def conditions(price, valid=True, *, eligible=True, phase=MarketPhase.CONTINUOUS):
+                    return lambda _: RehearsalConditions('005930', venue, clock[0], phase, eligible, valid, price)
+
+                def tick():
+                    clock[0] += timedelta(seconds=1)
+
+                with open_run() as local:
+                    self.assertIsNone(local.step(OrderSide.BUY, current_conditions=conditions(100, eligible=None), entry_quantity=5))
+                    self.assertIsNone(local.step(OrderSide.BUY, current_conditions=conditions(100, phase=MarketPhase.UNKNOWN), entry_quantity=5))
+                    self.assertEqual([], peer.calls)
+                    buy = local.step(OrderSide.BUY, current_conditions=conditions(100), entry_quantity=5)
+                    self.assertEqual(('real', venue, OrderState.ACCEPTED), (buy.intent.environment, buy.intent.venue, buy.state))
+                    tick()
+                    peer.fill('0000001', 2)
+                    partial = local.step(OrderSide.BUY, current_conditions=conditions(100))
+                    self.assertEqual((2, OrderState.PARTIALLY_FILLED), (partial.detailed_filled_quantity, partial.state))
+                    tick()
+                    peer.lose_amendment_reply = True
+                    unknown = local.step(OrderSide.BUY, current_conditions=conditions(103))
+                    self.assertEqual((OrderState.SUBMISSION_UNKNOWN, 'UNKNOWN'), (unknown.state, unknown.amendment.status))
+                    self.assertEqual(['kt10000', 'kt10002'], [api for api, _ in peer.calls])
+
+                with open_run() as restarted:
+                    tick()
+                    recovered = restarted.step(OrderSide.BUY, current_conditions=conditions(103))
+                    self.assertEqual('ACCEPTED', recovered.amendment.status)
+                    self.assertEqual(2, len(peer.calls))
+                    tick()
+                    cancelled = restarted.step(OrderSide.BUY, current_conditions=conditions(None, False))
+                    self.assertEqual(OrderState.CANCEL_PENDING, cancelled.state)
+                    tick()
+                    self.assertIsNone(restarted.step(OrderSide.SELL, current_conditions=conditions(97)))
+                    self.assertEqual(3, len(peer.calls))
+
+                tick()
+                peer.fill('0000002', 1)
+                peer.orders['0000002'].update(state=OrderState.CANCELLED, remaining=0)
+                with open_run() as restarted:
+                    sell = restarted.step(OrderSide.SELL, current_conditions=conditions(97))
+                    self.assertEqual((3, OrderState.ACCEPTED), (sell.intent.quantity, sell.state))
+                    self.assertEqual((OrderState.CANCELLED, 3), (restarted.read_order(OrderSide.BUY).state,
+                                                                restarted.read_order(OrderSide.BUY).detailed_filled_quantity))
+                    tick()
+                    peer.fill('0000004', 3)
+                    flat = restarted.step(OrderSide.SELL, current_conditions=conditions(97))
+                    self.assertEqual(OrderState.FILLED, flat.state)
+                    self.assertEqual({}, peer.read_recovery().account.positions)
+                    self.assertIn('AMENDMENT_RECOVERED', {row['event_type'] for row in restarted.read_events(OrderSide.BUY)})
+                with open_run() as restarted:
+                    tick()
+                    self.assertEqual(OrderState.FILLED, restarted.step(OrderSide.SELL, current_conditions=conditions(97)).state)
+                self.assertEqual(['kt10000', 'kt10002', 'kt10003', 'kt10001'], [api for api, _ in peer.calls])
+                self.assertEqual(('0000001', '3', '103'), tuple(peer.calls[1][1][field]
+                                                                 for field in ('orig_ord_no', 'mdfy_qty', 'mdfy_uv')))
+                self.assertEqual('0000002', peer.calls[2][1]['orig_ord_no'])
+
+    def test_rehearsal_rejects_production_ledger_client_and_crossed_broker_venue(self):
+        from kiwoom_monitor.application.market_session_schedule import MarketPhase, MarketSession
+        from kiwoom_monitor.central_server.local_order_rehearsal import LocalOrderRehearsal, RehearsalConditions
+        from kiwoom_monitor.domain.order_contract import LocalRehearsalOrderIntent
+        from kiwoom_monitor.infrastructure.kiwoom_rest.client import KiwoomRestClient
+        from kiwoom_monitor.infrastructure.kiwoom_rest.settings import KiwoomSettings
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            store = SQLiteQueryStore(path / 'normal.sqlite3')
+            store.initialize()
+            self.addCleanup(store.close)
+            rehearsal_intent = LocalRehearsalOrderIntent('id', 'run', 'decision', 'fixture-real', 'real', '005930',
+                'NXT', OrderSide.BUY, 2, OrderType.LIMIT, 100, NOW, NOW + timedelta(minutes=1), 'rehearsal')
+            with self.assertRaisesRegex(ValueError, 'ledger mode'):
+                ExecutionRepository(store).create(rehearsal_intent)
+            with self.assertRaisesRegex(ValueError, 'mock environment'):
+                replace(_intent(), environment='real')
+
+            clock = [NOW + timedelta(minutes=5)]
+            config = dict(account_ref='fixture-real', run_id='local-run', symbol='005930', venue='NXT',
+                sessions=(MarketSession.NXT_MAIN_MARKET,), maximum_age=timedelta(seconds=3), now_provider=lambda: clock[0])
+            with self.assertRaisesRegex(ValueError, 'live Kiwoom client'):
+                LocalOrderRehearsal(path / 'unused', KiwoomRestClient(KiwoomSettings('', '', 'real')), **config)
+            peer = self.Broker(clock, 'NXT')
+            with self.assertRaisesRegex(ValueError, 'empty directory'):
+                LocalOrderRehearsal(path, peer, **config)
+            with LocalOrderRehearsal(path / 'rehearsal', peer, **config) as local:
+                def current(_):
+                    return RehearsalConditions('005930', 'NXT', clock[0], MarketPhase.CONTINUOUS, True, True, 100)
+                local.step(OrderSide.BUY, current_conditions=current, entry_quantity=2)
+                clock[0] += timedelta(seconds=1)
+                peer.venue = 'KRX'
+                with self.assertRaisesRegex(ValueError, 'does not match the route'):
+                    local.step(OrderSide.BUY, current_conditions=current)
+                self.assertEqual(1, len(peer.calls))
 
 
 if __name__ == "__main__":

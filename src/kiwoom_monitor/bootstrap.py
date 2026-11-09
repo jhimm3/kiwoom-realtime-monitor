@@ -326,10 +326,9 @@ def _run_desktop(
             timeout_seconds=5.0,
         )
         candidate_settings_client = CentralOperationalSettingsClient(configured_data_source)
-        if configured_data_source.mode == "personal_server":
-            mock_automation_credentials_client = CentralCredentialsClient(
-                configured_data_source, provider="kiwoom_mock",
-            )
+        mock_automation_credentials_client = CentralCredentialsClient(
+            configured_data_source, provider="kiwoom_mock",
+        )
     minute_bar_repository = MinuteBarRepository(paths.database_path)
     daily_bar_repository = DailyBarRepository(paths.database_path)
     google_drive_sync = None
@@ -487,12 +486,17 @@ def _run_desktop(
             else:
                 realtime_factory = lambda codes: CentralRealtimeWorker(source, codes)
             stock_repository = StockRepository(paths.database_path, now_provider=getattr(client, "server_now", None))
+            nxt_eligibility = NxtEligibilityService(
+                client, catalog_settings=settings if source.mode == "local" else None,
+                catalog_store=stock_repository,
+            )
             return {
                 "source_mode": source.mode,
                 "market_data_client": client,
                 "owned_observers": owned_observers,
                 "owned_observer_completions": owned_completions,
-                "ranking_loader": RankingService(client, stocks=stock_repository, query_type=settings.get("rank_query_type")),
+                "ranking_loader": RankingService(client, stocks=stock_repository, query_type=settings.get("rank_query_type"),
+                                                 stock_only_enrichment=True),
                 "realtime_worker_factory": realtime_factory,
                 "minute_history_worker_factory": lambda codes: MinuteHistoryWorker(
                     MinuteChartService(client, include_nxt=True), codes, client.server_now
@@ -504,9 +508,10 @@ def _run_desktop(
                         include_nxt=True,
                         now_provider=client.server_now,
                         cached_high_250_loader=stock_repository.load_high_250_price,
-                        nxt_enabled_loader=lambda code: stock_repository.load_nxt_enabled(
+                        nxt_enabled_loader=(lambda code: nxt_eligibility.stored_flag(code, client.server_now))
+                        if source.mode == "local" else (lambda code: stock_repository.load_nxt_enabled(
                             (code,), daily_query_date(client.server_now()).isoformat(),
-                        ).get(code),
+                        ).get(code)),
                     ),
                     codes,
                 ),
@@ -526,9 +531,10 @@ def _run_desktop(
                         high_250_loader=stock_repository.load_high_250_price,
                     ), codes
                 ),
-                "nxt_eligibility_worker_factory": lambda codes: NxtEligibilityWorker(NxtEligibilityService(client), codes),
+                "nxt_eligibility_worker_factory": lambda codes: NxtEligibilityWorker(nxt_eligibility, codes, client.server_now),
+                "nxt_catalog_due": nxt_eligibility.preparation_due,
                 "entry_investor_loader": InvestorFlowService(client).load,
-                "program_trade_loader": ProgramTradeService(client).load_day,
+                "program_trade_loader": ProgramTradeService(client, now_provider=client.server_now).load_day,
             }
         except BaseException as error:
             first_cleanup_error = _close_unpublished_api_observers(error, owned_observers, owned_completions)
@@ -648,6 +654,7 @@ def _run_desktop(
                 daily_high_worker_factory=api_runtime.get("daily_high_worker_factory"),
                 historical_high_worker_factory=api_runtime.get("historical_high_worker_factory"),
                 nxt_eligibility_worker_factory=api_runtime.get("nxt_eligibility_worker_factory"),
+                nxt_catalog_due=api_runtime.get("nxt_catalog_due"),
                 minute_aggregator=MinuteTradeValueAggregator(),
                 minute_bar_repository=minute_bar_repository,
                 daily_bar_repository=daily_bar_repository,

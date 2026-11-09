@@ -68,6 +68,7 @@ def create_mock_automation_router(
             supervisor.status,
             account_ref,
             credential_profile_id=credential_profile_id,
+            include_held_close_material=True,
         )
 
     async def run_mock_automation_operation(operation: Any) -> dict[str, object]:

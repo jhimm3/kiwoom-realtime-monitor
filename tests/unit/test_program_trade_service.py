@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date
+from datetime import date, datetime
 
 from kiwoom_monitor.application.program_trade_service import ProgramTradeService
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import parse_program_trade_ticks
@@ -49,11 +49,21 @@ class ProgramTradeTests(unittest.TestCase):
 
     def test_after_close_request_uses_ka90008_once_per_code(self):
         client = _Client()
-        rows = ProgramTradeService(client).load_day("005930", date(2026, 8, 31))
+        service = ProgramTradeService(client, now_provider=lambda: datetime(2026, 8, 31, 20, 5))
+        rows = service.load_day("005930", date(2026, 8, 31))
         self.assertEqual(1, len(rows))
         self.assertEqual("ka90008", client.calls[0][0])
         self.assertEqual("005930_AL", client.calls[0][2]["stk_cd"])
         self.assertEqual(1234, rows[0]["net_buy_amount_million_won"])
+
+    def test_direct_recovery_skips_market_hours_and_prior_day(self):
+        client = _Client()
+        now = [datetime(2026, 8, 31, 15)]
+        service = ProgramTradeService(client, now_provider=lambda: now[0])
+        self.assertEqual((), service.load_day("005930", date(2026, 8, 31)))
+        now[0] = datetime(2026, 9, 1, 20, 5)
+        self.assertEqual((), service.load_day("005930", date(2026, 8, 31)))
+        self.assertEqual([], client.calls)
 
 
 if __name__ == "__main__":

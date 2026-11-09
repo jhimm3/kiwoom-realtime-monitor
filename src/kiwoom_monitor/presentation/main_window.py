@@ -97,7 +97,7 @@ from kiwoom_monitor.application.high_price_policy import (
     merge_fundamentals_with_adjusted_high,
     selected_high_price,
 )
-from kiwoom_monitor.application.ranking_schedule import RankingChangeSummary
+from kiwoom_monitor.application.ranking_schedule import RankingChangeSummary, ranking_history_due
 from kiwoom_monitor.application.ranking_execution import RankingExecutionCoordinator
 from kiwoom_monitor.application.realtime_subscription import (
     RealtimeSubscriptionCoordinator,
@@ -108,6 +108,7 @@ from kiwoom_monitor.application.market_data_finalization import (
     finalization_candidates,
     finalization_target_date,
     minute_bars_complete,
+    previous_business_day,
 )
 from kiwoom_monitor.application.secondary_data_schedule import (
     SecondaryDataFollowupCoordinator,
@@ -456,6 +457,7 @@ class MainWindow(QMainWindow):
         daily_high_worker_factory: Callable[[tuple[str, ...]], DailyHighWorker] | None = None,
         historical_high_worker_factory: Callable[[tuple[str, ...]], HistoricalHighWorker] | None = None,
         nxt_eligibility_worker_factory: Callable[[tuple[str, ...]], NxtEligibilityWorker] | None = None,
+        nxt_catalog_due: Callable[[datetime], bool] | None = None,
         google_drive_sync: GoogleDriveSyncService | None = None,
         api_runtime_factory: Callable[[], dict[str, object]] | None = None,
         news_config_path: Path | None = None,
@@ -488,6 +490,7 @@ class MainWindow(QMainWindow):
             daily_high_worker_factory=daily_high_worker_factory,
             historical_high_worker_factory=historical_high_worker_factory,
             nxt_eligibility_worker_factory=nxt_eligibility_worker_factory,
+            nxt_catalog_due=nxt_catalog_due,
             monitor_database_path=monitor_database_path,
             minute_bar_repository=minute_bar_repository, stock_lookup=stock_lookup,
             journal_database_path=None if query_only else journal_database_path,
@@ -566,6 +569,7 @@ class MainWindow(QMainWindow):
                 from kiwoom_monitor.presentation.mock_automation_dialog import MockAutomationDialog
                 self._mock_automation_dialog = MockAutomationDialog(
                     candidate_client, mock_automation_credentials_client, self,
+                    rehearsal_root=research_data_dir / 'order-rehearsals' if research_data_dir is not None else None,
                 )
         self._journal_process_manager = AuxiliaryProcessManager()
         self._journal_command_path = journal_database_path.with_name("journal_command.json") if journal_database_path else None
@@ -636,6 +640,9 @@ class MainWindow(QMainWindow):
         self._after_close_daily_received: set[str] = set()
         self._finalization_attempts: dict[tuple[date, str], int] = {}
         self._finalization_retry_after: dict[tuple[date, str], datetime] = {}
+        self._last_daytime_ranking: tuple[date, tuple[str, ...]] | None = None
+        self._standalone_close_checked_at: datetime | None = None
+        self._standalone_close_day: date | None = None
         self._settings_dialog: SettingsDialog | None = None
         self._theme_manager_dialog: ThemeManagerDialog | None = None
         self._table_update_deferred = False
@@ -760,6 +767,7 @@ class MainWindow(QMainWindow):
             lambda message: logger.warning("TOP20 시장 구분 재확인 실패: %s", message)
         )
         self._top20_repair_last_started = 0.0
+        self._krx_catalog_done_day = ""
         self._minute_bar_repository = minute_bar_repository
         if self._minute_bar_repository is not None:
             try:
@@ -2447,15 +2455,17 @@ class MainWindow(QMainWindow):
         if self._stock_lookup is None or not hasattr(self._stock_lookup, "upsert_many"):
             return
         def completed(count: int, cached: bool) -> None:
-            QMessageBox.information(self, "상장종목 목록 동기화", f"동기화 완료\n성공 날짜: {self._settings.get('krx_stock_catalog_date')}\n{'오늘 이미 받은 목록입니다.' if cached else f'{count:,}개 종목을 갱신했습니다.'}")
+            detail = "당일 키움 종목 목록을 사용했습니다." if cached else f"KIND 상장종목 {count:,}개를 갱신했습니다."
+            QMessageBox.information(self, "상장종목 목록 동기화", detail)
             self._review_pending_stock_name_changes()
-        self.statusBar().showMessage("KRX 전체 상장종목 목록을 동기화하고 있습니다.")
+        self.statusBar().showMessage("상장종목 목록과 상호변경 공시를 확인하고 있습니다.")
         self._krx_stock_catalog_worker_controller.start(
             self._stock_lookup,
             self._settings,
             completed=completed,
             history_failed=lambda message: QMessageBox.warning(self, "상호변경 이력 동기화", f"상장종목 목록은 갱신됐지만 KIND 상호변경 이력은 받지 못했습니다.\n\n{message}"),
             failed=lambda message: QMessageBox.warning(self, "상장종목 목록 동기화 실패", message),
+            now_provider=self._ranking_now,
         )
 
     def _start_daily_krx_catalog_sync(self) -> None:
@@ -2474,14 +2484,16 @@ class MainWindow(QMainWindow):
         # 받아도 market이 채워지지 않는다. 잔여 미분류를 일일 갱신 조건으로
         # 쓰면 해당 종목이 TOP20에 보일 때마다 2,700여 행을 다시 저장해
         # 메인 SQLite 조회까지 잠금 대기시키므로 성공 날짜만 기준으로 삼는다.
-        if not daily_catalog_sync_due(
+        if self._krx_catalog_done_day == today or not daily_catalog_sync_due(
             self._settings.get("krx_stock_catalog_date", DEFAULT_SETTINGS["krx_stock_catalog_date"]), today,
         ):
             if not self._is_after_hours_data_pause():
                 self._start_historical_high_loading(visible_codes)
             return
-        def completed(count: int, _cached: bool) -> None:
-            self.statusBar().showMessage(f"KRX 상장종목 {count:,}개 자동 동기화 완료")
+        def completed(count: int, cached: bool) -> None:
+            self._krx_catalog_done_day = today
+            status = "당일 키움 종목 목록 사용" if cached else f"KRX 상장종목 {count:,}개 자동 동기화 완료"
+            self.statusBar().showMessage(status)
             if hasattr(self._stock_lookup, "load_markets"):
                 self._stock_markets.update(self._stock_lookup.load_markets(
                     self._top20_realtime_codes(tuple(self._row_by_code))
@@ -2489,7 +2501,7 @@ class MainWindow(QMainWindow):
             self._top20_repair_last_started = 0.0
             self._start_top20_market_repair()
             self._review_pending_stock_name_changes()
-        self.statusBar().showMessage("최하위 작업: KRX 전체 상장종목 목록 동기화 중")
+        self.statusBar().showMessage("최하위 작업: 상장종목 목록과 상호변경 공시 확인 중")
         self._krx_stock_catalog_worker_controller.start(
             self._stock_lookup,
             self._settings,
@@ -2497,6 +2509,7 @@ class MainWindow(QMainWindow):
             history_failed=lambda message: logger.warning("KIND 상호변경 이력 자동 동기화 실패: %s", message),
             failed=lambda message: logger.warning("KRX 상장종목 자동 동기화 실패: %s", message),
             finished=lambda: None if self._is_after_hours_data_pause() else self._start_historical_high_loading(tuple(self._row_by_code)),
+            now_provider=self._ranking_now,
         )
 
     def _review_pending_stock_name_changes(self) -> None:
@@ -2649,11 +2662,61 @@ class MainWindow(QMainWindow):
         return self._app_controller.ranking_now()
 
     def _update_clock_label(self) -> None:
+        now = self._ranking_now()
+        self._schedule_journal_sync_if_due(now)
+        self._schedule_standalone_close_if_due(now)
         self._schedule_investor_backfill_if_due()
         visible = self._settings.get("show_server_clock") == "1"
         self._clock_label.setVisible(visible)
         if visible:
-            self._clock_label.setText(self._ranking_now().strftime("%H:%M:%S"))
+            self._clock_label.setText(now.strftime("%H:%M:%S"))
+
+    def _schedule_journal_sync_if_due(self, now: datetime) -> None:
+        if (self._query_only or self._closing or self._journal_command_path is None
+                or self._journal_database_path is None
+                or now.weekday() >= 5 or now.time() < clock_time(20, 5)
+                or self._journal_background_sync_day == now.date()):
+            return
+        self._journal_background_sync_day = now.date()
+        self._send_journal_command(action="sync")
+        self._ensure_journal_process()
+
+    def _schedule_standalone_close_if_due(self, now: datetime) -> None:
+        """Finalize direct-mode bars from the observed daytime cohort on the clock."""
+        if (self._query_only or self._closing or now.weekday() >= 5
+                or callable(getattr(self._market_data_client, "load_stored_minute_bars", None))
+                or self._after_close_finalization_codes or not self._minute_history_worker_controller.available
+                or self._minute_history_worker_controller.is_running):
+            return
+        if now.time() >= clock_time(20, 5):
+            target = now.date()
+        elif clock_time(7) <= now.time() < clock_time(7, 55):
+            target = previous_business_day(now.date())
+        else:
+            return
+        if (self._standalone_close_day == target or
+                (self._standalone_close_checked_at is not None
+                 and now < self._standalone_close_checked_at + timedelta(seconds=30))):
+            return
+        self._standalone_close_checked_at = now
+        if self._last_daytime_ranking is not None and self._last_daytime_ranking[0] == target:
+            codes = self._last_daytime_ranking[1]
+        else:
+            repository = self._minute_bar_repository
+            snapshots = repository.load_recent_top20_trade_value_index(
+                1, completed_only=False, trade_date=target,
+            ) if repository is not None else ()
+            codes = snapshots[-1][2] if snapshots else ()
+        _, candidates = self._finalization_candidates(codes, target=target)
+        if not candidates:
+            if not any(self._finalization_retry_after.get((target, code), now) > now for code in codes):
+                self._standalone_close_day = target
+            return
+        if not self._start_minute_history_loading(candidates, force=True):
+            return
+        self._set_close_finalization(target, candidates)
+        request = SecondaryLoadingRequest(codes, candidates, target)
+        self._on_secondary_phase_started(request, SecondaryStartPhase.FINALIZATION)
 
     def _schedule_investor_backfill_if_due(self) -> None:
         writer = self._entry_snapshot_writer
@@ -2661,13 +2724,13 @@ class MainWindow(QMainWindow):
             return
         now = self._ranking_now()
         targets: tuple[date, ...] = ()
-        if now.weekday() >= 5:
+        if now.weekday() >= 5 and clock_time(7) <= now.time() < clock_time(20):
             # 주말에는 직전 영업일의 미확정/누락 스냅샷을 언제 실행해도 보완한다.
             targets = tuple(now.date() - timedelta(days=offset) for offset in range(1, 5))
-        elif now.time() >= clock_time(20, 5):
+        elif now.weekday() < 5 and now.time() >= clock_time(20, 5):
             # 과거 버전에서 장중 임시값을 확정값으로 저장한 기록도 함께 고친다.
             targets = tuple(now.date() - timedelta(days=offset) for offset in range(0, 7))
-        elif now.time() < clock_time(7, 55):
+        elif now.weekday() < 5 and clock_time(7) <= now.time() < clock_time(7, 55):
             # 장 마감 뒤 앱을 켜지 않은 경우 주말까지 포함해 최근 날짜를 확인한다.
             targets = tuple(now.date() - timedelta(days=offset) for offset in range(1, 5))
         for target in targets:
@@ -2710,6 +2773,12 @@ class MainWindow(QMainWindow):
         self._realtime_diagnostics["worker_reconnects"] = 0
 
     def _apply_ranking_view(self, stocks: tuple[object, ...], change_summary: RankingChangeSummary, codes: tuple[str, ...]) -> None:
+        now = self._ranking_now()
+        daytime = ranking_history_due(now)
+        rank_only_codes = {stock.code for stock in stocks if not getattr(stock, "enrich", True)}
+        self._rank_only_codes = (set(getattr(self, "_rank_only_codes", ())) | rank_only_codes) - set(codes)
+        if daytime:
+            self._last_daytime_ranking = (now.date(), codes)
         self._rank_changed_codes = set(change_summary.changed_codes)
         if self._rank_changed_codes:
             changed_names = ", ".join(
@@ -2736,7 +2805,8 @@ class MainWindow(QMainWindow):
         self._row_by_code.clear()
         self._ranked_stock_names.clear()
         self._visible_theme_frequency = visible_theme_frequency(stocks, self._themes)
-        self._prepare_top20_trade_value_index(codes, self._ranking_now())
+        if daytime:
+            self._prepare_top20_trade_value_index(codes, now)
         saved_nxt: dict[str, bool] = {}
         high_date = self._ranking_now().date()
         self._pc_market_session.ensure_high_date(high_date)
@@ -2766,16 +2836,19 @@ class MainWindow(QMainWindow):
         self._nxt_checked_codes.update(saved_nxt)
         self._nxt_enabled_codes.update(code for code, enabled in saved_nxt.items() if enabled)
         self._nxt_enabled_codes.difference_update(code for code, enabled in saved_nxt.items() if not enabled)
-        self._start_market_cap_reference_loading(codes)
-        use_ranking_price = self._is_after_hours_data_pause()
+        if daytime:
+            self._start_market_cap_reference_loading(codes)
+        use_ranking_price = not daytime or self._is_after_hours_data_pause()
         for row, stock in enumerate(stocks):
             self._row_by_code[stock.code] = row
             self._ranked_stock_names[stock.code] = stock.name
             self._pc_market_session.accept_ranking_rate(stock.code, stock.change_rate)
             ranking_price = getattr(stock, "current_price", None)
-            if use_ranking_price and isinstance(ranking_price, int) and ranking_price > 0:
+            rank_only = stock.code in self._rank_only_codes
+            if (use_ranking_price or rank_only) and isinstance(ranking_price, int) and ranking_price > 0:
                 self._current_prices[stock.code] = ranking_price
-                self._app_controller.queue_price_cache(stock.code, price=ranking_price)
+                if daytime and not rank_only:
+                    self._app_controller.queue_price_cache(stock.code, price=ranking_price)
             values = (
                 str(stock.rank),
                 stock.name,
@@ -2799,11 +2872,15 @@ class MainWindow(QMainWindow):
                 item.setBackground(self._row_background_color(stock.code, row))
                 self._table.setItem(row, column, item)
             self._table.item(row, 1).setData(Qt.ItemDataRole.UserRole, stock.code)
-            self._table.item(row, 1).setData(Qt.ItemDataRole.UserRole + 2, stock.code in self._nxt_enabled_codes)
-            if stock.code in self._nxt_enabled_codes:
+            self._table.item(row, 1).setData(Qt.ItemDataRole.UserRole + 2, not rank_only and stock.code in self._nxt_enabled_codes)
+            if not rank_only and stock.code in self._nxt_enabled_codes:
                 self._table.item(row, 1).setToolTip("NXT 거래 가능")
             self._table.setCellWidget(row, 2, self._theme_badges(stock.code, stock.name))
         for stock in stocks:
+            if stock.code in self._rank_only_codes:
+                if isinstance(getattr(stock, "current_price", None), int) and stock.current_price > 0:
+                    self._render_current_price(stock.code)
+                continue
             current_price = self._current_prices.get(stock.code)
             row = self._row_by_code[stock.code]
             if current_price is not None:
@@ -2819,7 +2896,8 @@ class MainWindow(QMainWindow):
             self._sort_visible_rows_by_theme_group(True)
         self._ensure_initial_ranking_rows_visible()
         self._start_rank_changed_highlights()
-        self.statusBar().showMessage(f"조회 완료 · {len(stocks)}개 종목 · {'순위 변동 없음' if unchanged else '순위 변동 반영'} · 실시간 체결 데이터 연결 중")
+        detail = "실시간 체결 데이터 연결 중" if daytime else "순위 화면 갱신"
+        self.statusBar().showMessage(f"조회 완료 · {len(stocks)}개 종목 · {'순위 변동 없음' if unchanged else '순위 변동 반영'} · {detail}")
         self._schedule_theme_trade_summary()
 
         # 분봉·기본정보 40건 동시 보완은 모의 API 제한을 쉽게 초과하므로,
@@ -3107,6 +3185,8 @@ class MainWindow(QMainWindow):
 
 
     def _on_trade_tick(self, tick: TradeTick) -> None:
+        if not self._ranking_data_codes((tick.code,)):
+            return
         row = self._row_by_code.get(tick.code)
         # 현재 표에서는 빠졌어도 현재·다음 30초 지수 구성 종목이면 집계를
         # 계속한다. UI 갱신만 생략하고 0B 분봉 누적은 유지한다.
@@ -3155,9 +3235,14 @@ class MainWindow(QMainWindow):
 
     def _top20_realtime_codes(self, visible_codes: tuple[str, ...]) -> tuple[str, ...]:
         """표의 최신 20개와 지수에 필요한 고정 구성만 합쳐 구독한다."""
-        return self._top20_collector.realtime_codes(
-            visible_codes, enabled=self._settings.get("rank_query_type") == "5",
+        codes = self._top20_collector.realtime_codes(
+            self._ranking_data_codes(visible_codes), enabled=self._settings.get("rank_query_type") == "5",
         )
+        return self._ranking_data_codes(codes)
+
+    def _ranking_data_codes(self, codes: tuple[str, ...]) -> tuple[str, ...]:
+        excluded = getattr(self, "_rank_only_codes", ())
+        return tuple(code for code in codes if code not in excluded)
 
     def _update_top20_trade_value_index(self) -> None:
         now = self._ranking_now()
@@ -3166,7 +3251,7 @@ class MainWindow(QMainWindow):
         }
         update = self._pc_market_session.advance_top20(
             self._top20_collector, now, enabled=self._settings.get("rank_query_type") == "5",
-            visible_codes=tuple(self._row_by_code), markets=self._stock_markets,
+            visible_codes=self._ranking_data_codes(tuple(self._row_by_code)), markets=self._stock_markets,
             persist=self._app_controller.store_top20_record, subscribe=self._app_controller.start_realtime_subscription,
         )
         if not self._top20_trade_value_window.isVisible():
@@ -3288,6 +3373,7 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _start_market_cap_reference_loading(self, codes: tuple[str, ...]) -> None:
+        codes = self._ranking_data_codes(codes)
         """Restore last NAS 0B market caps once per visible symbol in the background."""
         client = self._market_data_client
         if (
@@ -3752,7 +3838,7 @@ class MainWindow(QMainWindow):
 
     def _on_program_trade_tick(self, tick: object) -> None:
         from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import ProgramTradeTick
-        if not isinstance(tick, ProgramTradeTick):
+        if not isinstance(tick, ProgramTradeTick) or not self._ranking_data_codes((tick.code,)):
             return
         self._pc_market_session.accept_program_trade(tick, self._ranking_now())
 
@@ -3814,16 +3900,9 @@ class MainWindow(QMainWindow):
     def _prepare_secondary_loading(self, codes: tuple[str, ...]) -> SecondaryLoadingRequest:
         """Prepare data and storage evidence for the controller-owned followup."""
         now = self._ranking_now()
-        if now.weekday() < 5 and now.time() >= clock_time(20, 5) and self._journal_background_sync_day != now.date():
-            self._journal_background_sync_day = now.date()
-            self._ensure_journal_process()
-            self._send_journal_command(action="sync")
         finalization_date, finalization = self._finalization_candidates(codes)
         if finalization:
-            self._after_close_finalization_codes = set(finalization)
-            self._after_close_finalization_date = finalization_date
-            self._after_close_minute_received.clear()
-            self._after_close_daily_received.clear()
+            self._set_close_finalization(finalization_date, finalization)
         after_hours_pause = self._is_after_hours_data_pause()
         # Local rows cannot restore NAS collection evidence after a process restart.
         # This path only reads stored NAS bars; direct Kiwoom clients stay paused.
@@ -3857,16 +3936,24 @@ class MainWindow(QMainWindow):
                 key = (request.finalization_date, code)
                 self._finalization_attempts[key] = self._finalization_attempts.get(key, 0) + 1
 
-    def _finalization_candidates(self, codes: tuple[str, ...]) -> tuple[date | None, tuple[str, ...]]:
+    def _set_close_finalization(self, target: date | None, codes: tuple[str, ...]) -> None:
+        self._after_close_finalization_codes = set(codes)
+        self._after_close_finalization_date = target
+        self._after_close_minute_received.clear()
+        self._after_close_daily_received.clear()
+
+    def _finalization_candidates(self, codes: tuple[str, ...], *, target: date | None = None) -> tuple[date | None, tuple[str, ...]]:
+        codes = self._ranking_data_codes(codes)
         if self._after_close_finalization_codes or not codes or self._daily_bar_repository is None:
             return None, ()
         now = self._ranking_now()
-        latest_trade_date = (
-            self._daily_bar_repository.latest_trade_date_before(codes, now.date())
-            if now.weekday() < 5 and now.hour * 60 + now.minute < 7 * 60 + 55
-            else None
-        )
-        target = finalization_target_date(now, latest_trade_date)
+        if target is None:
+            latest_trade_date = (
+                self._daily_bar_repository.latest_trade_date_before(codes, now.date())
+                if now.weekday() < 5 and now.hour * 60 + now.minute < 7 * 60 + 55
+                else None
+            )
+            target = finalization_target_date(now, latest_trade_date)
         if target is None:
             return None, ()
         cached_nxt = (
@@ -3885,6 +3972,7 @@ class MainWindow(QMainWindow):
         return after_hours_data_pause(self._ranking_now())
 
     def _start_minute_history_loading(self, codes: tuple[str, ...], *, force: bool = False) -> bool:
+        codes = self._ranking_data_codes(codes)
         if self._closing or self._ranking_execution.priority_preparing or (self._is_after_hours_data_pause() and not force) or not self._minute_history_worker_controller.available:
             return False
         if self._minute_history_worker_controller.is_running:
@@ -3903,7 +3991,7 @@ class MainWindow(QMainWindow):
         return self._minute_history_worker_controller.start(missing_codes, followup_codes=codes, forced=force)
 
     def _on_history_received(self, code: str, bars: object) -> None:
-        if not isinstance(bars, tuple):
+        if not isinstance(bars, tuple) or not self._ranking_data_codes((code,)):
             return
         now = self._ranking_now()
         update = self._pc_market_session.accept_history(
@@ -3938,6 +4026,8 @@ class MainWindow(QMainWindow):
             self._render_trade_values(code)
 
     def _on_minute_coverage_received(self, code: str, coverage: object) -> None:
+        if not self._ranking_data_codes((code,)):
+            return
         minutes, generation = self._pc_market_session.accept_coverage(code, coverage)
         if not minutes or generation is None:
             return
@@ -3955,6 +4045,7 @@ class MainWindow(QMainWindow):
             self._minute_gap_retry_timer.stop()
 
     def _start_nxt_eligibility_loading(self, codes: tuple[str, ...]) -> bool:
+        codes = self._ranking_data_codes(codes)
         if self._closing or self._ranking_execution.priority_preparing or not self._nxt_eligibility_worker_controller.available:
             return False
         if self._nxt_eligibility_worker_controller.is_running:
@@ -3972,6 +4063,8 @@ class MainWindow(QMainWindow):
         return self._nxt_eligibility_worker_controller.start(missing)
 
     def _on_nxt_eligibility_received(self, code: str, enabled: bool) -> None:
+        if not self._ranking_data_codes((code,)):
+            return
         self._nxt_checked_codes.add(code)
         if enabled:
             self._nxt_enabled_codes.add(code)
@@ -4097,6 +4190,7 @@ class MainWindow(QMainWindow):
         self._play_near_high_sound(level)
 
     def _start_daily_high_loading(self, codes: tuple[str, ...], *, force: bool = False) -> bool:
+        codes = self._ranking_data_codes(codes)
         if self._closing or self._ranking_execution.priority_preparing or not self._daily_high_worker_controller.available or self._daily_high_worker_controller.is_running:
             return self._daily_high_worker_controller.is_running
         today = self._ranking_now().date()
@@ -4125,6 +4219,8 @@ class MainWindow(QMainWindow):
         )
 
     def _on_daily_high_received(self, code: str, targets: object) -> None:
+        if not self._ranking_data_codes((code,)):
+            return
         if isinstance(targets, DailyHighTargets):
             target_day = self._after_close_finalization_date
             if (targets.collection_verified and targets.scope == "final" and target_day is not None
@@ -4244,6 +4340,7 @@ class MainWindow(QMainWindow):
             self._render_high_distance(code)
 
     def _start_historical_high_loading(self, codes: tuple[str, ...]) -> bool:
+        codes = self._ranking_data_codes(codes)
         if self._closing or self._ranking_execution.priority_preparing or not self._historical_high_worker_controller.available:
             return False
         if self._historical_high_worker_controller.is_running:
@@ -4266,6 +4363,8 @@ class MainWindow(QMainWindow):
         return self._historical_high_worker_controller.start(missing)
 
     def _on_historical_high_received(self, code: str, target: object) -> None:
+        if not self._ranking_data_codes((code,)):
+            return
         if not isinstance(target, HistoricalHighTarget) or target.price is None:
             return
         self._historical_high_prices[code] = target.price
@@ -4633,6 +4732,7 @@ class MainWindow(QMainWindow):
         return path if path.is_file() else None
 
     def _start_fundamentals_loading(self, codes: tuple[str, ...], *, force: bool = False) -> bool:
+        codes = self._ranking_data_codes(codes)
         if self._closing or self._ranking_execution.priority_preparing or not self._fundamentals_worker_controller.available:
             return False
         if self._fundamentals_worker_controller.is_running:
@@ -4650,6 +4750,8 @@ class MainWindow(QMainWindow):
         )
 
     def _on_fundamentals_received(self, code: str, fundamentals: object) -> None:
+        if not self._ranking_data_codes((code,)):
+            return
         if isinstance(fundamentals, StockFundamentals):
             # ka10001의 250일 최고가는 KRX 단독·권리 조정 전 값일 수 있다.
             # DB 저장만 보호하고 화면 메모리를 원본 응답으로 교체하면 앱 시작

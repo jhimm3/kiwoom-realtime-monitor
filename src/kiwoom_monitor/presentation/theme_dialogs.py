@@ -869,7 +869,7 @@ class ThemeManagerDialog(QDialog):
             stock_layout.addWidget(_section_separator())
             stock_layout.addWidget(_section_title("상장목록 동기화"))
             stock_layout.addWidget(sync)
-            stock_layout.addWidget(QLabel(f"마지막 동기화: {last or '없음'}"))
+            stock_layout.addWidget(QLabel(f"마지막 KIND 전체 목록 다운로드: {last or '없음'}"))
         stock_layout.addStretch()
         self._add.clicked.connect(self._add_new); self._text_import.clicked.connect(self._import_text)
         profile_row = QHBoxLayout()

@@ -10,12 +10,12 @@ import unittest
 from unittest.mock import patch
 
 
-def prepare_ipo_execution(case, store, family, phase, *, runner=False, close_terms=None):
+def prepare_ipo_execution(case, store, family, phase, *, runner=False, close_terms=None, venue='KRX'):
     from tests.unit import test_mock_automation_specification as fixtures
     from tests.unit.test_close_and_ipo import CloseAndIpoTests
     from kiwoom_monitor.application.market_session_schedule import KST, session_window_at
     from kiwoom_monitor.domain.execution_activation import CLOSE_NATIVE_PLAN_MODE, CloseMockExecutionPolicy
-    from kiwoom_monitor.domain.market_data_contract import ListingPhase
+    from kiwoom_monitor.domain.market_data_contract import ListingPhase, ListingType
     from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
     from kiwoom_monitor.domain.strategy_contract import MINUTE_SHADOW_VERSION
 
@@ -33,6 +33,8 @@ def prepare_ipo_execution(case, store, family, phase, *, runner=False, close_ter
     policy = replace(example.ipo_close if family == 'ipo_close/v1' else example.ipo_breakout,
                      listing_phases=(ListingPhase(phase),))
     listing = replace(example.listing, listing_date=example.friday - timedelta(days=phase == 'after_listing_day'))
+    if runner and phase == 'listing_day':
+        listing = replace(listing, listing_type=ListingType.KONEX_TO_KOSDAQ)
     example.listing = listing
     clock = [datetime.fromisoformat(example.signal.available_at)]
     example.entry = replace(example.entry, schedule_version=session_window_at(clock[0], venue='KRX').schedule_version)
@@ -75,6 +77,9 @@ def prepare_ipo_execution(case, store, family, phase, *, runner=False, close_ter
                                                  expected_binding_revision=inputs.binding['binding_revision'])
     terms = close_terms or CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1',
         'cancel_at_entry_deadline/v1', 'acknowledged_0B_bounded_slippage/v1')
+    if venue == 'NXT' and close_terms is None:
+        from tests.unit.test_close_order_management import management_terms
+        terms = management_terms()
     documents = fixtures.build_mock_automation_publication_documents(
         candidate_publication={'package': package.to_dict(), 'eligibility_policy': eligibility.to_dict(),
                                'eligibility_receipt': receipt.to_dict()},
@@ -84,7 +89,7 @@ def prepare_ipo_execution(case, store, family, phase, *, runner=False, close_ter
             'maximum_concurrent_strategies', 'maximum_concurrent_positions', 'maximum_capital_won',
             'maximum_daily_loss_won', 'maximum_data_gap_seconds', 'maximum_submission_unknown_count',
             'maximum_reconnect_count', 'maximum_balance_mismatch_count')},
-        execution_plan_mode=CLOSE_NATIVE_PLAN_MODE, close_execution_policy=terms)
+        execution_plan_mode=CLOSE_NATIVE_PLAN_MODE, close_execution_policy=terms, supported_venue=venue)
     from kiwoom_monitor.domain.execution_activation import (
         forward_spec_from_dict, stage_revision_from_dict, mock_automation_spec_from_dict,
     )
@@ -98,19 +103,23 @@ def prepare_ipo_execution(case, store, family, phase, *, runner=False, close_ter
         case.assertEqual(('READY', expected_change), (readiness.status.value, changed))
         case.assertEqual(stages, repository.load_stage_revisions(spec.strategy_ref))
     execution = fixtures.ExecutionRepository(store)
-    transport = fixtures._FakeBrokerTransport(lambda: clock[0])
+    transport = fixtures.native_test_transport(venue, lambda: clock[0])
+    route_options = {'local_automation_order_rejection': lambda _intent, _now: None} if venue == 'NXT' else {}
     run_id = fixtures.execution_run_id_for_spec(spec.spec_id)
-    runtime = fixtures.ExecutionRuntime(fixtures.OrderLifecycle(execution, transport, now_provider=lambda: clock[0]),
+    runtime = fixtures.ExecutionRuntime(fixtures.OrderLifecycle(execution, transport, now_provider=lambda: clock[0],
+                                                                **route_options),
         execution, account_ref=fixtures.ACCOUNT_REF, run_id=run_id, owner_token='ipo-native-test', now_provider=lambda: clock[0])
     case.addCleanup(runtime.stop)
     fixtures.admit_mock_automation(repository, repository, runtime, account_ref=fixtures.ACCOUNT_REF,
                                   spec_id=spec.spec_id, requested_at=clock[0])
     context = SimpleNamespace(store=store, example=example, spec=spec, parameters=parameters, event=event,
         repository=repository, runtime=runtime, execution=execution, transport=transport, clock=clock,
-        settings=settings, family=family, revision=0, monitor=monitor)
+        settings=settings, family=family, revision=0, monitor=monitor, route_options=route_options)
     refresh_ipo_cut(context, {})
     context.quote = {'price_won': 104, 'available_at': clock[0], 'input_ref': 'collector-trade:ipo-fixture:1:005930:1',
                      'durable': False, 'market_status': 'TRADABLE'}
+    if venue == 'NXT':
+        context.quote['venue'] = venue
     return context
 
 
@@ -311,7 +320,7 @@ class IpoMockExecutionTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 verify_ipo_breakout_native(self, self.factory(phase), phase=phase, deadline=True)
 
-async def verify_ipo_runner(case, store_factory, *, family, phase):
+async def verify_ipo_runner(case, store_factory, *, family, phase, venue='KRX'):
     import asyncio
     from tests.unit import test_mock_automation_specification as fixtures
     from kiwoom_monitor.application.close_mock_execution import close_exit_key
@@ -324,7 +333,7 @@ async def verify_ipo_runner(case, store_factory, *, family, phase):
     store = store_factory()
     case.addCleanup(store.close)
     store.initialize()
-    context = prepare_ipo_execution(case, store, family, phase, runner=True)
+    context = prepare_ipo_execution(case, store, family, phase, runner=True, venue=venue)
     clock = context.clock
     quotes = {context.event['symbol']: context.quote}
     orders, positions = {}, {}
@@ -341,7 +350,7 @@ async def verify_ipo_runner(case, store_factory, *, family, phase):
                 record = context.execution.find_by_broker_order_id('mock', fixtures.ACCOUNT_REF,
                     context.runtime.run_id, current.broker_order_id)
                 if record is not None:
-                    context.runtime.reconcile(record.intent.intent_id, current)
+                    context.runtime.reconcile(record.intent.intent_id, current, broker_venue=venue)
                 current_orders.append(current)
             account = fixtures.AccountSnapshot(fixtures.ACCOUNT_REF, 100_000,
                 sum(row.remaining_quantity * 107 for row in current_orders
@@ -397,7 +406,9 @@ async def verify_ipo_runner(case, store_factory, *, family, phase):
             case.assertEqual((fixtures.PROFILE_ID, 1, 1), (profile_id, expected_settings_revision, credential_revision))
         supervisor = MockAutomationSupervisor(context.store, SimpleNamespace(bundle=lambda _: bundle,
             require_execution_settings=require_settings), poll_seconds=3600,
-            price_source=lambda symbol: quotes.get(symbol), now_provider=lambda: clock[0])
+            price_source=lambda symbol: quotes.get(symbol), now_provider=lambda: clock[0],
+            nxt_price_source=lambda symbol: quotes.get(symbol),
+            minute_candidate_current=context.monitor.ipo_listing_basis_current)
         case.addAsyncCleanup(supervisor.close)
         case.addAsyncCleanup(gateway.close)
         await supervisor.activate(credential_profile_id=fixtures.PROFILE_ID, account_ref=fixtures.ACCOUNT_REF,
@@ -496,7 +507,8 @@ async def verify_ipo_runner(case, store_factory, *, family, phase):
     context.execution = fixtures.ExecutionRepository(context.store)
     context.repository = fixtures.ForwardEvaluationRepository(context.store)
     context.runtime = fixtures.ExecutionRuntime(fixtures.OrderLifecycle(context.execution, context.transport,
-        now_provider=lambda: clock[0]), context.execution, account_ref=fixtures.ACCOUNT_REF, run_id=context.runtime.run_id,
+        now_provider=lambda: clock[0], **context.route_options), context.execution,
+        account_ref=fixtures.ACCOUNT_REF, run_id=context.runtime.run_id,
         owner_token='ipo-runner-restored', now_provider=lambda: clock[0])
     case.addCleanup(context.runtime.stop)
     context.runtime.start(new_orders_enabled=False)
@@ -592,6 +604,18 @@ async def verify_ipo_runner(case, store_factory, *, family, phase):
 
 
 class IpoRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nxt_ipo_breakout_recovers_the_original_listing_day_plan(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        await verify_ipo_runner(self, lambda: SQLiteQueryStore(root / 'nxt-ipo-breakout.sqlite3'),
+                                family='ipo_breakout/v1', phase='listing_day', venue='NXT')
+
+    async def test_nxt_ipo_close_recovers_the_gap_reduction_and_remaining_plan(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        await verify_ipo_runner(self, lambda: SQLiteQueryStore(root / 'nxt-ipo.sqlite3'),
+                                family='ipo_close/v1', phase='listing_day', venue='NXT')
+
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
 

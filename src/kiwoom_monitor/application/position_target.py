@@ -15,7 +15,7 @@ from kiwoom_monitor.domain.order_contract import (
     AccountSnapshot, OrderIntent, PlannedOrderIntent, OrderPlanRef, OrderSide, OrderState, OrderType, TERMINAL_ORDER_STATES,
 )
 from kiwoom_monitor.infrastructure.persistence.execution_repository import (
-    ExecutionRecord, MemberExecutionRecord, amendment_from_document, broker_leg_from_document,
+    ExecutionRecord, MemberExecutionRecord, amendment_from_document, broker_leg_from_document, execution_broker_venue,
 )
 
 
@@ -580,7 +580,8 @@ def reconcile_position_account_observation(recovery, before, after, *, input_ref
     if len(broker) != len(recovery.orders): reasons.append("duplicate_broker_order_identity")
     local, physical = {}, {}
     for record in after:
-        if record.intent.account_ref != account.account_ref or record.intent.environment != "mock" or record.intent.venue != "KRX":
+        if (record.intent.account_ref != account.account_ref or record.intent.environment != 'mock'
+                or record.intent.venue not in {'KRX', 'NXT', 'SOR'}):
             raise ValueError("account order ledger scope mismatch")
         if record.broker_legs:
             for leg in record.broker_legs:
@@ -656,15 +657,17 @@ def reconcile_position_account_observation(recovery, before, after, *, input_ref
         quantity = next(iter(quantities)) if len(quantities) == 1 else expected_quantity if not quantities else 0
         side = next(iter(sides)) if len(sides) == 1 else record.intent.side if not sides and record else None
         price = next(iter(prices)) if len(prices) == 1 else expected_price if not prices else None
-        venue = next(iter(venues)) if len(venues) == 1 else record.intent.venue if not venues and record else "UNKNOWN"
+        expected_venue = execution_broker_venue(record) if record is not None else None
+        venue = next(iter(venues)) if len(venues) == 1 else expected_venue if not venues and expected_venue else 'UNKNOWN'
         if record is None: unmapped.append(snapshot.broker_order_id)
         if record is not None and (quantity != expected_quantity or side != record.intent.side
-                                  or price != expected_price or venue != record.intent.venue
+                                  or price != expected_price or venue != expected_venue
                                   or (leg is not None and any(d.original_broker_order_id is not None
                                       and d.original_broker_order_id != (leg.original_broker_order_id or None) for d in metadata))):
             reasons.append("broker_local_order_details_mismatch")
         if (side is None or quantity <= 0 or snapshot.filled_quantity + snapshot.remaining_quantity > quantity
-                or snapshot.remaining_quantity <= 0 or venue != "KRX"):
+                or snapshot.remaining_quantity <= 0 or venue not in {'KRX', 'NXT'}
+                or venue == 'NXT' and venues != {'NXT'}):
             reasons.append("broker_open_order_basis_incomplete")
         if metadata and not prices: reasons.append("broker_order_price_unknown")
         if side is OrderSide.BUY and price is None: reasons.append("open_buy_reservation_unverified")

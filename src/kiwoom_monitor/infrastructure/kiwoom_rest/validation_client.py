@@ -357,6 +357,9 @@ class ParallelValidationClient:
     def load_stored_nxt_eligibility(self, code: str):
         return self._stored_primary("load_stored_nxt_eligibility", code)
 
+    def load_stored_premarket_catalog(self, day: str):
+        return self._stored_primary("load_stored_premarket_catalog", day)
+
     def load_stored_market_index(self, market: str, trading_date: str):
         return self._stored_primary("load_stored_market_index", market, trading_date)
 

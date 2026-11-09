@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from itertools import chain
 from typing import Literal
 
-from kiwoom_monitor.application.market_session_schedule import MarketPhase, MarketSession
+from kiwoom_monitor.application.market_session_schedule import MarketPhase, MarketSession, TradingDayEvidence, trading_day_as_of
+from kiwoom_monitor.application.news_material import MaterialNews, material_state_revision, official_filing_ref
 from kiwoom_monitor.application.research_replay import KrxMinuteBarFrame
 from kiwoom_monitor.domain.time_basis import KST, aware_iso_kst
 
@@ -63,6 +64,117 @@ class PanicNewsProof:
                 raise ValueError("PANIC news timestamps must include their timezone")
         if any(not ref.strip() for ref in self.evidence_refs):
             raise ValueError("PANIC news evidence references must be nonempty")
+
+
+@dataclass(frozen=True)
+class PanicPriorSession:
+    """Calendar bounds for evidence from the previous KRX trading day's close."""
+
+    previous_close: datetime
+    opens_at: datetime
+    expires_at: datetime
+    evidence_refs: tuple[str, ...]
+
+    def contains_filing(self, effective_at: datetime) -> bool:
+        return (self.previous_close <= effective_at < self.opens_at
+                and effective_at.astimezone(KST).date() == self.previous_close.astimezone(KST).date())
+
+    def permits(self, effective_at: datetime, cut: datetime) -> bool:
+        return self.opens_at <= cut < self.expires_at and self.contains_filing(effective_at)
+
+
+def _panic_prior_session_bounds(
+    calendar: tuple[TradingDayEvidence, ...], cut: datetime,
+) -> PanicPriorSession | None:
+    """Freeze the adjacent KRX session bounds using the calendar visible by the open."""
+    day = cut.astimezone(KST).date()
+    today = trading_day_as_of(day, venue="KRX", as_of=cut, evidence=calendar)
+    regular = next((item for item in (today.sessions or ()) if item.session == MarketSession.KRX_REGULAR
+                    and item.permits("continuous_trade")), None) if today is not None else None
+    if regular is None:
+        return None
+    today = trading_day_as_of(day, venue="KRX", as_of=regular.starts_at, evidence=calendar)
+    if today is None or regular not in (today.sessions or ()):
+        return None
+
+    previous_day = day - timedelta(days=1)
+    previous = trading_day_as_of(previous_day, venue="KRX", as_of=regular.starts_at, evidence=calendar)
+    while previous is not None and previous.sessions == ():
+        previous_day -= timedelta(days=1)
+        previous = trading_day_as_of(previous_day, venue="KRX", as_of=regular.starts_at, evidence=calendar)
+    close = next((item for item in (previous.sessions or ()) if item.permits("regular_close")), None) if previous else None
+    if close is None:
+        return None
+    expires = regular.ends_at + timedelta(microseconds=1)
+    return PanicPriorSession(close.ends_at, regular.starts_at, expires, (previous.revision_id, today.revision_id))
+
+
+def panic_prior_session(
+    calendar: tuple[TradingDayEvidence, ...], cut: datetime, window: int | str,
+) -> PanicPriorSession | None:
+    """Apply the explicitly requested Paper comparison window."""
+    bounds = _panic_prior_session_bounds(calendar, cut)
+    if bounds is None or window == "session":
+        return bounds
+    expires = min(bounds.expires_at, bounds.opens_at + timedelta(minutes=min(window, 24 * 60)))
+    return replace(bounds, expires_at=expires)
+
+
+def panic_prior_official_adverse(
+    material: MaterialNews, symbol: str, cut: datetime, calendar: tuple[TradingDayEvidence, ...],
+) -> dict:
+    """Report official adverse filings known by the open as supplemental evidence."""
+    bounds = _panic_prior_session_bounds(calendar, cut)
+    if bounds is None or bounds.opens_at > cut:
+        return {"status": "UNKNOWN", "events": []}
+
+    events = []
+    for root, current, effect, rows in material.as_of(symbol, bounds.opens_at):
+        if effect != "FUNDAMENTAL_ADVERSE":
+            continue
+        basis = material_state_revision(rows)
+        if (basis is None or basis.stage not in {"CONFIRMED", "WITHDRAWN"}
+                or not bounds.contains_filing(basis.effective_at) or not official_filing_ref(basis.source_ref)):
+            continue
+        events.append({
+            "event_ref": root, "revision_ref": current.ref, "source_ref": basis.source_ref,
+            "body_ref": basis.source_version, "effect": effect, "stage": basis.stage,
+            "effective_at": basis.effective_at.isoformat(), "available_at": basis.available_at.isoformat(),
+        })
+    return {
+        "status": "OBSERVED" if events else "UNKNOWN", "events": events,
+        "previous_close": bounds.previous_close.isoformat(), "opens_at": bounds.opens_at.isoformat(),
+        "calendar_refs": list(bounds.evidence_refs),
+    }
+
+
+def material_panic_proofs(
+    material, symbol: str, cut: datetime, *, prior_session: PanicPriorSession | None = None,
+) -> tuple[PanicNewsProof, ...]:
+    dispositions = {"NONFUNDAMENTAL": "supported_nonfundamental", "FUNDAMENTAL_ADVERSE": "fundamental_adverse"}
+    day = cut.astimezone(KST).date()
+    proofs = []
+    for root, current, effect, rows in material.as_of(symbol, cut):
+        if effect not in dispositions:
+            continue
+        basis = (material_state_revision(rows) if current.correction is not None
+                 and current.correction.outcome == "TERMS_ONLY" else current)
+        if basis is None:
+            continue
+        carried = (
+            prior_session is not None and effect == "FUNDAMENTAL_ADVERSE"
+            and prior_session.permits(basis.effective_at, cut) and basis.available_at <= prior_session.opens_at
+            and (basis.stage == "WITHDRAWN"
+                 or basis.stage == "CONFIRMED" and official_filing_ref(basis.source_ref))
+        )
+        if basis.effective_at.date() == day or carried:
+            refs = tuple(ref for row in rows for ref in (row.ref, row.source_ref))
+            refs += tuple(row.correction.body_ref for row in rows if row.correction is not None)
+            if carried:
+                refs += prior_session.evidence_refs
+            proofs.append(PanicNewsProof(symbol, "material-news/v1", root, current.ref, basis.effective_at,
+                                         cut, dispositions[effect], tuple(dict.fromkeys(refs))))
+    return tuple(proofs)
 
 
 def parse_panic_parameters(document: Mapping, *, paper_request: bool = False):
@@ -133,6 +245,7 @@ def evaluate_panic_rebound(
     rules: PanicReboundRules, news_proofs: Iterable[PanicNewsProof] = (),
     setup: PanicSetup | None = None, position_opened_at: datetime | None = None,
     allow_unresolved_news: bool = False,
+    prior_session: PanicPriorSession | None = None,
 ) -> PanicReboundDecision:
     """Decide on completed closes. The caller owns orders, fills and session closure."""
     bar = evaluation_bar
@@ -151,7 +264,7 @@ def evaluate_panic_rebound(
         result = _confirm_setup(bar, start, cutoff, rules, setup, history)
         if result.action != "ENTER":
             return result
-        return _with_news(result, bar.code, cutoff, news_proofs, allow_unresolved_news)
+        return assess_panic_news(result, bar.code, cutoff, news_proofs, allow_unresolved_news, prior_session)
 
     window = _complete_window(history, start, rules.lookback_minutes)
     if not window:
@@ -172,7 +285,7 @@ def evaluate_panic_rebound(
     if rules.variant == "P1":
         return PanicReboundDecision("ARM", "panic_waiting_for_next_completed_close", setup, refs)
     result = PanicReboundDecision("ENTER", "panic_decline_reached", setup, refs)
-    return _with_news(result, bar.code, cutoff, news_proofs, allow_unresolved_news)
+    return assess_panic_news(result, bar.code, cutoff, news_proofs, allow_unresolved_news, prior_session)
 
 
 def _bar_times(bar: KrxMinuteBarFrame) -> tuple[datetime, datetime, datetime]:
@@ -259,9 +372,9 @@ def _confirm_setup(
     return PanicReboundDecision("ENTER", "panic_next_completed_close_recovered", setup, refs)
 
 
-def _with_news(
+def assess_panic_news(
     decision: PanicReboundDecision, symbol: str, cutoff: datetime, proofs: Iterable[PanicNewsProof],
-    allow_unresolved: bool,
+    allow_unresolved: bool, prior_session: PanicPriorSession | None = None,
 ) -> PanicReboundDecision:
     eligible: list[tuple[datetime, PanicNewsProof]] = []
     for row in proofs:
@@ -269,7 +382,9 @@ def _with_news(
             continue
         if row.effective_at is not None:
             effective = row.effective_at.astimezone(KST)
-            if effective.date() != cutoff.date() or effective > cutoff:
+            carried = (prior_session is not None and row.source == "material-news/v1"
+                       and row.disposition == "fundamental_adverse" and prior_session.permits(effective, cutoff))
+            if effective > cutoff or (effective.date() != cutoff.date() and not carried):
                 continue
         if row.available_at is None:
             if allow_unresolved:
@@ -341,7 +456,7 @@ def matches_panic_shadow(parameters: Mapping, event: Mapping) -> bool:
         elif (price <= setup.trigger_close or event['reference_revision_id'] == setup.trigger_revision_id
                 or cutoff < setup.trigger_bar_start + 2 * _MINUTE):
             return False
-        expected = _with_news(PanicReboundDecision('ENTER', reason, setup, setup.input_refs), setup.symbol, cutoff, proofs, False)
+        expected = assess_panic_news(PanicReboundDecision('ENTER', reason, setup, setup.input_refs), setup.symbol, cutoff, proofs, False)
         return (expected.action == 'ENTER' and event['decision_reasons'] == [reason]
                 and all(ref in refs for ref in expected.input_refs))
     except (KeyError, TypeError, ValueError):

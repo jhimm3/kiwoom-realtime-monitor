@@ -8,6 +8,69 @@
 지속 campaign·자동 가설·다기간 bundle·실제 RSS 확인과 CPU batch 양보는 구현되어 있다. 실제 NAS 전체 규모·PC 24시간 운전 검증과는 구분한다.
 최우선 자료 확보 계획은 [과거 자료 확보](HISTORICAL_BACKFILL_PLAN.md)에 있다. 새 원천의 봉·뉴스를 기존 관측 replay와 같은 의미로 자동 편입하지 않는다.
 
+## MICRO 과거 VI 입력
+
+NAS의 `historical-market-context/v1` 보관본에서 필요한 종목과 거래일만 골라 동결한다. `--manifest`는 해당 보관 판본의 `manifest.json`이다. 실행은 로컬에서 하며 읽기 전용 보관본에 결과를 쓰지 않는다.
+
+```powershell
+$env:PYTHONPATH = 'src;.'
+python -m scripts.prepare_micro_historical_vi --manifest <보관판본의-manifest.json> `
+  --symbol 005930 --date 2019-02-14 --output micro-005930-20190214.json
+```
+
+출력된 파일과 `dataset_sha256`을 기존 `micro_experiment` 요청의 `dataset`, `dataset_sha256`에 넣는다. 매매 조건은 기존 `micro-policy/v1`에서 명시한다. 이미 동결한 호가·체결·VI 해제 증거가 있다면 `--scenario <기존-동결-입력.json>`으로 같은 종목의 자료에 결합할 수 있다. 기존 판단 컷을 사용하며 컷을 명시하지 않은 입력은 선택 거래일 끝까지 본다.
+
+`historical_vi`는 종목·거래일·보관 판본과 VI 발동·해제·발동가·방향을 함께 보존한다. 해제 전 컷에는 해제시각을 표시하지 않는다. 분봉이나 호가의 시퀀스에 VI 행을 끼워 넣지 않는다. 같은 스트림에 발동 근거가 있으면 그 기록을 쓴다. 발동이 빠졌을 때는 별도 순서가 확인된 해제 이벤트가 같은 종목의 과거 해제 초에 유일하게 일치하는 경우에만 보관 발동 근거를 사용한다. 주문 체결 판단에는 별도로 확인된 해제 체결가와 기존 호가·체결 근거가 필요하다. `no_rows_at_cut`은 컷까지 보관 행이 없음을, `outside_archive`는 보관 기간 밖임을 뜻한다.
+
+연구 실행기와 결과 화면은 동결된 입력만 읽으므로 이후 NAS DB 교체와 별개로 같은 사례를 다시 실행할 수 있다.
+
+## MICRO 과거 KIND 거래정지 근거
+
+동결 MICRO HTTP 평가에서 명시한 `decision_at`의 KST 거래일과 종목에 해당하는 장후 보완 완료 문서를 확인한다. KIND로 종일 거래정지를 확인하고 원 일봉 거래량 0을 함께 저장한 경우만 `CONFIRMED_FULL_DAY_HALT`로 표시한다. 자료가 없거나 날짜·거래소가 다르면 미확인으로 두고, 같은 날 체결 자료가 함께 있으면 상충을 표시한다. 장후 확인 시각을 보존하며 장중 전략 판단에 사용하지 않는다.
+
+독립 실행에서도 같은 설명을 남기려면 응답 `historical_kind_halt.receipt`를 동결 시나리오의 `kind_halt_receipt`에 넣고, 해당 시나리오 파일의 새 `dataset_sha256`을 계산해 `micro_experiment`에 전달한다. 기존 장후 근거에 재개 시각이 없으면 재개 상태도 미확인으로 남는다.
+
+<a id="panic-dd-material-news-input"></a>
+
+## 낙주·DD의 비AI 뉴스 사건 비교
+
+낙주 `panic_rebound/v1`의 격리 연구 요청은 `strategy.material_news` 배열과 `news_proofs: []`를 사용할 수 있다. DD의 합성 실행과 동결 일봉 요청, DD setup HTTP는 `material_news: {"event_ref": "최초 근거 ID", "revisions": [...]}`를 사용할 수 있다. DD는 선택한 원래 사건만 추적한다. 기존 `catalyst`와 `material_news`는 한 요청에 함께 쓰지 않는다.
+
+각 행에는 `symbol`, 고유 `ref`, 앞 판본 `revises` 또는 최초의 `null`, `stage`, `effect`, `effective_at`, `available_at`, `source_ref`, `source_version`을 넣는다. `stage`는 `REPORT`, `CONFIRMED`, `CORRECTED`, `WITHDRAWN`이다. `effect`는 원문과 규칙 또는 사람이 확인한 사실을 `UNKNOWN`, `NONFUNDAMENTAL`, `FUNDAMENTAL_ADVERSE`, `INTACT`, `DAMAGED` 중 하나로 기록한다. 참조에는 저장 기사·공시의 ID와 판본을 사용한다. 사건 관계나 효과를 확인할 수 없으면 미확인으로 보존한다. 같은 기사의 재보도가 확정 판본을 덮지 않으며, 정정·철회는 앞 판본에 대한 명시적인 연결을 요구한다. 시각은 오프셋이 있어야 하며 판단에 아직 도착하지 않은 판본은 제외한다.
+
+비교할 때 같은 시세·수량·비용을 두고 낙주는 기존 격리 연구의 `panic_allow_unresolved_news`와 뉴스 입력 유무를 명시한다. DD는 기존 `require_intact_catalyst`를 비교 조건으로 명시할 수 있다. 뉴스가 있어도 DD의 기존 뉴스 필수 옵션을 끄면 가격 판단은 같은 경로를 사용한다. 판본의 효과 분류, 실시간 자동 공급, 매매 정책 선택은 구분한다. 이 입력은 낙주의 주문용 명세나 Shadow에서 받지 않는다.
+
+낙주 일반 Paper에서 전 거래일 장후 공식 악재를 비교하려면 `strategy.material_news`와 함께 `strategy.panic_previous_session_news`를 사용한다. 필드를 생략하면 기존 당일 판정, 양의 정수는 KRX 개장부터 지정한 분 수가 되기 전까지, `"session"`은 KRX 정규 접속매매가 끝날 때까지 전 거래일 악재를 진입에 반영한다. 정수 `30`은 30분 가설을 의미한다. 기존 당일 자료의 판단과 보유 중 청산 규칙은 각 비교에서 같다.
+
+`strategy_references`에는 전 거래일 KRX 종가 경매 종료, 이번 거래일 정규 개장·종료, 사이의 휴장일 근거를 넣는다. 개장까지 확인한 일정으로 전 거래일을 찾으며 중간 거래일·휴장일을 확인할 수 없으면 이월 근거는 미확인으로 둔다. 전 거래일 정규장 종료 이후 발생하고 이번 개장까지 확인한 `FUNDAMENTAL_ADVERSE` 판본을 이월한다. 기존 `WITHDRAWN` 해지와 공식 KIND·DART 공시 주소를 근거로 한 `CONFIRMED` 악재가 대상이다. 원공시 날짜와 가용시각을 구분하고 과거 수신시각을 가정했으면 연구 결과에 표시한다. 금액·비중·일정만 바뀐 정정은 앞선 해지 상태와 이월 시간을 유지한다. 가용해진 정정에서 같은 계약의 해지 철회가 확정되면 기존 해지 근거의 진입 차단을 해제한다. 방향 미확인 정정의 처리는 기존 뉴스 비교 설정을 따른다. 이 옵션은 일반 Paper 비교에서만 사용하며 연구 결과에 선택 범위를 기록한다.
+
+### 저장된 뉴스 이력에서 자동 준비
+
+기존 뉴스 이력 조회의 `article`, `event`, `body` 응답을 각각 JSON으로 저장한다. 필요한 페이지는 같은 옵션을 반복해 전달한다. 원공시 링크가 있는 본문을 쓰려면 `body` 이력도 넘긴다. AI 결과 이력은 입력으로 사용하지 않는다.
+
+```powershell
+$env:PYTHONPATH = 'src;.'
+python -m scripts.prepare_strategy_news_material --article-history articles.json `
+  --event-history events.json --body-history bodies.json `
+  --symbol 042660 --dd-event-ref <원래-사건의-ref> --output material.json
+```
+
+결과의 `revisions`는 낙주의 `strategy.material_news`, `dd`는 DD의 `material_news`에 넣는다. `--dd-event-ref`는 기존 DD 재료를 명시할 때만 사용한다. 원공시 링크가 없는 정정·철회, 서로 다른 공식 공시가 RULE에서만 유사하게 묶인 경우, 확인되지 않는 시각은 `unresolved`에 남는다. 본문이나 RULE을 뒤늦게 확인하면 그 근거가 가용해진 시각을 쓴다.
+
+공급계약 해지 정정은 보관한 공식 본문의 `filing_url`과 `filing_html` 또는 `filing_rows`를 `body` 이력에 넣으면 정정 전후 표를 비교한다. `filing_url`은 기사 판본과 같은 공식 공시를 가리켜야 한다. `body_revision_id`에는 보관 원문 판본 ID를 넣는다. 이 값이 없으면 공식 공시 URL을 사용한다. 결과의 선택 필드 `correction`은 `outcome`, 바뀐 항목·정정 전·정정 후의 배열 `changes`, `body_ref`, 늦게 읽은 본문이 보강하는 제목 판본 `supersedes`를 보존한다. `TERMS_ONLY`는 계약 상태를 유지하고, `TERMINATION_REVOKED`는 연결된 계약의 해지가 철회된 것으로 읽는다. 가처분이나 정정 내용을 확인할 수 없는 경우는 `UNKNOWN`으로 남는다. 본문이 늦게 도착하면 그 이전의 판단 기록은 그대로 유지한다.
+
+신규 수집의 공식 DART·KIND 링크는 기존 본문 작업으로 받아 원문과 종목별 계약 판정 근거를 함께 보관한다. 당시 자료를 쓰는 낙주 Shadow와 DD `dd-shadow-setup-evidence/v2`는 원문 저장이 수락된 시각부터 근거를 읽는다. DD는 저장된 사건이 하나이면 그 상태를 평가에 표시한다. 여러 사건 중 하나를 선택하려면 응답 `contract_events`의 `event_ref`를 요청의 `material_event_ref`로 전달한다. 동결 비교의 `material_news`를 제공하면 그 입력을 쓰며 두 입력은 동시에 사용할 수 없다. DD 상태 표시는 뉴스 필수 여부와 매매 가중치의 결정과 구분한다.
+
+`단일판매·공급계약체결` 정정의 공식 본문이 해지 통지 수령 또는 그 통지의 취소를 확정하면 저장·동결 연구에서 같은 종목의 계약명·상대방·최초 수주일로 앞선 해지와 연결한다. 취소는 앞선 해지와 취소 원문이 모두 가용해진 시각부터 반영한다. 금액·일정만 바뀌거나 계약 연결을 확인할 수 없으면 확정 효과를 만들지 않는다. [삼부토건 실제 원문과 로컬 비교](architecture/app-target-20261023.md#contract-award-revision-material).
+
+### 돌파·테마·종가베팅·신규주 연구에서 함께 보기
+
+위 준비기의 `revisions`를 일반 Paper 요청의 `strategy.material_news`에 넣는다. 돌파·테마·일반 종가베팅·신규주 종가베팅·신규주 돌파는 현재 종목에서 판단 컷까지 확인된 재료 판본을 진입 판단과 보유 중 판단의 `strategy_material_news/v1` 스냅샷에 남긴다. 보유 중에는 진입 판단 당시 판본과 그 뒤에 확인한 신규·변경 판본을 구분한다. 공시가 매수 체결 전이라도 진입 판단 뒤에 도착했으면 뒤에 확인한 판본이다. 다른 종목이나 판단 이후에 가용해진 판본은 제외한다.
+
+기존 B3의 `require_catalyst: true` 조건을 실험할 때는 `strategy.material_event_ref`에 사용할 사건의 최초 `ref`를 명시한다. 별도 `catalyst` proof를 같은 요청에 넣지 않는다. 선택한 사건이 해당 종목에서 유지되면 기존 재료 조건을 통과할 수 있다. 훼손·철회되면 기존 조건을 통과하지 않고, 상태를 확인할 수 없으면 미확인으로 표시한다. `breakout_filter_comparison`에서도 B3 항목에 같은 필드를 넣을 수 있다. B0~B2의 조건과 테마 관계, 종가·신규주 매매 규칙은 기존 설정을 따른다. 뉴스 포함 여부와 선택한 사건은 결과 메타데이터에 기록한다.
+
+종가베팅의 장후 자료는 다음 판단의 근거 기록에 붙인다. 뉴스만으로 다음 장 청산 방식을 정하는 정책은 아직 없다. 이 Paper 입력은 주문 후보용 Shadow 설정에서 받지 않는다.
+
 ## 역사 복원 시간순 분할 계획
 
 `plan_historical_research_split.py`는 `historical_reconstruction_strategy/v1` 입력의 완성 사례를 통째로 시간순 배정한다. TRAIN·VALIDATION 사례 수는 명시하고 나머지는 최소 한 사례의 OOS로 남긴다. 계획은 source dataset ID와 revision hash에 결합되며 OOS 상태는 항상 `SEALED`, 결과 포함은 false다. 이 계획 생성은 전략 실행이나 OOS 접근이 아니다.
@@ -571,7 +634,11 @@ S5 이전 구현 hash와 RunSpec 형태를 보존한다. 따라서 완료된 기
 하며, 등록되지 않은 venue/profile/phase는 거부하거나 `UNSUPPORTED`/`UNKNOWN`으로
 남긴다.
 
-앱의 `전략 연구` 창은 모든 조건을 한 번에 고정한 JSON 파일을 읽는다. 화면에서 파일을 선택하면 경로, 전략 버전, 비용 출처·유효기간, 시간순 평가 구간을 먼저 검사하고 별도 프로세스에서 실행한다. `fixed_bps/v2`의 수수료·매도세·슬리피지는 소수 bp의 JSON 문자열로 기록하며, 수수료는 매수·매도 양쪽에 적용한다. 기존 `fixed_bps/v1` 정수 bp 요청은 호환해 읽는다. 아래 숫자는 형식 설명용 예시이며 운영 추천값이 아니다. 실제 연구에서는 사용자가 검토한 값과 해당 기간에 맞는 비용 근거로 바꿔야 한다.
+<a id="default-research-cost"></a>
+
+앱의 `전략 연구` 창은 조건을 고정한 JSON 파일을 읽는다. 화면에서 파일을 선택하면 경로, 전략 버전, 비용 출처·유효기간, 시간순 평가 구간을 검사하고 별도 프로세스에서 실행한다. `execution.cost_model`을 생략하면 합의한 연구 기본값인 매수 0.015%, 매도 0.215%를 적용한다. 수수료는 양쪽 1.5bp, 매도세는 매도에만 20bp이며 추가 슬리피지는 0bp다. 첫 평가 구간 시작부터 마지막 구간 끝까지 적용하며 실행 입력에는 출처 `agreed_research_cost/v1`와 추정 비용임을 기록한다. `scripts.run_research`에서도 세 비용률 옵션을 함께 생략하면 이 기본값을 쓴다.
+
+명시한 비용 모델은 재현에 우선한다. `fixed_bps/v2`의 수수료·매도세·슬리피지는 소수 bp의 JSON 문자열로 기록하고 기존 `fixed_bps/v1` 정수 bp 요청도 읽는다. DD와 MICRO의 체결 증거에서 `fee_won`을 생략하면 같은 기본 추정 비용을 계산한다. DD의 매수 호가에 `buy_unit_cost_won`이 없으면 기본 수수료를 주당 원 단위로 올려 예산을 예약하고, 체결 비용은 실제 증거 수량과 가격에 적용해 계산한다. 명시한 체결 비용과 단가를 보존하며, 청산 체결이 확인된 경우에만 실현손익을 낸다.
 
 ```json
 {
@@ -708,3 +775,14 @@ S5 이전 구현 hash와 RunSpec 형태를 보존한다. 따라서 완료된 기
 손절·목표 체결은 `UNSUPPORTED`, horizon 자료가 wall-clock상 연속하지 않으면
 실행 종료 시 `CENSORED`(진행 중이면 `PENDING`)로 남긴다. VI 주문 가능 여부와
 부분체결은 아직 재현하지 않으며 결과 문서의 `limitations`에 남는다.
+<a id="kind-listing-references"></a>
+
+## KIND 상장 근거의 연구 파일 준비
+
+실행 PC에 저장된 KIND 공시·정정 및 상장 유형 근거를 기존 거래일 달력 파일과 합칠 수 있다. 기준 시각을 KST 오프셋과 함께 명시한다. 원본 DB와 기존 기준 파일은 읽기 전용이며 새 파일과 SHA-256이 나온다. 연구 요청의 `strategy_references`에는 이 파일과 SHA-256을 지정한다. 유형이 확인되기 전의 상장일 공시는 불완전 근거로 남는다.
+
+신규주 돌파·종가베팅에는 상장 첫날의 `konex_to_kosdaq` 근거를 공모 여부와 관계없이 사용할 수 있다. KIND의 코넥스 상장폐지 사유와 코스닥 상장 공시에서 종목코드와 효력일을 대조한다. 이전 경로가 없는 기존 `transfer` 행은 계속 읽을 수 있으며, 별도 근거가 확인될 때까지 신규주 표본에서 제외된다. 재상장 및 코스피 이전도 신규주 표본에서 제외한다. 보완된 가격 자료와 상장 근거의 확인 시점은 각각 보존한다.
+
+```powershell
+python -m scripts.prepare_kind_listing_references --database <pc.sqlite3> --references <base.json> --output <frozen.json> --as-of <ISO-8601>
+```

@@ -57,6 +57,8 @@ WS_BASE_URLS = {
 REALTIME_ITEMS_PER_GROUP = 100
 REALTIME_ITEMS_PER_TYPE = 200
 REALTIME_REG_INTERVAL_SECONDS = 0.25
+MICRO_OBSERVATION_SECONDS = 60
+MICRO_INDICATIVE_HISTORY_LIMIT = 256
 SUBSCRIPTION_ACK_TIMEOUT_SECONDS = 15.0
 LATEST_CHECKPOINT_SECONDS = 300
 LATEST_CHECKPOINT_OFFSET_SECONDS = 10
@@ -173,12 +175,14 @@ class CentralRealtimeCollector:
         subscription_observer: RealtimeSubscriptionObserver | None = None,
         input_observer: RealtimeCollectorInputObserver | None = None,
         micro_book_codes: tuple[str, ...] = (),
+        closing_auction_source=None,
     ) -> None:
         if any(not isinstance(code, str) or len(code) != 6 or not code.isascii() or not code.isalnum()
                or code != code.upper() for code in micro_book_codes):
             raise ValueError("MICRO 호가 종목은 대문자 영숫자 여섯 자리여야 합니다.")
         self._micro_book_codes = frozenset(micro_book_codes)
         self._micro_books: dict[str, tuple[datetime, int, OrderBookTick]] = {}
+        self._micro_indicative_history: dict[str, deque[tuple[datetime, int, str | None, int | None, int | None]]] = {}
         self._micro_book_registration_failed = False
         self._subscription_observer = subscription_observer
         self._input_observer = input_observer
@@ -201,6 +205,7 @@ class CentralRealtimeCollector:
         self._snapshot_task: asyncio.Task[None] | None = None
         self._pending_snapshots: dict[tuple[str, str], dict[str, Any]] = {}
         self._latest_snapshots: dict[tuple[str, str], dict[str, Any]] = {}
+        self._automation_venue_trades: dict[tuple[str, str], dict[str, Any]] = {}
         self._pending_account_entry_symbols: dict[tuple[str, str], dict[str, Any]] = {}
         self._pending_stock_references: dict[str, dict[str, Any]] = {}
         self._pending_market_history: dict[
@@ -212,6 +217,7 @@ class CentralRealtimeCollector:
         self._pending_minute_finalizations: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self._pending_closing_auction_prices: dict[tuple[str, int], tuple] = {}
         self._closing_minute = None
+        self._closing_auction_source = closing_auction_source
         self._last_closing_prices: dict[str, int] = {}
         self._minute_bars = MinuteBarAccumulator()
         # Individual 0B receipts, owned by this collector; never persisted as bars.
@@ -597,6 +603,7 @@ class CentralRealtimeCollector:
         reset_sources = sources if reset_all else added_sources
         for key in removed_sources | reset_sources:
             self._ram_stock_references.pop(key, None)
+            self._automation_venue_trades.pop(key, None)
         if reset_all or added_sources or removed_sources:
             self._ram_observation_generation += 1
         self._minute_bars.reset_cumulative_sources(reset_sources)
@@ -860,6 +867,7 @@ class CentralRealtimeCollector:
                 raise
             finally:
                 self._micro_books.clear()
+                self._micro_indicative_history.clear()
                 if progress is not None and not batch_closed:
                     if recording is not None:
                         recording.end_batch(self,batch,encode_groups(progress.groups),
@@ -917,8 +925,10 @@ class CentralRealtimeCollector:
         self._minute_bars.mark_capture_gap()
         self._ram_observation_generation += 1
         self._ram_observation_gap_at = self._now_provider()
+        self._automation_venue_trades.clear()
         self._ram_stock_references.clear()
         self._micro_books.clear()
+        self._micro_indicative_history.clear()
         self._ram_trades.clear()
         self._ram_trade_baselines.clear()
 
@@ -933,7 +943,9 @@ class CentralRealtimeCollector:
         grouping into second bars. FID14's million-KRW delta stays separate.
         """
         key = (tick.code, str(tick.market or 'KRX').upper())
-        if not self._ram_trade_retention_seconds or key not in self._approved_trade_sources:
+        if key not in self._approved_trade_sources or not (
+            self._ram_trade_retention_seconds or self._micro_trade_scope(*key)
+        ):
             return
         if self._ram_trades and received_at < self._ram_trades[-1]['available_at']:
             self._ram_trades.clear()
@@ -972,9 +984,7 @@ class CentralRealtimeCollector:
         self._ram_trade_baselines[key] = (observed.date(), tick.cumulative_volume,
                                          tick.cumulative_trade_value, signature, observed)
         self._ram_trade_sequence += 1
-        start = received_at - self._ram_trade_retention_seconds
-        while self._ram_trades and self._ram_trades[0]['available_at'] < start:
-            self._ram_trades.popleft()
+        self._trim_ram_trades(received_at)
         if len(self._ram_trades) >= 10000:
             self._ram_trades.popleft()
             self._ram_observation_gap_at = now
@@ -1001,15 +1011,27 @@ class CentralRealtimeCollector:
             self._ram_observation_owner = owner if seconds else None
         if seconds == 0:
             self._ram_retention_since = None
-            self._ram_trades.clear()
-            self._ram_trade_baselines.clear()
+            self._ram_trades = deque(row for row in self._ram_trades if self._micro_trade_scope(row['code'], row['market']))
+            self._ram_trade_baselines = {key: value for key, value in self._ram_trade_baselines.items()
+                                         if self._micro_trade_scope(*key)}
         elif self._ram_retention_since is None or seconds > previous:
             self._ram_retention_since = self._now_provider()
+
+    def _micro_trade_scope(self, code: str, market: str) -> bool:
+        return market == "KRX" and code in self._micro_book_codes and not self._micro_book_registration_failed
+
+    def _trim_ram_trades(self, at: float) -> None:
+        seconds = self._ram_trade_retention_seconds or (
+            MICRO_OBSERVATION_SECONDS if self._micro_book_codes and not self._micro_book_registration_failed else 0
+        )
+        while self._ram_trades and self._ram_trades[0]['available_at'] < at - seconds:
+            self._ram_trades.popleft()
 
     def _prune_micro_books(self, approved: set[tuple[str, str | None]]) -> None:
         for code in tuple(self._micro_books):
             if ("0D", code) not in approved:
                 del self._micro_books[code]
+                self._micro_indicative_history.pop(code, None)
 
     def _observe_micro_books(self, admitted: dict[str, Any]) -> None:
         books = parse_order_book_ticks(admitted)
@@ -1018,6 +1040,16 @@ class CentralRealtimeCollector:
             for book in books:
                 if book.item == book.code and book.code in self._micro_book_codes:
                     self._micro_books[book.code] = (at, self._ram_observation_generation, book)
+                    history = self._micro_indicative_history.get(book.code)
+                    if history is None:
+                        history = self._micro_indicative_history[book.code] = deque(maxlen=MICRO_INDICATIVE_HISTORY_LIMIT)
+                    if history and at < history[-1][0]:
+                        history.clear()
+                    start = at - timedelta(seconds=MICRO_OBSERVATION_SECONDS)
+                    while history and history[0][0] < start:
+                        history.popleft()
+                    history.append((at, self._ram_observation_generation, book.quote_time,
+                                    book.indicative_price_won, book.auction_indicative_price_won))
 
     def _micro_book_snapshot(self, codes: tuple[str, ...], start: float, end: float) -> tuple[dict[str, Any], ...]:
         rows = []
@@ -1030,6 +1062,15 @@ class CentralRealtimeCollector:
                 rows.append({**asdict(book), "subscription_market": "KRX", "available_at": received.isoformat(),
                              "time_precision": book.time_precision, "generation": generation})
         return tuple(rows)
+
+    def _micro_indicative_snapshot(self, codes: tuple[str, ...], start: float, end: float) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            {"code": code, "subscription_market": "KRX", "generation": generation,
+             "available_at": at.isoformat(), "quote_time": quote_time, "price_23": price, "price_291": auction_price}
+            for code in codes
+            for at, generation, quote_time, price, auction_price in self._micro_indicative_history.get(code, ())
+            if start <= at.timestamp() <= end
+        )
 
     def ram_observation_snapshot(self, codes: tuple[str, ...] | None, *, seconds: int,
                                  include_trade_references: bool = False, include_closed_minutes: bool = False,
@@ -1045,19 +1086,26 @@ class CentralRealtimeCollector:
         if type(seconds) is not int or not 1 <= seconds <= 60 or len(set(codes)) > 200:
             raise ValueError("RAM observation cut/scope exceeds the budget")
         start = (at - timedelta(seconds=seconds)).timestamp()
-        retained_start = (at - timedelta(seconds=self._ram_trade_retention_seconds)).timestamp()
-        while self._ram_trades and self._ram_trades[0]['available_at'] < retained_start:
-            self._ram_trades.popleft()
+        end = at.timestamp()
+        self._trim_ram_trades(end)
         rows = tuple(dict(row) for row in self._ram_trades if row['code'] in codes
-                     and start <= datetime.fromisoformat(row['observed_at']).timestamp() <= at.timestamp()
-                     and row['available_at'] <= at.timestamp())
+                     and start <= datetime.fromisoformat(row['observed_at']).timestamp() <= end
+                     and row['available_at'] <= end
+                     and (self._ram_trade_retention_seconds
+                          or include_micro_books and self._micro_trade_scope(row['code'], row['market'])))
+        retention_since = self._ram_retention_since
+        if retention_since is None and include_micro_books:
+            retention_since = min((self._continuous_from[(code, "KRX")] for code in codes
+                                   if self._micro_trade_scope(code, "KRX") and (code, "KRX") in self._continuous_from),
+                                  default=None)
         day = at.astimezone(timezone(timedelta(hours=9))).date().isoformat()
         self._ram_stock_references = {
             key: reference for key, reference in self._ram_stock_references.items()
             if key in self._approved_trade_sources and reference["trading_date"] == day
         }
         return {
-            **({"micro_books": self._micro_book_snapshot(codes, start, at.timestamp()),
+            **({"micro_books": self._micro_book_snapshot(codes, start, end),
+                "micro_indicative_history": self._micro_indicative_snapshot(codes, start, end),
                 "micro_book_registration_failed": self._micro_book_registration_failed} if include_micro_books else {}),
             **({'closed_minute_observations':self._minute_bars.closed_observation_snapshot(codes,at=at,
                 approved_sources=self._approved_trade_sources)} if include_closed_minutes else {}),
@@ -1069,7 +1117,7 @@ class CentralRealtimeCollector:
             "decision_time": at.isoformat(), "rows": rows, "input_resolution": "0B",
             "approved_sources": tuple(sorted(self._approved_trade_sources)),
             "continuous_from": dict(self._continuous_from),
-            "retention_since": self._ram_retention_since, "gap_at": self._ram_observation_gap_at,
+            "retention_since": retention_since, "gap_at": self._ram_observation_gap_at,
             "stock_references": tuple(dict(value) for (code, _), value in sorted(self._ram_stock_references.items())
                                       if code in codes and value["available_at"] <= at.timestamp()),
             "durable": False,
@@ -1136,18 +1184,27 @@ class CentralRealtimeCollector:
                     self._pending_snapshots[(name, item_key)] = snapshot
                     self._latest_snapshots[(name, item_key)] = snapshot
                 if name == "trade":
+                    route = (code, value.market)
+                    if value.market in {'KRX', 'NXT'} and route in self._approved_trade_sources:
+                        self._automation_venue_trades[route] = snapshot
                     boundary = False
+                    auction = None
                     if self._store is not None and value.market == 'KRX':
-                        day = datetime.fromtimestamp(snapshot['received_at'], KST).date()
-                        if self._closing_minute is None or self._closing_minute[0] != day:
-                            self._closing_minute = (day, krx_regular_session_hours(day)[1].strftime('%H%M'))
+                        received = datetime.fromtimestamp(snapshot['received_at'], KST)
+                        day = received.date()
+                        if self._closing_auction_source is not None:
+                            auction = self._closing_auction_source(received)
+                        if (self._closing_minute is None or self._closing_minute[0] != day
+                                or self._closing_minute[2] is not auction):
+                            close_time = auction.ends_at.time() if auction else krx_regular_session_hours(day)[1]
+                            self._closing_minute = (day, close_time.strftime('%H%M'), auction)
                             self._last_closing_prices.clear()
                         boundary = (str(value.trade_time)[:4] == self._closing_minute[1]
                                     and self._last_closing_prices.get(code) != value.current_price)
                     if self._automation_price_listener is not None or boundary:
-                        observation = self.automation_price_observation(code)
+                        observation = self.automation_price_observation(code, venue=value.market)
                         if boundary:
-                            close = closing_auction_price_observation(value, observation)
+                            close = closing_auction_price_observation(value, observation, window=auction)
                             if close is not None:
                                 key, point = close
                                 self._last_closing_prices[code] = point.value['price_won']
@@ -1221,22 +1278,26 @@ class CentralRealtimeCollector:
         """One existing Supervisor, no subscriptions, queues, tasks or persistence."""
         self._automation_price_listener = listener
 
-    def automation_price_observation(self, code: str):
-        """Borrow the latest approved KRX trade; no seconds/DB/subscription work."""
-        source = (code, 'KRX')
-        row = self._latest_snapshots.get(('trade', code))
+    def automation_price_observation(self, code: str, *, venue: str = 'KRX'):
+        """Borrow the last approved trade from the requested venue."""
+        source = (code, venue)
+        row = self._automation_venue_trades.get(source)
+        if row is None and venue == 'KRX':
+            row = self._latest_snapshots.get(('trade', code))
         if self._credential_paused or source not in self._approved_trade_sources or row is None:
             return None
         payload = row['event']['payload']
         at = datetime.fromtimestamp(row['received_at'], KST)
         since = self._continuous_from.get(source)
-        if (payload.get('market') != 'KRX' or type(payload.get('current_price')) is not int
+        if (payload.get('market') != venue or type(payload.get('current_price')) is not int
                 or payload['current_price'] <= 0 or since is None or at < since
                 or self._ram_observation_gap_at is not None and at < self._ram_observation_gap_at):
             return None
+        subject = code if venue == 'KRX' else f'{code}:{venue}'
         return {'price_won': payload['current_price'], 'available_at': at,
-                'input_ref': f'collector-trade:{self._ram_source_id}:{self._ram_observation_generation}:{code}:{row["received_at"]}',
-                'market_status': 'TRADABLE', 'durable': False}
+                'input_ref': f'collector-trade:{self._ram_source_id}:{self._ram_observation_generation}:{subject}:{row["received_at"]}',
+                'market_status': 'TRADABLE', 'durable': False,
+                **({'venue': venue} if venue != 'KRX' else {})}
 
     def initial_realtime_snapshots(
         self, persisted: list[dict[str, Any]], codes: list[str],

@@ -133,6 +133,7 @@ def build_mock_automation_publication_documents(
     execution_plan_mode: str | None = None,
     close_execution_policy: CloseMockExecutionPolicy | None = None,
     panic_execution_policy: PanicMockExecutionPolicy | None = None,
+    supported_venue: str = 'KRX',
 ) -> dict[str, Any]:
     """Build the explicit PC-owned READY publication; this performs no I/O."""
     package = candidate_package_from_dict(_mapping(candidate_publication, "package"))
@@ -230,7 +231,7 @@ def build_mock_automation_publication_documents(
         binding_revision=int(binding.get("binding_revision", 0)),
         binding_verified_at=binding_verified_at, frozen_at=frozen_at,
         shadow_evidence_ref=stages[-1].revision_id,
-        supported_venue="KRX", session_profile=session_profile, data_path="nas",
+        supported_venue=supported_venue, session_profile=session_profile, data_path="nas",
         candidate_transition_policy=MOCK_CANDIDATE_TRANSITION_POLICY,
         stop_policy=MOCK_STOP_POLICY, recovery_policy=MOCK_RECOVERY_POLICY,
         unfilled_execution_policy=unfilled_execution_policy,

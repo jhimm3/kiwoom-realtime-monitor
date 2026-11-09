@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterator, Mapping
 
 from kiwoom_monitor.application.market_session_schedule import mock_order_entry_decision
 from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
+from kiwoom_monitor.domain.execution_activation import CloseExitCalendarRecheck
 from kiwoom_monitor.domain.order_contract import (
     AccountSnapshot,
     BrokerOrderSnapshot,
@@ -24,7 +25,9 @@ from kiwoom_monitor.domain.order_contract import (
     PlannedOrderIntent,
     TERMINAL_ORDER_STATES,
 )
-from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRecord, ExecutionRepository
+from kiwoom_monitor.infrastructure.persistence.execution_repository import (
+    ExecutionRecord, ExecutionRepository, execution_broker_legs, execution_broker_venue,
+)
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
 from .market_observations import KST, as_kst
 
@@ -35,20 +38,31 @@ if TYPE_CHECKING:
     )
 
 
+class AutomationViBuyBlocked(ValueError):
+    """A buy needs to be reconsidered after the latest VI observation."""
+
+
 class ExecutionRuntime:
     def __init__(
         self, lifecycle: OrderLifecycle, repository: ExecutionRepository,
         *, account_ref: str, run_id: str, owner_token: str,
         now_provider: Callable[[], datetime] = lambda: datetime.now(KST),
+        buy_vi_rejection: Callable[[str, datetime], str | None] | None = None,
+        rehearsal_lease_now: Callable[[], datetime] | None = None,
     ) -> None:
         if not account_ref.strip() or not run_id.strip() or not owner_token.strip():
             raise ValueError("account_ref, run_id and owner_token are required")
         self._lifecycle = lifecycle
         self._repository = repository
+        self._environment = 'real' if getattr(repository, 'local_order_rehearsal', False) is True else 'mock'
+        if rehearsal_lease_now is not None and self._environment != 'real':
+            raise ValueError('separate lease clock is restricted to local rehearsal')
+        self._lease_now = rehearsal_lease_now or self.server_now
         self.account_ref = account_ref
         self.run_id = run_id
         self.owner_token = owner_token
         self._now = now_provider
+        self._buy_vi_rejection = buy_vi_rejection
         self._active = False
         self._lease_seconds = 60
         self._operation_lock = RLock()
@@ -104,10 +118,10 @@ class ExecutionRuntime:
                 raise RuntimeError("MOCK_RUNTIME_RETIRED")
             if new_orders_enabled is not None:
                 self._new_orders_enabled = bool(new_orders_enabled)
-            now = self.server_now()
+            now = self._lease_now()
             self._lease_seconds = max(1, lease_seconds)
             self._active = self._repository.claim_runtime(
-                "mock", self.account_ref, self.run_id, self.owner_token, now, self._lease_seconds,
+                self._environment, self.account_ref, self.run_id, self.owner_token, now, self._lease_seconds,
             )
             if not self._active:
                 raise RuntimeError("another mock execution runtime owns this account and run")
@@ -115,7 +129,7 @@ class ExecutionRuntime:
                 self._repository.bind_runtime_owner(self.account_ref, self.run_id, self.owner_token)
             except Exception:
                 self._active = False
-                self._repository.release_runtime("mock", self.account_ref, self.run_id, self.owner_token)
+                self._repository.release_runtime(self._environment, self.account_ref, self.run_id, self.owner_token)
                 raise
 
     def set_new_orders_enabled(self, enabled: bool) -> None:
@@ -128,7 +142,7 @@ class ExecutionRuntime:
         # The bundle owner must drain gateway/monitor work before releasing its lease.
         with self._operation_lock, self._state_lock, self._observe_operation():
             self._active, self._new_orders_enabled, self._retired = False, False, True
-            return self._repository.release_runtime("mock", self.account_ref, self.run_id, self.owner_token)
+            return self._repository.release_runtime(self._environment, self.account_ref, self.run_id, self.owner_token)
 
     def heartbeat(self) -> None:
         # A slow order must not prevent lease renewal while its network call finishes.
@@ -136,8 +150,8 @@ class ExecutionRuntime:
             if not self._active:
                 raise RuntimeError("mock execution runtime has not acquired ownership")
             if not self._repository.claim_runtime(
-                "mock", self.account_ref, self.run_id, self.owner_token,
-                self.server_now(), self._lease_seconds,
+                self._environment, self.account_ref, self.run_id, self.owner_token,
+                self._lease_now(), self._lease_seconds,
             ):
                 self._active = False
                 raise RuntimeError("mock execution ownership was lost")
@@ -151,7 +165,7 @@ class ExecutionRuntime:
             self._require_active(intent)
             if not self._new_orders_enabled:
                 raise RuntimeError("MOCK_NEW_ORDERS_DISABLED")
-            self._repository.save_account_snapshot("mock", account, self.server_now())
+            self._repository.save_account_snapshot(self._environment, account, self.server_now())
             self._lifecycle.queue(intent)
             return self._lifecycle.submit(intent.intent_id, account, reference_price=reference_price)
 
@@ -171,7 +185,7 @@ class ExecutionRuntime:
 
     def load_active_intents(self, *, _reader: Any = None) -> tuple[ExecutionRecord, ...]:
         reader_args = {} if _reader is None else {"_reader": _reader}
-        return self._repository.active_intents("mock", self.account_ref, self.run_id, **reader_args)
+        return self._repository.active_intents(self._environment, self.account_ref, self.run_id, **reader_args)
 
     def load_account_active_intents(self):
         return self._repository.account_active_intents(self.account_ref)
@@ -207,6 +221,8 @@ class ExecutionRuntime:
         plan_recovery: MockAccountRecovery | None = None,
     ) -> ExecutionRecord:
         """Submit one approved automation intent without leaving the account gate open."""
+        if self._environment != "mock":
+            raise ValueError("production mock plans cannot enter local rehearsal")
         with self._operation_lock, self._observe_operation():
             if isinstance(intent, PlannedOrderIntent):
                 if replacement_claim is not None:
@@ -218,6 +234,7 @@ class ExecutionRuntime:
             self._require_active(intent)
             if self._new_orders_enabled:
                 raise RuntimeError("MOCK_AUTOMATION_REQUIRES_CLOSED_ORDER_GATE")
+            vi_precheck = self._automation_vi_precheck(intent)
             self._repository.bind_automation_control(
                 spec_id=spec_id, control_revision=control_revision,
                 replacement_claim=replacement_claim,
@@ -226,7 +243,7 @@ class ExecutionRuntime:
             self._new_orders_enabled = True
             try:
                 try:
-                    self._repository.save_account_snapshot("mock", account, self.server_now())
+                    self._repository.save_account_snapshot(self._environment, account, self.server_now())
                     self._lifecycle.queue(intent)
                 finally:
                     # The control revision is consumed by the durable QUEUED claim.
@@ -234,6 +251,7 @@ class ExecutionRuntime:
                     self._repository.clear_automation_control()
                 return self._lifecycle.submit(
                     intent.intent_id, account, reference_price=reference_price,
+                    **({"before_submission_claim": vi_precheck} if vi_precheck is not None else {}),
                 )
             finally:
                 self._new_orders_enabled = False
@@ -254,6 +272,7 @@ class ExecutionRuntime:
             return existing
         if recovery is None or recovery.account != account:
             raise ValueError("planned order requires the exact broker recovery snapshot")
+        vi_precheck = self._automation_vi_precheck(intent)
         self._repository.bind_automation_control(
             spec_id=spec_id, control_revision=control_revision, plan_recovery=recovery,
             **({"protection_claim": protection_claim} if protection_claim is not None else {}),
@@ -262,42 +281,64 @@ class ExecutionRuntime:
             record, first_claim = self._lifecycle.queue_planned(intent)
             if not first_claim:
                 return record
-            return self._lifecycle.submit(
-                intent.intent_id, account,
-                after_submission_claim=self._repository.clear_automation_control,
-            )
+            try:
+                return self._lifecycle.submit(
+                    intent.intent_id, account,
+                    after_submission_claim=self._repository.clear_automation_control,
+                    **({"before_submission_claim": vi_precheck} if vi_precheck is not None else {}),
+                )
+            except CloseExitCalendarRecheck:
+                self._lifecycle.release_queued_plan(record)
+                raise
         finally:
             self._repository.clear_automation_control()
 
-    def reconcile(self, intent_id: str, snapshot: BrokerOrderSnapshot) -> ExecutionRecord:
+    def check_automation_buy_vi(self, symbol: str, observed_at: datetime) -> None:
+        if self._buy_vi_rejection is not None and (reason := self._buy_vi_rejection(symbol, observed_at)):
+            raise AutomationViBuyBlocked(reason)
+
+    def _automation_vi_precheck(self, intent: OrderIntent) -> Callable[[], str | None] | None:
+        source = self._buy_vi_rejection
+        if source is None or intent.side is not OrderSide.BUY:
+            return None
+        self.check_automation_buy_vi(intent.symbol, intent.created_at)
+        return lambda: source(intent.symbol, intent.created_at)
+
+    def reconcile(self, intent_id: str, snapshot: BrokerOrderSnapshot, *, broker_venue=None) -> ExecutionRecord:
         with self._operation_lock, self._observe_operation():
             record = self._repository.load(intent_id)
             if record is None:
                 raise KeyError(f"unknown order intent: {intent_id}")
             self._require_active(record.intent)
-            return self._lifecycle.reconcile(intent_id, snapshot)
+            if not self._matches_broker_venue(record, broker_venue):
+                raise ValueError('broker snapshot did not confirm the original venue')
+            return self._lifecycle.reconcile(intent_id, snapshot,
+                **({'broker_venue': broker_venue} if record.intent.venue == 'SOR' else {}))
 
-    def reconcile_by_broker_order(self, snapshot: BrokerOrderSnapshot) -> ExecutionRecord | None:
+    def reconcile_by_broker_order(self, snapshot: BrokerOrderSnapshot, *, broker_venue=None,
+                                  broker_details=()) -> ExecutionRecord | None:
         scope = (self._repository.broker_reconciliation_scope()
                  if type(self._repository) is ExecutionRepository else nullcontext())
         with scope as connection:
             connection_args = {} if connection is None else {"_connection": connection}
             record = self._repository.find_by_broker_order_id(
-                "mock", self.account_ref, self.run_id, snapshot.broker_order_id, **connection_args,
+                self._environment, self.account_ref, self.run_id, snapshot.broker_order_id, **connection_args,
             )
-            if record is None or record.intent.run_id != self.run_id:
+            if (record is None or record.intent.run_id != self.run_id
+                    or not self._matches_broker_venue(record, broker_venue, broker_details)):
                 return None
             with self._operation_lock, self._observe_operation():
                 self._require_active(record.intent, **connection_args)
                 # Start a fresh read after the lease commit, even on the same session.
-                return self._lifecycle.reconcile(record.intent.intent_id, snapshot, **connection_args)
+                return self._lifecycle.reconcile(record.intent.intent_id, snapshot, **connection_args,
+                    **({'broker_venue': broker_venue} if record.intent.venue == 'SOR' else {}))
 
     def recover_amendments(self, recovery: MockAccountRecovery, records=None) -> int:
         """Bind broker facts/replay retained fills under the same run owner; never transmit."""
         if recovery.account.account_ref != self.account_ref:
             raise ValueError("amendment recovery account mismatch")
         active = records if records is not None else self._repository.active_intents(
-            "mock", self.account_ref, self.run_id)
+            self._environment, self.account_ref, self.run_id)
         selected = [record for record in active if record.intent.run_id == self.run_id
                     and record.amendment is not None and record.amendment.reconciliation_pending]
         if not selected:
@@ -310,13 +351,32 @@ class ExecutionRuntime:
                     self._lifecycle.recover_amendment(record.intent.intent_id, recovery)
             return self.observation_revision - before
 
-    def observe_amendment_fill(self, snapshot, *, original_broker_order_id, side):
+    @staticmethod
+    def _matches_broker_venue(record, broker_venue, broker_details=()):
+        intent = record.intent
+        if intent.venue == 'SOR':
+            if broker_venue not in {'KRX', 'NXT'}:
+                return False
+            stored = execution_broker_venue(record)
+            if stored is not None:
+                return broker_venue == stored
+            return bool(record.broker_order_id and broker_details) and all(
+                (item.broker_order_id, item.venue, item.side, item.ordered_quantity, item.limit_price)
+                == (record.broker_order_id, broker_venue, intent.side, intent.quantity, intent.limit_price)
+                and item.venue_confirmed and not item.original_broker_order_id and not item.reasons
+                for item in broker_details)
+        if intent.environment != 'mock':
+            return True  # LocalOrderRehearsal already owns its broker scope.
+        return (broker_venue in {None, 'KRX'} if intent.venue == 'KRX' else broker_venue == intent.venue)
+
+    def observe_amendment_fill(self, snapshot, *, original_broker_order_id, side, broker_venue=None):
         with self._operation_lock:
             if not original_broker_order_id:
                 return None
             record = self._repository.find_by_broker_order_id(
-                "mock", self.account_ref, self.run_id, original_broker_order_id)
-            if record is None or record.amendment is None or not record.amendment.unresolved:
+                self._environment, self.account_ref, self.run_id, original_broker_order_id)
+            if (record is None or record.amendment is None or not record.amendment.unresolved
+                    or not self._matches_broker_venue(record, broker_venue)):
                 return None
             self._require_active(record.intent)
             with self._observe_operation():
@@ -330,6 +390,41 @@ class ExecutionRuntime:
                 raise KeyError(f"unknown order intent: {intent_id}")
             self._require_active(record.intent)
             return self._lifecycle.cancel(intent_id, quantity)
+
+    def manage_rehearsal_limit(self, intent_id: str, decide) -> ExecutionRecord:
+        """Reassess a single confirmed working leg under the existing order owner."""
+        if self._environment != 'real':
+            raise ValueError('local rehearsal runtime required')
+        with self.automation_decision_guard(), self._observe_operation():
+            record = self._repository.load(intent_id)
+            if record is None:
+                raise KeyError(f'unknown order intent: {intent_id}')
+            self._require_active(record.intent)
+            if record.state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}:
+                return record
+            active = [leg for leg in execution_broker_legs(record)
+                      if leg.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED} and leg.remaining_quantity]
+            if len(active) != 1:
+                return record
+            leg = active[0]
+            valid, price = decide(record, leg)
+            if valid is False:
+                return self._lifecycle.cancel(intent_id, broker_order_id=leg.broker_order_id)
+            if valid is not True or price is None or price == leg.limit_price:
+                return record
+            previous = record.amendment
+            if (previous is not None and previous.status == 'REJECTED'
+                    and (previous.broker_order_id, previous.limit_price) == (leg.broker_order_id, price)):
+                return record
+            return self._lifecycle.amend(intent_id, leg.remaining_quantity, price, broker_order_id=leg.broker_order_id)
+
+    def release_unsent_plan(self, expected):
+        with self._operation_lock, self._observe_operation():
+            self._require_active(expected.intent)
+            current = self._repository.load(expected.intent.intent_id)
+            if current == expected and current.state is OrderState.QUEUED:
+                return self._lifecycle.release_queued_plan(current)
+            return current
 
     def manage_close_order(self, expected, *, spec_id, control_revision, build_claim):
         """One current-condition claim on the existing owned order, never a replacement entry."""
@@ -352,9 +447,13 @@ class ExecutionRuntime:
             try:
                 with self._observe_operation():
                     if assessment['action'] == 'AMEND':
+                        vi_check = {}
+                        if self._buy_vi_rejection is not None and record.intent.side is OrderSide.BUY:
+                            quote_at = datetime.fromisoformat(assessment['quote']['available_at'])
+                            vi_check["before_amendment_claim"] = lambda: self.check_automation_buy_vi(record.intent.symbol, quote_at)
                         return self._lifecycle.amend(record.intent.intent_id, assessment['quantity'], assessment['limit_price'],
                             broker_order_id=assessment['broker_order_id'], assessment=assessment,
-                            after_amendment_claim=self._repository.clear_automation_control)
+                            after_amendment_claim=self._repository.clear_automation_control, **vi_check)
                     return self._lifecycle.cancel(record.intent.intent_id, broker_order_id=assessment['broker_order_id'],
                         after_cancel_claim=self._repository.clear_automation_control)
             finally:
@@ -447,15 +546,21 @@ class ExecutionRuntime:
         with self._state_lock:
             if not self._active:
                 raise RuntimeError("mock execution runtime has not acquired ownership")
-            if intent.environment != "mock" or intent.account_ref != self.account_ref or intent.run_id != self.run_id:
+            if intent.environment != self._environment or intent.account_ref != self.account_ref or intent.run_id != self.run_id:
                 raise ValueError("intent does not belong to this mock runtime")
+            if (intent.environment == 'mock' and intent.venue in {'NXT', 'SOR'}
+                    and not self.supports_automation_venue(intent.venue)):
+                raise ValueError(f'{intent.venue}_AUTOMATION_REQUIRES_LOCAL_FAKE_BROKER')
             connection_args = {} if _connection is None else {"_connection": _connection}
             if not self._repository.claim_runtime(
-                "mock", self.account_ref, self.run_id, self.owner_token,
-                self.server_now(), self._lease_seconds, **connection_args,
+                self._environment, self.account_ref, self.run_id, self.owner_token,
+                self._lease_now(), self._lease_seconds, **connection_args,
             ):
                 self._active = False
                 raise RuntimeError("mock execution ownership was lost")
+
+    def supports_automation_venue(self, venue: str) -> bool:
+        return self._lifecycle.supports_automation_venue(venue)
 
 
 class ManualMockOrderGateway:

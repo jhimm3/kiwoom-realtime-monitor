@@ -8,10 +8,13 @@ import logging
 import uuid
 from dataclasses import asdict
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import datetime, time
+from threading import Lock
 from typing import Any, Callable, Protocol
 
-from kiwoom_monitor.domain.time_basis import as_kst, kst_now
+from kiwoom_monitor.domain.market_data_contract import kiwoom_vi_phase, kiwoom_vi_venue
+from kiwoom_monitor.domain.time_basis import as_kst, aware_iso_kst, kst_now
+from kiwoom_monitor.infrastructure.exchange_effective_dates import kind_trading_state
 from kiwoom_monitor.infrastructure.kiwoom_rest.realtime import ViEvent, parse_vi_events
 
 from .async_lifetime import owned_create_task
@@ -22,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 class MarketEventStore(Protocol):
     def append_vi_events(self, values: list[dict[str, Any]]) -> int: ...
+    def load_kind_trading_notices(self, symbol: str, cut: datetime) -> list[dict] | None: ...
 
 
 class MarketEventService:
@@ -36,6 +40,9 @@ class MarketEventService:
         self._now = lambda: as_kst(now_provider())
         self._background: set[asyncio.Task[None]] = set()
         self._vi_inflight: dict[str, asyncio.Future[bool]] = {}
+        self._vi_lock = Lock()
+        self._vi_day = None
+        self._vi_status: dict[tuple[str, str], tuple[time, datetime | None]] = {}
         self._close_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -71,9 +78,57 @@ class MarketEventService:
             return False
         events = parse_vi_events(message)
         if events:
+            received_at = self._now()
+            self._observe_automation_vi(events, received_at)
             self._spawn(self._save_live_vi_events([self._vi_value(value) for value in events]),
                         "vi-live-store")
         return bool(events)
+
+    def automation_buy_vi_rejection(self, symbol: str, observed_at: datetime) -> str | None:
+        """Borrow same-day VI facts without a TR or a database read."""
+        day = self._now().date()
+        with self._vi_lock:
+            if self._vi_day != day:
+                return None
+            states = tuple(self._vi_status.get((symbol, venue)) for venue in ("KRX", "SOR"))
+        for state in states:
+            if state is not None and state[1] is None:
+                return "vi_active"
+        if any(state is not None and state[1] is not None and observed_at <= state[1] for state in states):
+            return "vi_requires_new_observation"
+        return None
+
+    def automation_buy_market_rejection(self, symbol: str, observed_at: datetime) -> str | None:
+        """Only the BUY precheck reads committed KIND evidence; VI stays in RAM."""
+        if reason := self.automation_buy_vi_rejection(symbol, observed_at):
+            return reason
+        cut = self._now()
+        state = kind_trading_state(self._store.load_kind_trading_notices(symbol, cut), cut)
+        if state["state"] == "HALTED":
+            return "kind_trading_halt"
+        if state["state"] == "RESUME_TIME_REACHED" and as_kst(observed_at) < aware_iso_kst(state["ends_at"]):
+            return "kind_halt_requires_new_observation"
+        return None
+
+    def _observe_automation_vi(self, events: tuple[ViEvent, ...], received_at: datetime) -> None:
+        with self._vi_lock:
+            if self._vi_day != received_at.date():
+                self._vi_day = received_at.date()
+                self._vi_status.clear()
+            for event in events:
+                venue = kiwoom_vi_venue(event.exchange, event.raw_values.get("9001"))
+                if venue not in {"KRX", "SOR"}:
+                    continue
+                phase = kiwoom_vi_phase(event.raw_values, received_clock=received_at.time())
+                if phase is None:
+                    continue
+                trigger = phase.trigger_time
+                key = (event.code, venue)
+                previous = self._vi_status.get(key)
+                if previous is not None and (trigger < previous[0]
+                        or trigger == previous[0] and previous[1] is not None):
+                    continue
+                self._vi_status[key] = (trigger, received_at if phase.release_time is not None else None)
 
     async def _backfill_vi(self) -> None:
         with (self._capture_scope(self, "market_events", "vi_backfill", actor_per_invocation=True)

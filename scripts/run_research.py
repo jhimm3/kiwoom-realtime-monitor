@@ -15,6 +15,7 @@ from kiwoom_monitor.application.research_execution import (
     COST_MODEL_VERSION, EXECUTION_MODEL_VERSION, SAME_BAR_PATH_VERSION,
     PaperExecutionEngine, SimulationCostModel, SimulationExecutionConfig,
 )
+from kiwoom_monitor.domain.simulation_contract import COST_MODEL_DECIMAL_VERSION, default_research_cost_model
 from kiwoom_monitor.application.research_splits import (
     ResearchEvaluationSpec, DevelopmentPartitionSpec, DEVELOPMENT_PARTITION_VERSION,
 )
@@ -61,13 +62,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cooldown-seconds", required=True, type=int)
     parser.add_argument("--execution-model-version", default=EXECUTION_MODEL_VERSION)
     parser.add_argument("--same-bar-path-version", default=SAME_BAR_PATH_VERSION)
-    parser.add_argument("--cost-model-version", default=COST_MODEL_VERSION)
+    parser.add_argument("--cost-model-version")
     parser.add_argument("--initial-cash-won", required=True, type=int)
     parser.add_argument("--memory-mb", default=512, type=int)
     parser.add_argument("--cpu-duty-percent", default=50, type=int)
-    parser.add_argument("--commission-bps", required=True)
-    parser.add_argument("--sell-tax-bps", required=True)
-    parser.add_argument("--slippage-bps", required=True)
+    parser.add_argument("--commission-bps")
+    parser.add_argument("--sell-tax-bps")
+    parser.add_argument("--slippage-bps")
     parser.add_argument("--cost-rate-basis", default="unspecified")
     parser.add_argument("--cost-source", default="")
     parser.add_argument("--cost-valid-from", default="")
@@ -85,6 +86,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--result-connection', type=Path)
     parser.add_argument('--result-owner')
     args = parser.parse_args(argv)
+    rates = (args.commission_bps, args.sell_tax_bps, args.slippage_bps)
+    explicit_cost = any(rate is not None for rate in rates)
+    if explicit_cost and any(rate is None for rate in rates):
+        parser.error('explicit costs require commission, sell tax and slippage rates together')
+    if not explicit_cost and (args.cost_model_version not in (None, COST_MODEL_DECIMAL_VERSION)
+            or args.cost_rate_basis != 'unspecified' or args.cost_source or args.cost_valid_from or args.cost_valid_to):
+        parser.error('explicit cost metadata requires explicit rates')
     delivery_target = None
     if bool(args.result_connection) != (args.result_owner is not None):
         parser.error('--result-connection and --result-owner must be supplied together')
@@ -122,25 +130,26 @@ def main(argv: list[str] | None = None) -> int:
     resource_guard = ResearchResourceGuard(ResearchResourceLimits(args.memory_mb, args.cpu_duty_percent))
     resource_guard.preflight(research_input_encoded_bytes(args.dataset))
     dataset = load_research_input(args.dataset, session_profile=args.session_profile, checkpoint=resource_guard.checkpoint)
-    execution = SimulationExecutionConfig(
-        version=args.execution_model_version,
-        same_bar_path_version=args.same_bar_path_version,
-        initial_cash_won=args.initial_cash_won,
-        cost_model=SimulationCostModel(
-            version=args.cost_model_version,
-            commission_bps=(int(args.commission_bps) if args.cost_model_version == COST_MODEL_VERSION
-                            else args.commission_bps),
-            sell_tax_bps=(int(args.sell_tax_bps) if args.cost_model_version == COST_MODEL_VERSION
-                          else args.sell_tax_bps),
-            slippage_bps=(int(args.slippage_bps) if args.cost_model_version == COST_MODEL_VERSION
-                          else args.slippage_bps),
+    evaluation = _load_evaluation_spec(args.evaluation_spec)
+    if explicit_cost:
+        version = args.cost_model_version or COST_MODEL_VERSION
+        commission, sell_tax, slippage = map(int, rates) if version == COST_MODEL_VERSION else rates
+        cost = SimulationCostModel(
+            version=version, commission_bps=commission, sell_tax_bps=sell_tax, slippage_bps=slippage,
             rate_basis=args.cost_rate_basis,
             source=args.cost_source,
             valid_from=args.cost_valid_from,
             valid_to=args.cost_valid_to,
-        ),
+        )
+    else:
+        start, end = (evaluation.folds[0].start, evaluation.folds[-1].end) if evaluation else ('', '')
+        cost = default_research_cost_model(start, end)
+    execution = SimulationExecutionConfig(
+        version=args.execution_model_version,
+        same_bar_path_version=args.same_bar_path_version,
+        initial_cash_won=args.initial_cash_won,
+        cost_model=cost,
     )
-    evaluation = _load_evaluation_spec(args.evaluation_spec)
     if args.development_partition:
         if evaluation is None:
             raise ValueError('development partition requires --evaluation-spec')

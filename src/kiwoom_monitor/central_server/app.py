@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from importlib.util import find_spec
 from typing import Any, TYPE_CHECKING
+from urllib.parse import unquote
 
 from .config import CentralServerSettings
 from kiwoom_monitor.domain.operation_context import OperationContextSnapshot, operation_context_scope
@@ -141,6 +142,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
     market_event_service: MarketEventService | None = None
     external_market_service: YahooDelayedMarketCollector | None = None
     candidate_monitor: CandidateMonitor | None = None
+    kind_listing_evidence = None
     ram_shadow_session = None
     def context_changed(kind):
         if ram_shadow_session is not None:
@@ -171,13 +173,32 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
     )
     credential_vault = None
     try:
+        program_flow_archive = None
+        if active.program_flow_archive_target_file:
+            sqlite_path = unquote(active.database_url.removeprefix("sqlite:///"))
+            if (not active.database_url.startswith("sqlite:///") or sqlite_path in {"", ":memory:"}
+                    or not active.autonomous_top20_enabled or not active.autonomous_top20_minute_backfill_enabled):
+                raise ValueError("program flow archive requires the execution PC's file-backed SQLite and after-close workflow")
+            if not active.research_observation_history_enabled:
+                raise ValueError("after-close archive requires observation history")
+            from .program_flow_archive import ProgramFlowArchive
+            database_path = Path(sqlite_path)
+            program_flow_archive = ProgramFlowArchive(
+                store, database_path.with_name(database_path.name + ".program-archive"),
+                Path(active.program_flow_archive_target_file), active.program_flow_archive_source_stream,
+            )
         if diagnostic_tools is not None:
             diagnostic_inputs = diagnostic_tools.compose_application_inputs(store)
+        from kiwoom_monitor.infrastructure.krx.market_calendar import KrxMarketCalendar
+        from .krx_calendar_evidence import KrxCalendarEvidence
+        krx_calendar = KrxCalendarEvidence(store, KrxMarketCalendar(), server_now)
         realtime_hub = RealtimeHub(now_provider=server_now, observer=diagnostic_inputs.get("hub"))
         store.initialize()
         if active.observation_archive_grants:
             store.prepare_observation_archive()
         credential_statuses: dict[str, str] = {}
+        local_mock = bool(active.local_mock_credential_directory)
+        local_mock_identity_key = None
         if active.credential_directory:
             from kiwoom_monitor.central_server.credential_store import (
                 CredentialStore, CredentialStoreError, compose_credential_settings, PROVIDER_FIELDS,
@@ -196,6 +217,18 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                                  openai_api_key="", gemini_api_key="", anthropic_api_key="",
                                  mock_account_monitor_enabled=False, mock_order_transport_enabled=False)
                 credential_statuses = {provider: "RECOVERY_REQUIRED" for provider in PROVIDER_FIELDS}
+        elif local_mock:
+            from .credential_store import CredentialStore, CredentialStoreError
+            try:
+                credential_vault = CredentialStore(active.local_mock_credential_directory, store, local=True)
+                local_mock_identity_key = credential_vault.local_mock_identity_key()
+            except Exception as error:
+                if credential_vault is not None:
+                    credential_vault.close()
+                    credential_vault = None
+                if isinstance(error, CredentialStoreError) and str(error) == "VAULT_ALREADY_OWNED":
+                    raise RuntimeError("VAULT_ALREADY_OWNED: use one server worker") from None
+                logger.warning("local mock credential store unavailable: %s", type(error).__name__)
         historical_archive: HistoricalNewsArchiveReader | None = None
         historical_archive_state = "unconfigured"
         if active.historical_news_archive_path:
@@ -350,16 +383,35 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                 subscription_observer=diagnostic_inputs.get("subscription"),
                 input_observer=diagnostic_inputs.get("collector"),
                 micro_book_codes=active.micro_book_codes,
+                closing_auction_source=krx_calendar.auction_at,
             )
             if active.autonomous_top20_enabled:
+                from kiwoom_monitor.infrastructure.krx.kind_trading_halts import KindTradingHalts
+                from kiwoom_monitor.infrastructure.krx.kind_listing_disclosures import KindListingDisclosures
+                from .listing_evidence import KindListingEvidence
+
+                kind_listing_evidence = KindListingEvidence(
+                    store, KindListingDisclosures(now_provider=server_now), server_now,
+                )
+                try:
+                    kind_listing_evidence.restore()
+                except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
+                    logger.warning("KIND 신규상장 근거 복원 실패: %s", type(error).__name__)
+
                 top20_service = AutonomousTop20Service(
                     broker, realtime_hub, store,
                     now_provider=server_now,
                     minute_backfill_enabled=active.autonomous_top20_minute_backfill_enabled,
                     outbox_path=Path(active.top20_outbox_path),
                     on_membership_changed=lambda: context_changed("ranking"),
+                    program_flow_archive=program_flow_archive,
+                    stock_master_required=True,
+                    listing_evidence=kind_listing_evidence,
+                    full_day_halt=KindTradingHalts().full_day_halt,
                     **diagnostic_inputs.get("top20", {}),
                 )
+        if program_flow_archive is not None and top20_service is None:
+            raise ValueError("program flow archive requires the execution PC's market collector")
         if active.mock_account_monitor_enabled:
             from kiwoom_monitor.infrastructure.kiwoom_rest import KiwoomSettings
             from .mock_runtime import MockAccountBundle
@@ -372,13 +424,14 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                     active.account_identity_key() if active.account_identity_registry_enabled else None
                 ), order_transport_enabled=active.mock_order_transport_enabled,
                 now_provider=server_now,
+                buy_vi_rejection=(market_event_service.automation_buy_market_rejection if market_event_service else None),
                 **diagnostic_inputs.get("accounts", {}),
             )
             account_broker = mock_bundle.broker
             mock_account_monitor = mock_bundle.monitor
             mock_account_realtime = mock_bundle.realtime
             mock_order_gateway = mock_bundle.gateway
-        if credential_runtime is not None and active.account_identity_registry_enabled:
+        if credential_runtime is not None and (active.account_identity_registry_enabled or local_mock):
             from .mock_runtime import MockCredentialOwner
 
             async def publish_mock_bundle(profile_id, bundle):
@@ -407,8 +460,9 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                     await mock_automation_supervisor.bundle_changed(profile_id, bundle)
 
             mock_owner = MockCredentialOwner(store, credential_vault,
-                hmac_key=active.account_identity_key(), legacy_bundle=mock_bundle,
+                hmac_key=local_mock_identity_key if local_mock else active.account_identity_key(), legacy_bundle=mock_bundle,
                 legacy_monitor_enabled=active.mock_account_monitor_enabled, on_change=publish_mock_bundle,
+                buy_vi_rejection=(market_event_service.automation_buy_market_rejection if market_event_service else None),
                 now_provider=server_now, **diagnostic_inputs.get("accounts", {}))
             credential_runtime.register("kiwoom_mock", mock_owner.hooks())
         account_query_manager = (
@@ -529,10 +583,20 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             except (ValueError, OSError):
                 tr_connection_recovery = True
             broker.set_market_transport_provider(tr_market_transport)
-        if active.news_configured or credential_runtime is not None or bool(operational["news_naver_stock_enabled"]):
+        if active.news_configured or (credential_runtime is not None and not local_mock) or bool(operational["news_naver_stock_enabled"]):
             from kiwoom_monitor.infrastructure.dart_disclosures import DartDisclosureClient
             from kiwoom_monitor.infrastructure.naver_news import NaverNewsClient, NaverNewsCredentials
-            from .news_service import CentralNewsService
+            from .news_service import CentralNewsService, load_held_news_codes
+
+            async def held_news_codes(cut):
+                real_bindings = real_owner.account_bindings() if real_owner is not None else (
+                    (main_binding,) if main_binding is not None else ())
+                mock_bindings = mock_owner.account_bindings() if mock_owner is not None else (
+                    (mock_bundle.binding,) if mock_bundle is not None and mock_bundle.binding is not None else ())
+                mock_refs = {binding.scope.account_ref for binding in mock_bindings}
+                if not real_bindings and not mock_refs:
+                    return set()
+                return await asyncio.to_thread(load_held_news_codes, store, real_bindings, mock_refs, cut)
             naver_client = None
             if active.naver_news_client_id and active.naver_news_client_secret:
                 naver_client = NaverNewsClient(NaverNewsCredentials(
@@ -550,6 +614,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             news_service = CentralNewsService(
                 naver_client, store, dart_client, refresh_seconds=int(operational["news_refresh_seconds"]),
                 now_provider=server_now,
+                held_news_codes=held_news_codes,
                 prioritize_stock=(news_job_runner.set_priority_stock if news_job_runner is not None else None),
                 enqueue_ai_jobs=(getattr(store, "enqueue_news_ai_jobs", None)
                                  if news_job_runner is not None else None),
@@ -584,7 +649,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                     str(value) for value in operational["news_processing_excluded_providers"]
                 ),
             )
-        if credential_runtime is not None:
+        if credential_runtime is not None and not local_mock:
             from .news_credentials import NaverCredentialOwner, DartCredentialOwner
             naver_owner = NaverCredentialOwner(news_service, credential_vault, now_provider=server_now)
             credential_runtime.register("naver", naver_owner.hooks())
@@ -601,14 +666,14 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             )
         from .chatgpt_sessions import nas_chatgpt_auth
         chatgpt_auth = nas_chatgpt_auth(active.credential_directory)
-        if active.ai_configured or credential_runtime is not None or chatgpt_auth is not None:
+        if active.ai_configured or (credential_runtime is not None and not local_mock) or chatgpt_auth is not None:
             from .ai_service import CentralAIService
             ai_service = CentralAIService(active, store, chatgpt_auth=chatgpt_auth, now_provider=server_now)
             ai_service.update_operational_settings(
                 provider=str(operational["ai_provider"]), model=str(operational["ai_model"]),
                 daily_limit=int(operational["ai_daily_limit"]),
             )
-            if credential_runtime is not None:
+            if credential_runtime is not None and not local_mock:
                 from .ai_credentials import AICredentialOwner
                 for provider in ("openai", "gemini", "claude"):
                     owner = AICredentialOwner(ai_service, credential_vault, provider, now_provider=server_now)
@@ -625,6 +690,9 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                 universe_max_age_seconds=int(operational["shadow_candidate_universe_max_age_seconds"]),
                 **diagnostic_inputs.get("candidate", {}),
             )
+            if kind_listing_evidence is not None:
+                candidate_monitor.set_listing_evidence_source(kind_listing_evidence.for_symbol)
+            candidate_monitor.set_krx_calendar_source(krx_calendar.as_of)
         from .ram_shadow_selection_session import RamShadowSelectionSession
         def theme_context_source(cutoff):
             return store.load_theme_snapshots(available_at=cutoff, limit=1)
@@ -650,6 +718,24 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         from .operational_settings_routes import OperationalSettingsState, create_operational_settings_routers
         operational_state = OperationalSettingsState(
             operational, int(operational.get("revision", 0)), candidate_monitor)
+
+        def krx_calendar_needed():
+            monitor = operational_state.candidate_monitor
+            return ((monitor is not None and monitor.needs_krx_calendar()) or
+                    (mock_automation_supervisor is not None and mock_automation_supervisor.needs_close_calendar()))
+
+        def close_calendar_for_management(cutoff):
+            krx_calendar.start(krx_calendar_needed)
+            return krx_calendar.as_of(cutoff)
+
+        def minute_candidate_current(event):
+            monitor = operational_state.candidate_monitor
+            if monitor is None:
+                return False
+            if event.get("strategy_id") == "close_betting":
+                return monitor.close_calendar_basis_current(event)
+            return monitor.ipo_listing_basis_current(event)
+
         if collector is not None:
             def bind_document_baseline(monitor):
                 if monitor is not None:
@@ -668,7 +754,8 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
 
         ram_shadow_session = RamShadowSelectionSession(store, realtime_hub, collector,
             logger=logger, now_provider=server_now,
-            ranking_source=top20_service.latest_membership_snapshot if top20_service is not None else None,
+            ranking_source=(lambda: top20_service.latest_membership_snapshot(include_memory_only=False))
+            if top20_service is not None else None,
             theme_source=theme_context_source, position_account_source=position_account_source,
             configure_position_order_observation=configure_position_order_observation,
             publish_runtime=publish_ram_runtime,
@@ -687,9 +774,13 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             mock_automation_supervisor = MockAutomationSupervisor(store, mock_owner,
                 now_provider=server_now,
                 leader_context_source=leader_context_source,
+                minute_candidate_current=minute_candidate_current,
+                close_calendar=close_calendar_for_management,
                 expected_implementation_hash=(selected_research_artifact.expected_implementation_hash
                     if selected_research_artifact is not None else lambda _profile: None),
-                price_source=collector.automation_price_observation if collector is not None else None)
+                price_source=collector.automation_price_observation if collector is not None else None,
+                nxt_price_source=(lambda code: collector.automation_price_observation(code, venue='NXT'))
+                if collector is not None else None)
             if collector is not None:
                 collector.set_automation_price_listener(mock_automation_supervisor.observe_automation_price)
 
@@ -771,6 +862,8 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                 await external_market_service.start()
             if operational_state.candidate_monitor is not None:
                 await operational_state.candidate_monitor.start()
+            if krx_calendar_needed():
+                krx_calendar.start(krx_calendar_needed)
         async def close_services(_app: Any):
             ram_shadow_session.begin_close()
             if tr_connection_available:
@@ -799,6 +892,7 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                     raise mock_bundle_close_error
                 await mock_bundle.close()
             status["stage"] = "candidate"
+            await krx_calendar.close()
             async with operational_state.lock:
                 if operational_state.candidate_monitor is not None:
                     await operational_state.candidate_monitor.close()
@@ -1012,7 +1106,8 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             return bool(active.query_access_token) and _token_matches(supplied, active.query_access_token)
 
         app.include_router(create_morning_market_brief_router(morning_brief, authorize))
-        install_credential_routes(app, credential_runtime, authorize, active.credential_trusted_proxies, mock_owner, real_owner)
+        install_credential_routes(app, credential_runtime, authorize, active.credential_trusted_proxies,
+                                  mock_owner, real_owner, local_mock=local_mock)
 
         from .account_settings_routes import create_account_settings_router
         app.include_router(create_account_settings_router(store, authorize, real_owner, mock_owner,
@@ -1096,6 +1191,8 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                 mock_automation_spec_publish_v1=True,
                 mock_automation_runtime_v1=mock_automation_supervisor is not None,
             ).as_document()
+            if local_mock:
+                document["capabilities"]["local_mock_automation_v1"] = mock_automation_supervisor is not None
             document["realtime_connection"] = collector.credential_connection_status() if collector is not None else None
             document["capabilities"]["historical_news_archive_v1"] = (
                 historical_archive is not None and historical_archive.schema_version == 1
@@ -1162,6 +1259,12 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         app.include_router(scoped_mock_order_router)
 
         def publish_candidate_monitor(monitor):
+            if monitor is not None and kind_listing_evidence is not None:
+                monitor.set_listing_evidence_source(kind_listing_evidence.for_symbol)
+            if monitor is not None:
+                monitor.set_krx_calendar_source(krx_calendar.as_of)
+                if monitor.needs_krx_calendar():
+                    krx_calendar.start(krx_calendar_needed)
             if collector is not None:
                 bind_document_baseline(monitor)
             app.state.candidate_monitor = monitor

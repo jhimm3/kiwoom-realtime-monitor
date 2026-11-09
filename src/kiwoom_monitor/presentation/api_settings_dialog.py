@@ -92,7 +92,7 @@ class ApiSettingsDialog(QDialog):
             self._data_source_mode.addItem("이 PC의 공통 서버에 연결", "local_server")
         else:
             self._data_source_mode.addItem("이 PC에서 키움 API 직접 연결", "local")
-            self._data_source_mode.addItem("이 PC의 Docker 서버 사용 (앱 재시작 후 적용)", "local_server")
+            self._data_source_mode.addItem("이 PC의 로컬 서버 사용 (앱 재시작 후 적용)", "local_server")
             self._data_source_mode.addItem("NAS로 연결 (앱 재시작 후 전체 적용)", "personal_server")
         mode_index = self._data_source_mode.findData(self._data_source.mode)
         self._data_source_mode.setCurrentIndex(max(0, mode_index))

@@ -1658,7 +1658,9 @@ class MainWindowTest(unittest.TestCase):
             _daily_high_basis_refresh_received=set(),
             _historical_high_worker_controller=historical, _stock_lookup=None,
             _historical_high_refresh_received=set(),
+            _krx_catalog_done_day="",
         )
+        owner._ranking_data_codes = MainWindow._ranking_data_codes.__get__(owner)
         self.assertTrue(MainWindow._start_daily_high_loading(owner, codes))
         daily.start.assert_called_once_with(codes, followup_codes=codes)
         self.assertEqual(set(codes), owner._daily_high_basis_refresh_expected)
@@ -1674,6 +1676,16 @@ class MainWindowTest(unittest.TestCase):
         catalog.start.assert_called_once()
         self.assertIs(owner._stock_lookup, catalog.start.call_args.args[0])
         self.assertIs(settings, catalog.start.call_args.args[1])
+        self.assertIs(owner._ranking_now, catalog.start.call_args.kwargs["now_provider"])
+        owner._start_top20_market_repair = Mock()
+        owner._review_pending_stock_name_changes = Mock()
+        owner._is_after_hours_data_pause = Mock(return_value=False)
+        owner._start_historical_high_loading = Mock()
+        catalog.start.call_args.kwargs["completed"](0, True)
+        MainWindow._start_daily_krx_catalog_sync(owner)
+        catalog.start.assert_called_once()
+        owner._start_historical_high_loading.assert_called_once_with(codes)
+        owner._review_pending_stock_name_changes.assert_called_once()
         for key in keys:
             with self.subTest(key=key), self.assertRaises(KeyError):
                 settings.get(key)
@@ -2152,6 +2164,38 @@ class MainWindowTest(unittest.TestCase):
             )
             request = MainWindow._prepare_secondary_loading(window, ("cached", "ready", "new"))
             self.assertEqual(("cached", "new") if nas else (), request.stored_daily_high_codes)
+
+    def test_clock_runs_standalone_close_and_journal_without_a_night_rank(self) -> None:
+        close = datetime(2026, 10, 6, 20, 5)
+        codes = ("005930",)
+        window = SimpleNamespace(
+            _query_only=False, _closing=False, _market_data_client=object(),
+            _journal_command_path=object(), _journal_database_path=object(), _journal_background_sync_day=None,
+            _send_journal_command=Mock(), _ensure_journal_process=Mock(),
+            _after_close_finalization_codes=set(),
+            _minute_history_worker_controller=SimpleNamespace(available=True, is_running=False),
+            _standalone_close_day=None, _standalone_close_checked_at=None, _finalization_retry_after={},
+            _last_daytime_ranking=(close.date(), codes), _row_by_code={"night-rank-only": 0},
+            _finalization_candidates=Mock(return_value=(close.date(), codes)),
+            _start_minute_history_loading=Mock(return_value=True), _set_close_finalization=Mock(),
+            _on_secondary_phase_started=Mock(),
+        )
+        MainWindow._schedule_standalone_close_if_due(window, close.replace(hour=0))
+        window._start_minute_history_loading.assert_not_called()
+        MainWindow._schedule_standalone_close_if_due(window, close)
+        window._finalization_candidates.assert_called_once_with(codes, target=close.date())
+        window._start_minute_history_loading.assert_called_once_with(codes, force=True)
+        window._set_close_finalization.assert_called_once_with(close.date(), codes)
+        self.assertEqual(codes, window._on_secondary_phase_started.call_args.args[0].finalization_codes)
+        window._finalization_candidates.return_value = (close.date(), ())
+        MainWindow._schedule_standalone_close_if_due(window, close.replace(minute=6))
+        MainWindow._schedule_standalone_close_if_due(window, close.replace(minute=7))
+        self.assertEqual(2, window._finalization_candidates.call_count)
+        self.assertEqual(close.date(), window._standalone_close_day)
+        MainWindow._schedule_journal_sync_if_due(window, close)
+        MainWindow._schedule_journal_sync_if_due(window, close.replace(minute=6))
+        window._send_journal_command.assert_called_once_with(action="sync")
+        window._ensure_journal_process.assert_called_once()
 
     def test_daily_high_completion_requires_verified_scope_and_target_day(self) -> None:
         from dataclasses import replace

@@ -345,6 +345,9 @@ print(json.dumps({'actual_origin': str(actual), 'subscription_tool_source_absent
         def read_books():
             return collector.ram_observation_snapshot((A,), seconds=8, include_micro_books=True)["micro_books"]
 
+        def read_indications():
+            return collector.ram_observation_snapshot((A,), seconds=8, include_micro_books=True)["micro_indicative_history"]
+
         async def receive_probe():
             quote = {"type": "0D", "item": A, "values": {
                 "21": "110001", "41": "1010", "61": "14", "51": "1000", "71": "28", "23": "1010", "24": "3",
@@ -372,6 +375,7 @@ print(json.dumps({'actual_origin': str(actual), 'subscription_tool_source_absent
                 self.assertEqual({"trnm": "REG", "grp_no": quote_group, "refresh": "1", "data": quote_group_rows}, added)
                 self.assertEqual(([("0B", A)], ()), await receive_probe())
                 self.assertEqual((), read_books())
+                self.assertEqual((), read_indications())
                 acknowledge(added)
                 self.assertEqual(base | {quote_atom}, await get(approvals))
 
@@ -385,6 +389,9 @@ print(json.dumps({'actual_origin': str(actual), 'subscription_tool_source_absent
                 self.assertEqual((A, "KRX", clock[0].isoformat()),
                                  (retained["code"], retained["subscription_market"], retained["available_at"]))
                 self.assertEqual({"price_won": 1010, "quantity": 14}, retained["asks"][0])
+                indication, = read_indications()
+                self.assertEqual((A, "KRX", "110001", 1010), (indication["code"],
+                                 indication["subscription_market"], indication["quote_time"], indication["price_23"]))
                 self.assertNotIn("micro_books", collector.ram_observation_snapshot((A,), seconds=8))
                 clock[0] += timedelta(seconds=9)
                 self.assertEqual((), read_books())
@@ -392,6 +399,7 @@ print(json.dumps({'actual_origin': str(actual), 'subscription_tool_source_absent
                 self.assertEqual(1, len(read_books()))
                 collector._mark_capture_gap()
                 self.assertEqual((), read_books())
+                self.assertEqual((), read_indications())
                 await receive_probe()
                 self.assertEqual(1, len(read_books()))
 
@@ -400,6 +408,7 @@ print(json.dumps({'actual_origin': str(actual), 'subscription_tool_source_absent
                 self.assertEqual({"trnm": "REMOVE", "grp_no": quote_group, "data": quote_group_rows}, removed)
                 self.assertEqual(([("0B", A)], ()), await receive_probe())
                 self.assertEqual((), read_books())
+                self.assertEqual((), read_indications())
                 acknowledge(removed)
                 self.assertEqual(base, await get(approvals))
                 self.assertEqual({(A, "KRX")}, collector._approved_trade_sources)

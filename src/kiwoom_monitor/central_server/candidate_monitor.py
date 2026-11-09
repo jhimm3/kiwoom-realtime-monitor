@@ -23,7 +23,9 @@ from typing import Any, Callable, Mapping
 from kiwoom_monitor.application.market_session_schedule import (
     KRX_REGULAR_RESEARCH_PROFILE,
     SUPPORTED_RESEARCH_SESSION_PROFILES,
+    next_trading_day,
     session_window_at,
+    trading_day_as_of,
 )
 from kiwoom_monitor.application.breakout_strategy import (
     BreakoutStrategyConfig,
@@ -33,7 +35,13 @@ from kiwoom_monitor.application.breakout_theme_research import (
     BREAKOUT_PRIOR_BARS, evaluate_breakout_theme,
 )
 from kiwoom_monitor.application.close_and_ipo import ClosePolicy, IpoBreakoutPolicy, evaluate_close_and_ipo
-from kiwoom_monitor.application.panic_rebound import PanicSetup, evaluate_panic_rebound
+from kiwoom_monitor.domain.market_data_contract import select_listing_evidence
+from kiwoom_monitor.application.news_material import (
+    RECORDED_CONTRACT_FILINGS, decision_material_context, received_strategy_material, recorded_contract_material,
+)
+from kiwoom_monitor.application.panic_rebound import (
+    PanicSetup, evaluate_panic_rebound, material_panic_proofs, panic_prior_official_adverse,
+)
 from kiwoom_monitor.application.leader_breakout import (
     LeaderBreakoutPolicy, evaluate_leader_breakout_trade, _id,
     document_breakout_reference, document_breakout_observation,
@@ -53,7 +61,8 @@ from kiwoom_monitor.application.research_replay import (
     trim_bar_frames, trim_universe_frames,
 )
 from kiwoom_monitor.application.section12_minute_research import (
-    BREAKOUT_STUDY_FAMILIES, MINUTE_SHADOW_VERSION, PANIC_FAMILY, MinuteShadowConfig, build_minute_evaluation,
+    BREAKOUT_STUDY_FAMILIES, CLOSE_FAMILY, IPO_BREAKOUT_FAMILY, IPO_CLOSE_FAMILY, MINUTE_SHADOW_VERSION, PANIC_FAMILY,
+    MinuteShadowConfig, build_minute_evaluation,
 )
 from kiwoom_monitor.domain.ranking import normalize_stock_code
 from kiwoom_monitor.infrastructure.market_data_metadata_codec import market_metadata_from_document
@@ -92,6 +101,8 @@ class CandidateMonitor:
         self._now = (lambda: as_kst(now_provider())) if now_provider else kst_now
         self._workload_paused = workload_paused or (lambda _workload: False)
         self._capture_scope = capture_scope
+        self._listing_evidence_source = None
+        self._krx_calendar_source = None
         self._config = config
         self._minute_shadow = config if isinstance(config, MinuteShadowConfig) else None
         self._minute_symbols = frozenset(self._minute_shadow.symbols) if self._minute_shadow else frozenset()
@@ -409,7 +420,69 @@ class CandidateMonitor:
         active = self._minute_signals.get(event.get("symbol"), {}).get(event.get("observation_key"))
         if active is None or active.revision_id != event.get("reference_revision_id"):
             return "INVALIDATED"
+        if (self._minute_shadow.strategy.family in {IPO_CLOSE_FAMILY, IPO_BREAKOUT_FAMILY}
+                and not self.ipo_listing_basis_current(event)):
+            return "INVALIDATED"
+        if self.needs_close_calendar() and not self.close_calendar_basis_current(event):
+            return "INVALIDATED"
         return "ACTIVE"
+
+    def needs_close_calendar(self) -> bool:
+        return self._minute_shadow is not None and self._minute_shadow.strategy.family == CLOSE_FAMILY
+
+    def needs_krx_calendar(self) -> bool:
+        return self._minute_shadow is not None and self._minute_shadow.strategy.family in {CLOSE_FAMILY, PANIC_FAMILY}
+
+    def set_krx_calendar_source(self, source) -> None:
+        if self.needs_krx_calendar():
+            self._krx_calendar_source = source
+
+    def _calendar_evidence(self, *, cutoff=None):
+        pinned = self._minute_shadow.calendar if self._minute_shadow is not None else ()
+        if self._krx_calendar_source is None or (cutoff is None and not self.needs_close_calendar()):
+            return pinned
+        return (*pinned, *self._krx_calendar_source(cutoff if cutoff is not None else self._now()))
+
+    def close_calendar_basis_current(self, event) -> bool:
+        if not self.needs_close_calendar() or event.get("run_id") != self.monitor_id:
+            return False
+        setup = event.get("close_ipo_entry_setup") or {}
+        if not setup.get("entry_date"):
+            return False
+        now = self._now()
+        day = datetime.fromisoformat(setup["entry_date"]).date()
+        if day != now.date():
+            return False
+        calendar = self._calendar_evidence()
+        current = trading_day_as_of(day, venue="KRX", as_of=now, evidence=calendar)
+        following = next_trading_day(day, venue="KRX", as_of=now, evidence=calendar)
+        return (current is not None and current.revision_id == setup.get("entry_calendar_ref")
+                and following is not None and following.revision_id == setup.get("next_calendar_ref"))
+
+    def ipo_listing_basis_current(self, event) -> bool:
+        if self._minute_shadow is None or event.get("run_id") != self.monitor_id:
+            return False
+        setup = event.get("close_ipo_entry_setup") or {}
+        refs = setup.get("listing_refs")
+        if not refs or not setup.get("entry_date"):
+            return False
+        now = self._now()
+        day = datetime.fromisoformat(setup["entry_date"]).date()
+        if now.date() != day:
+            return False
+        symbol = event["symbol"]
+        selected = select_listing_evidence(self._listing_evidence(symbol, now), symbol=symbol, trading_date=day, as_of=now)
+        return (selected.supports_ipo_strategy and selected.phase.value == setup.get("listing_phase")
+                and {row.evidence_id for row in selected.evidence} == set(refs))
+
+    def set_listing_evidence_source(self, source) -> None:
+        self._listing_evidence_source = source
+
+    def _listing_evidence(self, code, cutoff):
+        source = self._listing_evidence_source
+        return self._minute_shadow.listings if source is None else (
+            *self._minute_shadow.listings, *source(code, cutoff),
+        )
 
     def observe_trade(self, payload, received_at, *, source, approved):
         """Pure bounded 0B judgment on the collector loop; persistence is deferred."""
@@ -531,7 +604,14 @@ class CandidateMonitor:
                         break
                     item = self._leader_pending.popleft()
                 try:
-                    self._store.save_shadow_evaluation(self.monitor_id, *item)
+                    decision, candidate, expires_at = item
+                    if candidate is not None:
+                        cutoff = datetime.fromisoformat(candidate["available_at"])
+                        _, context = self._received_news(candidate["symbol"], cutoff)
+                        if context is not None:
+                            decision = {**decision, "material_news": context}
+                            candidate = {**candidate, "material_news": context}
+                    self._store.save_shadow_evaluation(self.monitor_id, decision, candidate, expires_at)
                 except Exception:
                     with self._iteration_lock:
                         self._leader_pending.appendleft(item)
@@ -622,7 +702,7 @@ class CandidateMonitor:
             return
         if self._minute_symbols and normalize_stock_code((observation.get("payload") or {}).get("code")) not in self._minute_symbols:
             return
-        calendar = self._minute_shadow.calendar if self._minute_shadow is not None else ()
+        calendar = self._calendar_evidence()
         key = (int(observation.get("accepted_sequence", 0)),
                self._session_profile if kind != "top20_membership" else "top20_membership",
                self.monitor_id if calendar and kind == "minute_bar" else None)
@@ -633,6 +713,7 @@ class CandidateMonitor:
         else:
             frames = tuple(replay_krx_minute_bars(
                 (observation,), strict=True, session_profile=self._session_profile,
+                reclassify_default_schedule=self._krx_calendar_source is not None and self.needs_close_calendar(),
                 **({"calendar_evidence": calendar} if calendar else {}),
             ))
         if _frame_cache is not None:
@@ -673,7 +754,7 @@ class CandidateMonitor:
         )
         if self._minute_shadow is not None:
             self._invalidate_minute_signals(*bar_key, revision_id=evaluation_bar.revision_id)
-            self._consume_minute_shadow(observation, evaluation_bar, usable_universes, freshness)
+            self._consume_minute_shadow(observation, evaluation_bar, usable_universes, freshness, _frame_cache)
             return
         evaluation = self._family.evaluate_bar(
             run_id=self.monitor_id,
@@ -693,7 +774,21 @@ class CandidateMonitor:
             for key in invalidated:
                 del signals[key]
 
-    def _consume_minute_shadow(self, observation, bar, universes, freshness):
+    def _received_news(self, symbol, cutoff, frame_cache=None):
+        key = ("strategy_material", symbol, cutoff)
+        if frame_cache is not None and key in frame_cache:
+            return frame_cache[key]
+        try:
+            inputs = self._store.load_strategy_material_inputs(symbol, cutoff)
+            result = received_strategy_material(symbol, cutoff, **inputs)
+        except Exception:
+            logger.warning("strategy news context unavailable for %s", symbol, exc_info=True)
+            result = None, None
+        if frame_cache is not None:
+            frame_cache[key] = result
+        return result
+
+    def _consume_minute_shadow(self, observation, bar, universes, freshness, frame_cache=None):
         if (observation.get("origin") != "realtime" or observation.get("source_id") != "kiwoom-websocket-0B"
                 or bar.finalization_source not in {"timer", "realtime_flush"}):
             return  # Query/archived history may supply context, never a live trigger.
@@ -706,6 +801,13 @@ class CandidateMonitor:
         bar_end = datetime.fromisoformat(bar.bar_end)
         cutoff = datetime.fromisoformat(bar.available_at)
         deadline = None
+        material_context = None
+
+        def received_news():
+            nonlocal material_context
+            material, material_context = self._received_news(bar.code, cutoff, frame_cache)
+            return material
+
         if any(datetime.fromisoformat(frame.bar_start) > bar_start for frame in history):
             reason = "newer_minute_already_observed"
         elif not self._minute_symbols and (universe is None or bar.code not in universe.codes):
@@ -721,18 +823,36 @@ class CandidateMonitor:
                     refs = (result.preceding_revision_id, *refs)
                 deadline = min(setup.exit_at, session_window_at(bar_start, venue="KRX").ends_at)
         elif strategy.family == PANIC_FAMILY:
+            def entry_news():
+                nonlocal material_context
+                # evaluate_panic_rebound reads this only when a price setup is ready to enter.
+                yield from strategy.news_proofs
+                material = received_news()
+                if material is None:
+                    # Preserve the existing confirmed-adverse check if supplemental news is unavailable.
+                    documents = self._store.load_documents(RECORDED_CONTRACT_FILINGS, bar.code)
+                    material = recorded_contract_material((row["document"] for row in documents), cutoff)
+                    material_context = decision_material_context(material, bar.code, cutoff)
+                # Keep the opening evidence with the candidate, outside the same-day news gate.
+                material_context = {**material_context, "panic_prior_session": panic_prior_official_adverse(
+                    material, bar.code, cutoff, self._calendar_evidence(cutoff=cutoff),
+                )}
+                yield from material_panic_proofs(material, bar.code, cutoff)
+
             result = evaluate_panic_rebound(
                 evaluation_bar=bar, bar_history=history, rules=strategy.policy,
-                news_proofs=strategy.news_proofs, setup=self._panic_armed.get(bar.code),
+                news_proofs=entry_news(), setup=self._panic_armed.get(bar.code),
             )
             action, reason, setup, refs = result.action, result.reason, result.setup, result.input_refs
             if action == "ENTER":
                 quantity = strategy.quantity
                 deadline = session_window_at(bar_start, venue="KRX").ends_at
         else:
+            listings = (self._listing_evidence(bar.code, cutoff)
+                        if strategy.policy.variant in {"IPO_CLOSE", "IPO_BREAKOUT"} else self._minute_shadow.listings)
             result = evaluate_close_and_ipo(
-                strategy.policy, bar=bar, history=history, calendar=self._minute_shadow.calendar,
-                listings=self._minute_shadow.listings, position=None,
+                strategy.policy, bar=bar, history=history, calendar=self._calendar_evidence(),
+                listings=listings, position=None,
             )
             action, reason, quantity, setup, refs = (
                 result.action, result.reason, result.quantity, result.setup, result.evidence_refs)
@@ -745,20 +865,29 @@ class CandidateMonitor:
                 action, reason, quantity, setup = "WAIT", "minute_signal_window_elapsed", 0, None
             else:
                 expires_at = deadline.astimezone(timezone.utc).isoformat()
+        if strategy.family != PANIC_FAMILY and (action == "ENTER" or reason.startswith("breakout_catalyst_")):
+            received_news()
         evaluation = build_minute_evaluation(
             strategy.family, self.monitor_id, bar,
             self.monitor_id if self._minute_symbols else universe.revision_id if universe else "",
             self._state, action, reason, quantity, setup, refs,
         )
-        self._save_evaluation(observation, evaluation, freshness, expires_at=expires_at, bar=bar, history=history)
+        self._save_evaluation(observation, evaluation, freshness, expires_at=expires_at, bar=bar, history=history,
+                              material_context=material_context)
         if strategy.family == PANIC_FAMILY:
             if action == "ARM":
                 self._panic_armed[bar.code] = setup
             elif reason != "newer_minute_already_observed":
                 self._panic_armed.pop(bar.code, None)
 
-    def _save_evaluation(self, observation, evaluation, freshness, *, expires_at=None, bar=None, history=()):
+    def _save_evaluation(self, observation, evaluation, freshness, *, expires_at=None, bar=None, history=(),
+                         material_context=None):
+        decision = evaluation.decision.to_dict()
         candidate = evaluation.candidate_event.to_dict() if evaluation.candidate_event else None
+        if material_context is not None:
+            decision["material_news"] = material_context
+            if candidate is not None:
+                candidate["material_news"] = material_context
         if candidate is not None:
             candidate["decision_reasons"] = list(evaluation.decision.reasons)
             if bar is not None:
@@ -775,7 +904,7 @@ class CandidateMonitor:
         if expires_at is None:
             expires_at = evaluation.state.candidate_expires_at if candidate is not None else ""
         self._store.save_shadow_evaluation(
-            self.monitor_id, evaluation.decision.to_dict(), candidate, expires_at,
+            self.monitor_id, decision, candidate, expires_at,
         )
         if candidate is not None and bar is not None:
             refs = frozenset(evaluation.snapshot.input_revision_refs)
@@ -868,9 +997,10 @@ class CandidateMonitor:
         self._panic_armed = {}
         self._minute_signals = {}
         if seed:
-            calendar = self._minute_shadow.calendar if self._minute_shadow is not None else ()
+            calendar = self._calendar_evidence()
             for frame in replay_krx_minute_bars(
                 seed, strict=True, session_profile=self._session_profile,
+                reclassify_default_schedule=self._krx_calendar_source is not None and self.needs_close_calendar(),
                 **({"calendar_evidence": calendar} if calendar else {}),
             ):
                 if not self._minute_symbols or frame.code in self._minute_symbols:
@@ -982,6 +1112,23 @@ class CandidateMonitorGroup:
     def set_minute_commit_provider(self, provider):
         for monitor in self._monitors:
             monitor.set_minute_commit_provider(provider)
+
+    def set_listing_evidence_source(self, source):
+        for monitor in self._monitors:
+            monitor.set_listing_evidence_source(source)
+
+    def needs_krx_calendar(self):
+        return any(monitor.needs_krx_calendar() for monitor in self._monitors)
+
+    def set_krx_calendar_source(self, source):
+        for monitor in self._monitors:
+            monitor.set_krx_calendar_source(source)
+
+    def close_calendar_basis_current(self, event):
+        return any(monitor.close_calendar_basis_current(event) for monitor in self._monitors)
+
+    def ipo_listing_basis_current(self, event) -> bool:
+        return any(monitor.ipo_listing_basis_current(event) for monitor in self._monitors)
 
     def project_leader_candidate_status(self, event):
         monitor = next((item for item in self._monitors

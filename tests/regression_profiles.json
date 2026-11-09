@@ -163,9 +163,11 @@
   "profiles": {
     "section12-research": [
       "tests.unit.test_close_and_ipo",
+      "tests.unit.test_krx_market_calendar",
       "tests.unit.test_breakout_theme_research",
       "tests.unit.test_account_risk_research",
       "tests.unit.test_daily_decline",
+      "tests.unit.test_news_material",
       "tests.unit.test_micro_execution_evidence",
       "tests.unit.test_panic_rebound"
     ],
@@ -329,6 +331,7 @@
       "tests.unit.test_collect_candidate_exchange_disclosures",
       "tests.unit.test_import_krx_vi_history",
       "tests.unit.test_kind_name_history",
+      "tests.unit.test_kind_listing_disclosures",
       "tests.unit.test_project_historical_minute_exclusions",
       "tests.unit.test_dart_disclosure_filter"
     ],
@@ -388,6 +391,7 @@
     ],
     "main-observation-delivery-contracts": [
       "tests.unit.test_observation_delivery",
+      "tests.unit.test_listing_evidence",
       "tests.unit.test_observation_frame_recovery",
       "tests.unit.test_replay_content_comparison",
       "tests.unit.test_ram_shadow_optional_runtime",

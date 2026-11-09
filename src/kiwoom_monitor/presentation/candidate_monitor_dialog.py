@@ -499,7 +499,7 @@ class CandidateMonitorDialog(QDialog):
         for column, value in enumerate(values):
             self._table.setItem(row, column, QTableWidgetItem(value))
         if event.get("strategy_id") == "panic_rebound":
-            details = _panic_entry_details(event.get("panic_entry_setup"))
+            details = _panic_entry_details(event.get("panic_entry_setup"), event.get("material_news"))
         else:
             details = _close_ipo_entry_details(event.get("close_ipo_entry_setup"))
         if details:
@@ -1649,7 +1649,7 @@ def _close_ipo_entry_details(setup: object) -> list[str]:
     return ["최초 후보 근거", *details] if details else []
 
 
-def _panic_entry_details(setup: object) -> list[str]:
+def _panic_entry_details(setup: object, material_news: object) -> list[str]:
     if not isinstance(setup, dict):
         return []
     from kiwoom_monitor.infrastructure.time_display import format_kst_time
@@ -1663,6 +1663,17 @@ def _panic_entry_details(setup: object) -> list[str]:
         value = setup.get(key)
         if type(value) is int and value > 0:
             details.append(f"{label} · {value:,}원")
+    prior = material_news.get("panic_prior_session") if isinstance(material_news, dict) else None
+    if isinstance(prior, dict):
+        label = "개장까지 확인한 직전 거래일 장후 공식 악재"
+        events = prior.get("events")
+        if prior.get("status") == "OBSERVED" and isinstance(events, list) and events:
+            details.append(f"{label} · {len(events)}건")
+            source = next((row["source_ref"] for row in events if isinstance(row, dict) and row.get("source_ref")), "")
+            if source:
+                details.append(f"공시 원문 · {source}")
+        else:
+            details.append(f"{label} · 미확인")
     return ["최초 낙주 후보 근거", *details] if details else []
 
 

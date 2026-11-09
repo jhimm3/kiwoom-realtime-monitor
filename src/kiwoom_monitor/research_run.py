@@ -105,6 +105,8 @@ def execute_research(
         raise ValueError("shadow replay requires a Section 12 minute experiment")
     if section12 and config.panic_allow_unresolved_news and (shadow_only or execution_scope is not None and not final_minute):
         raise ValueError("unresolved PANIC news is supported only in Paper research")
+    if section12 and config.panic_previous_session_news is not None and (shadow_only or execution_scope is not None):
+        raise ValueError("PANIC prior-session news is supported only in ordinary Paper comparisons")
     if section12 != (execution_config.version == COMPLETED_CLOSE_EXECUTION_VERSION):
         raise ValueError("completed-close execution and a Section 12 minute experiment must be selected together")
     if section12 and (session_profile != KRX_REGULAR_RESEARCH_PROFILE or (strategy_references is None and not historical_breakout)

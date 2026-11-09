@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 import json
 
@@ -15,7 +15,10 @@ from .minute_order_management import (
 from .close_and_ipo import (
     CloseIpoPosition, CloseIpoSetup, evaluate_close_gap, evaluate_close_gap_at_price, matches_close_shadow,
 )
-from .market_session_schedule import KST, KRX_AUCTION_RANDOM_END_SECONDS, MarketPhase, MarketSession, SessionSupport, mock_order_entry_decision
+from .market_session_schedule import (
+    KST, KRX_AUCTION_RANDOM_END_SECONDS, MarketPhase, MarketSession, SessionSupport,
+    next_trading_day, trading_day_as_of,
+)
 from .research_replay import KrxMinuteBarFrame
 from .mock_automation_execution import (
     MockAutomationGateStatus,
@@ -110,7 +113,7 @@ def prepare_close_order_management_claim(repository, runtime, execution, spec, r
         head=execution.load_plan_position(runtime.account_ref, runtime.run_id, record.intent.symbol, record.intent.plan),
         order_events=execution.events(record.intent.intent_id), recovery=recovery, risk=risk, quote=quote,
         decided_at=runtime.server_now(), now=runtime.server_now(), entry_enabled=entry_enabled, root=root,
-        exit_evidence=(repository.load_close_exit_evidence(runtime.account_ref, close_exit_key(record.intent.plan))
+        exit_evidence=(load_close_exit_for_intent(repository, record.intent)
                        if record.intent.side is OrderSide.SELL else None),
         root_fill_events=execution.events(root.intent.intent_id) if protection_notice is not None else (),
         protection_notice=protection_notice, stop_risk=(repository.load_mock_automation_risk_snapshot(runtime.account_ref,
@@ -217,6 +220,7 @@ def dispatch_close_entry(repository, runtime, spec, *, parameters, event, quote,
     evidence, decision, plan = build_close_entry_evidence(spec, run_id=runtime.run_id, parameters=parameters,
         event=event, quote=quote, decided_at=decided_at, now=now,
         retain_candidate=saved is None or saved['snapshot']['version'] != 'close_entry_snapshot/v1')
+    runtime.check_automation_buy_vi(event["symbol"], datetime.fromisoformat(evidence["snapshot"]["quote"]["available_at"]))
     # A new proof is retained only after the ordinary current Risk gate approves it.
     if runtime.load_intent(mock_automation_intent_id(spec.spec_id, decision.decision_id)) is None:
         gate = assess_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)
@@ -226,8 +230,43 @@ def dispatch_close_entry(repository, runtime, spec, *, parameters, event, quote,
     return dispatch_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)
 
 
-def close_exit_key(plan: OrderPlanRef) -> str:
-    return content_id("close_exit_slot", asdict(plan))
+def close_exit_key(plan: OrderPlanRef, decision_id: str | None = None) -> str:
+    return content_id("close_exit_slot", asdict(plan) if decision_id is None else {
+        "plan": asdict(plan), "decision_id": decision_id,
+    })
+
+
+def load_close_exit_for_intent(repository, intent):
+    return (repository.load_close_exit_evidence(intent.account_ref, close_exit_key(intent.plan, intent.decision_id))
+            or repository.load_close_exit_evidence(intent.account_ref, close_exit_key(intent.plan)))
+
+
+def uses_official_close_calendar(event):
+    setup = event.get('close_ipo_entry_setup') or {}
+    return event.get('strategy_id') == 'close_betting' and str(setup.get('entry_calendar_ref', '')).startswith('krx-equity:')
+
+
+def effective_close_exit_schedule(setup, at, calendar):
+    """Resolve the next open and today's executable regular window from KRX facts."""
+    day = at.astimezone(KST).date()
+    following = next_trading_day(setup.entry_date, venue='KRX', as_of=at, evidence=calendar)
+    if following is None or day < following.trading_date:
+        return None, None
+    current = (following if day == following.trading_date else
+               trading_day_as_of(day, venue='KRX', as_of=at, evidence=calendar))
+
+    def regular(evidence):
+        return next((window for window in evidence.sessions or () if window.session is MarketSession.KRX_REGULAR
+                     and window.phase is MarketPhase.CONTINUOUS and window.support is SessionSupport.SUPPORTED), None)
+
+    execution = regular(current) if current is not None else None
+    opening = regular(following)
+    if opening is None or execution is None or not execution.starts_at <= at < execution.ends_at:
+        return None, None
+    effective = replace(setup, next_date=following.trading_date, next_open_at=opening.starts_at,
+                        next_session=opening, next_calendar_ref=following.revision_id)
+    return effective, {"next_date": following.trading_date.isoformat(), "next_open_at": opening.starts_at.isoformat(),
+                       "next_calendar_ref": following.revision_id, "execution_calendar_ref": current.revision_id}
 
 
 def selected_management_close_terms(repository):
@@ -429,7 +468,7 @@ def _completed_close_gap(position, observations, decided_at):
 def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence, root, head, fill_events,
                               trigger_quote, quote, decided_at, now, gap_observations=None,
                               protection_notice=None, stop_risk=None, selected_management_context=None,
-                              source_risk_snapshot_ids=()):
+                              source_risk_snapshot_ids=(), calendar=()):
     """Manage only the original plan's detailed fills, independently of new-entry settings."""
     entered_at = datetime.fromisoformat(entry_evidence["decision"]["decided_at"])
     expected_entry, entry_decision, original_plan = build_close_entry_evidence(spec, run_id=run_id,
@@ -438,6 +477,7 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
     from .mock_automation_execution import mock_automation_intent_id
 
     if (entry_evidence != expected_entry or root is None or root.state not in TERMINAL_ORDER_STATES
+            or root.intent.venue != spec.supported_venue
             or (root.intent.intent_id, root.intent.run_id, root.intent.account_ref, root.intent.environment,
                 root.intent.side, root.intent.symbol, root.intent.policy_version, getattr(root.intent, "plan", None))
             != (mock_automation_intent_id(spec.spec_id, entry_decision.decision_id), run_id,
@@ -471,6 +511,7 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
     exit_quantity = head.quantity
     reduced_quantity = quantity - head.quantity
     gap_result = None
+    calendar_basis = None
     if protection_notice is not None or trigger["price_won"] * 10_000 <= basis * (10_000 - setup.policy.protection_loss_bps):
         reason = ('ipo_breakout_structure_failed_0B' if protection_notice is not None
                   and protection_notice['risk_trigger']['stop_loss'].get('version') == 'ipo_structure_stop/v1'
@@ -482,19 +523,24 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
             reason = 'ipo_breakout_structure_failed_0B'
         else:
             return None
-    elif local.date() > setup.next_date:
-        reason = "next_session_management_overdue_0B"
-    elif local.date() == setup.next_date and decided_at >= setup.next_open_at + timedelta(
-            minutes=setup.policy.exit_minutes_after_open):
-        reason = "next_session_exit_deadline_0B"
-    elif gap_observations is not None and (gap_result := _completed_close_gap(
-            CloseIpoPosition(setup, head.quantity, basis, reduced_quantity), gap_observations, decided_at)) is not None:
-        exit_quantity = gap_result.quantity
-        reason = ('ipo_adverse_gap_partial_reduction' if gap_result.action == 'REDUCE' else
-                  'adverse_gap_full_exit_closing_trade_and_completed_open' if gap_observations[0]['kind'] == 'closing_auction_price'
-                  else 'adverse_gap_full_exit_completed_bars')
     else:
-        return None
+        if uses_official_close_calendar(event):
+            setup, calendar_basis = effective_close_exit_schedule(setup, decided_at, calendar)
+            if setup is None:
+                return None
+        if local.date() > setup.next_date:
+            reason = "next_session_management_overdue_0B"
+        elif local.date() == setup.next_date and decided_at >= setup.next_open_at + timedelta(
+                minutes=setup.policy.exit_minutes_after_open):
+            reason = "next_session_exit_deadline_0B"
+        elif gap_observations is not None and (gap_result := _completed_close_gap(
+                CloseIpoPosition(setup, head.quantity, basis, reduced_quantity), gap_observations, decided_at)) is not None:
+            exit_quantity = gap_result.quantity
+            reason = ('ipo_adverse_gap_partial_reduction' if gap_result.action == 'REDUCE' else
+                      'adverse_gap_full_exit_closing_trade_and_completed_open' if gap_observations[0]['kind'] == 'closing_auction_price'
+                      else 'adverse_gap_full_exit_completed_bars')
+        else:
+            return None
     snapshot = {"version": "close_exit_snapshot/v1", "spec_id": spec.spec_id,
         "candidate_package_hash": spec.candidate_package_hash, "account_ref": spec.account_scope.account_ref,
         "execution_run_id": run_id, "entry_proof_id": entry_evidence["proof_id"], "plan": asdict(head.plan),
@@ -510,6 +556,8 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
     if setup.policy.variant != 'CLOSE':
         snapshot.update(version='close_exit_snapshot/v4', position_quantity=head.quantity,
                         reduced_quantity=reduced_quantity)
+    if calendar_basis is not None:
+        snapshot.update(version='close_exit_snapshot/v5', calendar_basis=calendar_basis)
     state = StrategyState(status="open", symbol=event["symbol"], entry_price=basis,
         position_quantity=head.quantity, opened_at=fills[0]["occurred_at"]).to_dict()
     body = {"run_id": run_id, "snapshot_id": content_id("snapshot", snapshot), "symbol": event["symbol"],
@@ -523,7 +571,7 @@ def build_close_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
 
 
 def dispatch_close_exit(repository, runtime, execution, spec, plan, *, parameters, event, trigger_quote, quote, recovery, risk,
-                        gap_observations=None, protection_notice=None):
+                        gap_observations=None, protection_notice=None, calendar=()):
     """Restore frozen management from its native entry and use the existing SELL gate."""
     from .mock_automation_execution import mock_automation_intent_id
 
@@ -534,7 +582,8 @@ def dispatch_close_exit(repository, runtime, execution, spec, plan, *, parameter
     # clock still validates freshness, and the builder rejects a quote that was
     # not yet available at this decision cut.
     decided_at = (risk.observed_at if getattr(repository, 'selected_management_context', None) is not None else now)
-    if saved is not None:
+    if saved is not None and (not uses_official_close_calendar(event)
+                              or saved['snapshot']['reason'] == 'filled_position_protection_0B'):
         snapshot = saved["snapshot"]
         if (saved["proof_id"] != content_id("close_exit", {key: value for key, value in saved.items() if key != "proof_id"})
                 or snapshot["plan"] != asdict(plan) or snapshot["spec_id"] != spec.spec_id
@@ -560,7 +609,7 @@ def dispatch_close_exit(repository, runtime, execution, spec, plan, *, parameter
     prepared = build_close_exit_evidence(spec, run_id=runtime.run_id, parameters=parameters, event=event,
         entry_evidence=entry, root=root, head=head, fill_events=execution.events(root_id),
         trigger_quote=trigger_quote, quote=quote, decided_at=decided_at, now=now, gap_observations=gap_observations,
-        protection_notice=protection_notice,
+        protection_notice=protection_notice, calendar=calendar,
         stop_risk=(repository.load_mock_automation_risk_snapshot(runtime.account_ref,
             protection_notice['risk_trigger']['snapshot_id']) if protection_notice is not None else None),
         **selected_management_close_terms(repository))
@@ -570,5 +619,6 @@ def dispatch_close_exit(repository, runtime, execution, spec, plan, *, parameter
     gate = assess_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)
     if gate.status is MockAutomationGateStatus.BLOCKED:
         return gate, None, None
-    repository.save_close_exit_evidence(runtime.account_ref, close_exit_key(plan), evidence)
+    keyed_decision = decision.decision_id if uses_official_close_calendar(event) else None
+    repository.save_close_exit_evidence(runtime.account_ref, close_exit_key(plan, keyed_decision), evidence)
     return dispatch_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)

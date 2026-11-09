@@ -13,6 +13,7 @@ class RankedStock:
     change_rate: str
     new_high_periods: frozenset[int]
     current_price: int | None = None
+    enrich: bool = True
 
     @property
     def new_high_label(self) -> str:

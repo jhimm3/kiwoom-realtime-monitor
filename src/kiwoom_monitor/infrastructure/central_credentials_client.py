@@ -7,7 +7,7 @@ import uuid
 from threading import RLock
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import Request, HTTPRedirectHandler, HTTPSHandler, build_opener
+from urllib.request import Request, HTTPRedirectHandler, HTTPSHandler, ProxyHandler, build_opener
 
 from .central_server_config import DataSourceSettings
 from .system_ssl import system_ssl_context
@@ -51,13 +51,20 @@ class CentralCredentialsClient:
     def _validate_source(self):
         try:
             parsed = urlsplit(self.source.server_url)
-            valid = (self.source.mode == "personal_server" and parsed.scheme == "https"
-                     and parsed.hostname and not parsed.username and not parsed.password
+            valid = (parsed.hostname and parsed.username is None and parsed.password is None
                      and not parsed.query and not parsed.fragment and self.source.access_token)
             parsed.port
+            if self.source.mode == "local_server":
+                valid = (valid and self.provider == "kiwoom_mock" and parsed.scheme == "http"
+                         and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+                         and parsed.path in {"", "/"})
+            else:
+                valid = valid and self.source.mode == "personal_server" and parsed.scheme == "https"
         except ValueError:
             valid = False
         if not valid:
+            if self.source.mode == "local_server":
+                raise RuntimeError("이 PC의 로컬 서버 주소와 모의계좌 연결을 확인하세요.")
             raise RuntimeError("NAS 모드의 HTTPS 주소와 접속 토큰이 필요합니다.")
 
     @staticmethod
@@ -79,7 +86,10 @@ class CentralCredentialsClient:
                 headers={"Authorization": "Bearer " + self.source.access_token, "Content-Type": "application/json", "X-Request-ID": request_id},
                 data=json.dumps(body).encode("utf-8") if body is not None else None)
             try:
-                opener = build_opener(_NoRedirect(), HTTPSHandler(context=system_ssl_context()))
+                if self.source.mode == "local_server":
+                    opener = build_opener(_NoRedirect(), ProxyHandler({}))
+                else:
+                    opener = build_opener(_NoRedirect(), HTTPSHandler(context=system_ssl_context()))
                 with opener.open(request, timeout=10) as response:
                     if response.geturl() != request.full_url:
                         raise RuntimeError("redirect")
@@ -102,8 +112,10 @@ class CentralCredentialsClient:
                 raise RuntimeError("NAS 응답을 확인하지 못했습니다. 새로 적용하지 말고 요청 상태를 확인하세요.") from None
 
     def load(self):
-        caps = self._request("GET", "/api/v1/capabilities")
-        if caps.get("capabilities", {}).get("runtime_credentials_v1") is not True:
+        caps = self._request("GET", "/api/v1/capabilities").get("capabilities", {})
+        if self.source.mode == "local_server" and caps.get("local_mock_automation_v1") is not True:
+            raise RuntimeError("이 로컬 서버에서 모의계좌 설정을 사용할 수 없습니다.")
+        if caps.get("runtime_credentials_v1") is not True:
             raise RuntimeError("이 NAS 버전은 실행 중 API 설정을 지원하지 않습니다.")
         result = self._request("GET", "/api/v1/settings/credentials")
         if not isinstance(result.get("profiles"), list) or not isinstance(result.get("providers"), list):

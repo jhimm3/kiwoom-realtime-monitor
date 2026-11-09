@@ -429,7 +429,9 @@ def verify_close_legacy_entry(case, store_factory):
 
 
 async def verify_close_runner(case, store_factory, *, protective=False, stopped=False, collector_gap=False,
-                              tamper_collector_gap=False, corrected_gap=False, acceptance=False):
+                              tamper_collector_gap=False, corrected_gap=False, acceptance=False,
+                              corrected_calendar=False, corrected_calendar_gap=False, official_stop=False,
+                              local_http=False, venue='KRX'):
     import asyncio
     from dataclasses import replace
     from types import SimpleNamespace
@@ -439,7 +441,7 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
     from kiwoom_monitor.central_server.execution_runtime import ExecutionRuntime, ManualMockOrderGateway
     from kiwoom_monitor.central_server.mock_automation_supervisor import MockAutomationSupervisor
     from kiwoom_monitor.domain.order_contract import AccountSnapshot, BrokerFill, BrokerOrderSnapshot, BrokerSubmission, OrderState
-    from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import MockAccountRecovery
+    from kiwoom_monitor.infrastructure.kiwoom_rest.mock_account import BrokerOrderDetails, MockAccountRecovery
     from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository
     from kiwoom_monitor.infrastructure.persistence.forward_evaluation_repository import ForwardEvaluationRepository
 
@@ -450,11 +452,17 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
     terms = (CloseMockExecutionPolicy(100, 200, 'acknowledged_0B_bounded_by_signal/v1', 'cancel_at_entry_deadline/v1',
         'acknowledged_0B_bounded_slippage/v1', version='close-mock-execution-policy/v2',
         stopped_management='continue_original_plan/v1') if stopped else None)
+    if venue in {'NXT', 'SOR'}:
+        from tests.unit.test_close_order_management import management_terms
+        terms = management_terms(stopped=stopped)
     context = MockAutomationSpecificationTests._verify_close_entry_claim(case, store, prepare_only=True,
-        close_terms=terms, native_windows=collector_gap)
+        close_terms=terms, native_windows=collector_gap, official_calendar=corrected_calendar or official_stop,
+        venue=venue)
     clock, quotes = context.clock, {context.event['symbol']: context.quote}
     broker_orders, broker_positions = {}, {}
     execution, repository, runtime = context.execution, context.repository, context.runtime
+    physical_venue = 'KRX' if venue == 'SOR' else venue
+    calendar = ()
 
     class Monitor:
         listener = None
@@ -462,16 +470,19 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
         cut = None
 
         async def refresh_recovery(self):
-            orders = []
+            orders, details = [], []
             for order in broker_orders.values():
                 current = replace(order, as_of=clock[0])
                 record = execution.find_by_broker_order_id('mock', ACCOUNT_REF, runtime.run_id, current.broker_order_id)
                 if record is not None:
-                    runtime.reconcile(record.intent.intent_id, current)
+                    runtime.reconcile(record.intent.intent_id, current, broker_venue=physical_venue)
+                    if venue == 'SOR':
+                        details.append(BrokerOrderDetails(order.broker_order_id, record.intent.quantity,
+                            record.intent.side, record.intent.limit_price, physical_venue))
                 orders.append(current)
             reserved = sum(row.remaining_quantity * 105 for row in orders if row.state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED})
             account = AccountSnapshot(ACCOUNT_REF, 100_000, reserved, dict(broker_positions), clock[0])
-            recovery = MockAccountRecovery(account, tuple(orders))
+            recovery = MockAccountRecovery(account, tuple(orders), tuple(details))
             previous = repository.load_latest_mock_automation_risk(ACCOUNT_REF)
             risk = build_mock_automation_risk_snapshot(recovery, execution.account_events('mock', ACCOUNT_REF).events,
                 (), execution.active_intents('mock', ACCOUNT_REF, runtime.run_id), execution_run_id=runtime.run_id,
@@ -500,6 +511,20 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
         def latest_automation_execution_cut(self):
             return self.cut if self.enabled else None
 
+    def local_client(supervisor):
+        from fastapi import FastAPI, Header, HTTPException
+        from httpx import ASGITransport, AsyncClient
+        from kiwoom_monitor.central_server.mock_automation_routes import create_mock_automation_router
+
+        def authorize(authorization: str = Header("")):
+            if authorization != "Bearer local-test":
+                raise HTTPException(401)
+
+        app = FastAPI()
+        app.include_router(create_mock_automation_router(supervisor, authorize))
+        return AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1",
+                           headers={"Authorization": "Bearer local-test"})
+
     async def assemble():
         from kiwoom_monitor.central_server.mock_runtime import (
             MOCK_ACCOUNT_RUNTIME_CONTEXT_VERSION, MockAccountRuntimeMode, MockAutomationRuntimeContext,
@@ -521,12 +546,21 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
             case.assertEqual((PROFILE_ID, 1, 1), (profile_id, expected_settings_revision, credential_revision))
         supervisor = MockAutomationSupervisor(store, SimpleNamespace(bundle=lambda _: bundle,
             require_execution_settings=require_settings), poll_seconds=3600,
-            price_source=lambda symbol: quotes.get(symbol), now_provider=lambda: clock[0])
+            price_source=lambda symbol: quotes.get(symbol), now_provider=lambda: clock[0],
+            nxt_price_source=lambda symbol: quotes.get(symbol),
+            close_calendar=(lambda _at: calendar) if corrected_calendar else None)
         case.addAsyncCleanup(supervisor.close)
         case.addAsyncCleanup(gateway.close)
         if control.desired_state.value == 'RUNNING':
-            status = await supervisor.activate(credential_profile_id=PROFILE_ID, account_ref=ACCOUNT_REF,
-                spec_id=context.spec.spec_id, expected_settings_revision=1, credential_revision=1)
+            start = dict(credential_profile_id=PROFILE_ID, account_ref=ACCOUNT_REF,
+                         spec_id=context.spec.spec_id, expected_settings_revision=1, credential_revision=1)
+            if local_http:
+                async with local_client(supervisor) as http:
+                    response = await http.post("/api/v1/mock-automation/start", json=start)
+                case.assertEqual(200, response.status_code, response.text)
+                status = response.json()
+            else:
+                status = await supervisor.activate(**start)
             case.assertEqual(('AUTOMATIC', context.spec.spec_id),
                              (status['runtime_mode'], status['control']['active_spec_id']))
             runner = supervisor._runners[ACCOUNT_REF]
@@ -560,6 +594,10 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
     proof = repository.load_close_entry_evidence(ACCOUNT_REF, buy.intent.plan.plan_id)
     case.assertEqual('close_entry_snapshot/v2', proof['snapshot']['version'])
     case.assertEqual(buy.intent.symbol, proof['snapshot']['candidate']['symbol'])
+    if corrected_calendar or official_stop:
+        from kiwoom_monitor.application.close_mock_execution import uses_official_close_calendar
+
+        case.assertTrue(uses_official_close_calendar(proof['snapshot']['candidate']))
     fills = (BrokerFill('runner-first-fill', 2, 105, clock[0]),)
     broker_positions[buy.intent.symbol] = 2
     broker_orders[buy.broker_order_id] = BrokerOrderSnapshot(buy.broker_order_id, ACCOUNT_REF, buy.intent.symbol,
@@ -641,7 +679,8 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
     store.initialize()
     case.enterContext(patch.object(store, '_execution_wall_now', lambda: clock[0], create=True))
     repository, execution = ForwardEvaluationRepository(store), ExecutionRepository(store)
-    runtime = ExecutionRuntime(OrderLifecycle(execution, context.transport, now_provider=lambda: clock[0]), execution,
+    runtime = ExecutionRuntime(OrderLifecycle(execution, context.transport, now_provider=lambda: clock[0],
+                                              **context.route_options), execution,
         account_ref=ACCOUNT_REF, run_id=context.runtime.run_id, owner_token='close-runner-restored', now_provider=lambda: clock[0])
     case.addCleanup(runtime.stop)
     runtime.start(new_orders_enabled=False)
@@ -676,8 +715,114 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
             await runner.episode.advance_once()
             case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
             case.assertEqual((), execution.active_intents('mock', ACCOUNT_REF, runtime.run_id))
+    if corrected_calendar:
+        from dataclasses import asdict
+        from datetime import time
+        from kiwoom_monitor.application.close_mock_execution import CLOSE_EXIT_COLLECTION, close_exit_key, load_close_exit_for_intent
+        from kiwoom_monitor.application.selected_order_recovery import management_checkpoint_references
+        from kiwoom_monitor.central_server.krx_calendar_evidence import _encode, _evidence
+        from kiwoom_monitor.domain.selected_order_evidence import PLAN_MANAGEMENT_VERSION
+
+        example = context.example
+        new_day = example.tuesday + timedelta(days=1)
+        published = datetime.combine(example.tuesday, time(8), example.published.tzinfo)
+        source = 'https://open.krx.co.kr/fixture/corrected-calendar'
+
+        def publish_calendar(open_time):
+            nonlocal calendar
+            calendar = (*example.calendar[:-1], _evidence(example.tuesday, None, source, published),
+                        _evidence(new_day, (open_time, time(15, 30)), source, published))
+            store.upsert_documents('krx_equity_calendar', [{'owner': 'krx', 'key': 'schedule', 'document': {
+                'version': 'strategy-reference/v1', 'listings': [], 'checked_at': clock[0].isoformat(),
+                'calendar': [_encode(row) for row in calendar],
+            }}])
+
+        async def advance_at(day, hour, minute, *, opens=time(10)):
+            clock[0] = datetime.combine(day, time(hour, minute), example.published.tzinfo)
+            quotes[buy.intent.symbol] = {**context.quote, 'price_won': 103, 'available_at': clock[0]}
+            publish_calendar(opens)
+            await monitor.refresh_recovery()
+            await runner.episode.advance_once()
+
+        case.assertTrue(supervisor.needs_close_calendar())
+        await advance_at(example.tuesday, 12, 0)
+        await advance_at(new_day, 9, 59)
+        await advance_at(new_day, 10, 7)
+        case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
+
+        original_submit = runtime._lifecycle.submit
+        attempts = []
+
+        def change_during_claim(intent_id, account, **kwargs):
+            attempts.append(intent_id)
+            publish_calendar(time(11))
+            return original_submit(intent_id, account, **kwargs)
+
+        with patch.object(runtime._lifecycle, 'submit', side_effect=change_during_claim):
+            await advance_at(new_day, 10, 8)
+        attempted, = attempts
+        case.assertEqual('CLOSE_EXIT_KRX_CALENDAR_CHANGED', runner.episode._minute_management.status['reason'])
+        case.assertEqual(OrderState.REJECTED, execution.load(attempted).state)
+        case.assertEqual((), execution.active_intents('mock', ACCOUNT_REF, runtime.run_id))
+        case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
+        await advance_at(new_day, 10, 9, opens=time(11))
+        case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
+        expected_reason = 'next_session_exit_deadline_0B'
+        if corrected_calendar_gap:
+            example.following = calendar[-1].sessions[0]
+            example.opening = example.bar(example.following, time(11), price=102, revision='corrected-open', opening=96)
+            clock[0] = datetime.fromisoformat(example.opening.available_at)
+            publish_gap_observations(store, example, clock)
+            quotes[buy.intent.symbol] = {**context.quote, 'price_won': 103, 'available_at': clock[0]}
+            await monitor.refresh_recovery()
+            await runner.episode.advance_once()
+            expected_reason = 'adverse_gap_full_exit_completed_bars'
+        else:
+            await advance_at(new_day, 11, 8, opens=time(11))
+        sell, = execution.active_intents('mock', ACCOUNT_REF, runtime.run_id)
+        evidence = load_close_exit_for_intent(repository, sell.intent)
+        case.assertEqual((new_day.isoformat(), '11:00:00+09:00', expected_reason, 3),
+            (evidence['snapshot']['calendar_basis']['next_date'],
+             evidence['snapshot']['calendar_basis']['next_open_at'].split('T')[1],
+             evidence['snapshot']['reason'], sell.intent.quantity))
+        case.assertEqual(['BUY', 'SELL'], [row[1] for row in context.transport.calls])
+        case.assertEqual(proof, repository.load_close_entry_evidence(ACCOUNT_REF, buy.intent.plan.plan_id))
+        packet = {'version': PLAN_MANAGEMENT_VERSION, 'account_ref': ACCOUNT_REF, 'source_spec_id': context.spec.spec_id,
+                  'order': asdict(buy.intent), 'management_closure': {'shadow_candidate': proof['snapshot']['candidate']},
+                  'plan_orders': [{'order': asdict(sell.intent), 'native_refs': {}}]}
+        case.assertIn((CLOSE_EXIT_COLLECTION, ACCOUNT_REF, close_exit_key(sell.intent.plan, sell.intent.decision_id)),
+                      management_checkpoint_references(packet, {}))
+        await supervisor.close()
+        return
     clock[0] = datetime.fromisoformat(context.example.opening.available_at)
     quotes[buy.intent.symbol] = {**context.quote, 'price_won': 103, 'available_at': clock[0]}
+    if local_http:
+        from kiwoom_monitor.application.news_material import RECORDED_CONTRACT_FILINGS
+        from tests.unit.test_news_material import recorded_filing
+
+        initial = recorded_filing('kind:close-overnight', (clock[0] - timedelta(hours=2)).isoformat(),
+                                  effective=(context.example.auction.ends_at + timedelta(hours=1)).isoformat())
+        correction = recorded_filing('kind:close-correction', (clock[0] + timedelta(seconds=1)).isoformat(),
+            effective=(clock[0] - timedelta(minutes=5)).isoformat(), parent=initial['filing_ref'],
+            outcome='TERMINATION_REVOKED')
+
+        def save_filing(document):
+            with patch.object(store, '_now_provider', lambda: datetime.fromisoformat(document['available_at'])):
+                store.upsert_documents(RECORDED_CONTRACT_FILINGS, [{'owner': buy.intent.symbol,
+                    'key': document['filing_ref'], 'document': {**document, 'symbol': buy.intent.symbol}}])
+
+        async def read_status():
+            async with local_client(supervisor) as http:
+                url = f'/api/v1/mock-automation/accounts/{ACCOUNT_REF}'
+                params = {'credential_profile_id': PROFILE_ID}
+                unauthorized = await http.get(url, params=params, headers={'Authorization': ''})
+                case.assertEqual(401, unauthorized.status_code)
+                response = await http.get(url, params=params)
+                case.assertEqual(200, response.status_code, response.text)
+                return response.json()
+
+        save_filing(initial)
+        case.assertNotIn('held_close_material', await read_status())
     if protective:
         case.assertEqual(first_notice, runner.episode._protection_snapshot())
         case.assertGreater((clock[0] - datetime.fromisoformat(first_notice['requested_at'])).total_seconds(),
@@ -686,6 +831,24 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
     await runner.episode.advance_once()
     if not protective:
         case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
+    if local_http:
+        save_filing(correction)
+        held, = (await read_status())['held_close_material']
+        adverse, = held['changes_after_entry']
+        case.assertEqual((buy.intent.plan.plan_id, buy.intent.symbol, proof['decision']['decided_at'],
+                          clock[0].isoformat(), 'planned_overnight_hold', []),
+                         (held['plan_id'], held['symbol'], held['entry_cut'], held['cut'], held['reason'], held['entry_events']))
+        case.assertEqual((initial['filing_ref'], 'FUNDAMENTAL_ADVERSE', initial['available_at'], initial['body_ref']),
+                         (adverse['revision_ref'], adverse['effect'], adverse['available_at'], adverse['body_ref']))
+        clock[0] += timedelta(seconds=1)
+        quotes[buy.intent.symbol] = {**quotes[buy.intent.symbol], 'available_at': clock[0]}
+        await runner.episode.advance_once()
+        held, = (await read_status())['held_close_material']
+        revised, = held['changes_after_entry']
+        case.assertEqual((initial['filing_ref'], correction['filing_ref'], 'INTACT', correction['available_at']),
+                         (revised['event_ref'], revised['revision_ref'], revised['effect'], revised['available_at']))
+        case.assertEqual(['BUY'], [row[1] for row in context.transport.calls])
+        context.example.opening = replace(context.example.opening, available_at=clock[0].isoformat())
     if corrected_gap:
         # A complete initially known opening price says HOLD. A later complete
         # revision of that same minute must replace it before any exit is fixed.
@@ -735,15 +898,28 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
         case.assertEqual((3, 0), (head.quantity, head.unreconciled_sell_quantity))
         await supervisor.close()
         return
-    await runner.episode.advance_once()
+    if local_http:
+        with patch.object(store, 'load_strategy_material_inputs', side_effect=RuntimeError('synthetic news read outage')) as read:
+            with case.assertLogs('kiwoom_monitor.central_server.mock_automation_supervisor', 'WARNING'):
+                missing, = (await read_status())['held_close_material']
+            case.assertEqual('UNAVAILABLE', missing['status'])
+            read.reset_mock()
+            await runner.episode.advance_once()
+            read.assert_not_called()
+    else:
+        await runner.episode.advance_once()
     pending = execution.active_intents('mock', ACCOUNT_REF, runtime.run_id)
     case.assertEqual(1, len(pending), runner.episode.status)
     sell, = pending
     case.assertEqual((OrderState.ACCEPTED, 3, 103, buy.intent.plan.plan_id),
                      (sell.state, sell.intent.quantity, sell.intent.limit_price, sell.intent.plan.plan_id))
+    if local_http:
+        held, = (await read_status())['held_close_material']
+        case.assertEqual((sell.intent.created_at.isoformat(), 'close_exit_submitted', correction['filing_ref']),
+                         (held['cut'], held['reason'], held['changes_after_entry'][0]['revision_ref']))
     if protective:
-        from kiwoom_monitor.application.close_mock_execution import close_exit_key
-        evidence = repository.load_close_exit_evidence(ACCOUNT_REF, close_exit_key(sell.intent.plan))
+        from kiwoom_monitor.application.close_mock_execution import load_close_exit_for_intent
+        evidence = load_close_exit_for_intent(repository, sell.intent)
         case.assertEqual(('close_exit_snapshot/v2', 94, 103, 'filled_position_protection_0B'),
             (evidence['snapshot']['version'], evidence['snapshot']['trigger_quote']['price_won'],
              evidence['snapshot']['quote']['price_won'], evidence['snapshot']['reason']))
@@ -807,6 +983,37 @@ async def verify_close_runner(case, store_factory, *, protective=False, stopped=
 
 
 class CloseRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sor_close_starts_through_the_normal_api_and_recovers_overnight(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-sor.sqlite3'
+        await verify_close_runner(self, lambda: SQLiteQueryStore(db), local_http=True, venue='SOR')
+
+    async def test_nxt_close_from_standard_start_api_reopens_and_exits_next_day(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-nxt.sqlite3'
+        await verify_close_runner(self, lambda: SQLiteQueryStore(db), local_http=True, venue='NXT')
+
+    async def test_held_close_uses_corrected_trading_day_and_open_and_rechecks_native_claim(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-calendar-correction.sqlite3'
+        await verify_close_runner(self, lambda: SQLiteQueryStore(db), stopped=True, corrected_calendar=True)
+
+    async def test_held_close_gap_uses_the_corrected_opening_bar(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-calendar-gap.sqlite3'
+        await verify_close_runner(self, lambda: SQLiteQueryStore(db), stopped=True, corrected_calendar=True,
+                                  corrected_calendar_gap=True)
+
+    async def test_official_calendar_unavailable_keeps_first_price_protection(self):
+        from kiwoom_monitor.central_server.database import SQLiteQueryStore
+
+        db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-calendar-stop.sqlite3'
+        await verify_close_runner(self, lambda: SQLiteQueryStore(db), stopped=True, protective=True, official_stop=True)
+
     async def test_close_acceptance_preserves_holidays_halt_and_final_journal_plan_identity(self):
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
 
@@ -865,4 +1072,4 @@ class CloseRunnerTests(unittest.IsolatedAsyncioTestCase):
         from kiwoom_monitor.central_server.database import SQLiteQueryStore
 
         db = Path(self.enterContext(tempfile.TemporaryDirectory())) / 'close-runner.sqlite3'
-        await verify_close_runner(self, lambda: SQLiteQueryStore(db))
+        await verify_close_runner(self, lambda: SQLiteQueryStore(db), local_http=True)

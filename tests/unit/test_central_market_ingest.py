@@ -377,7 +377,9 @@ class MarketDataIngestorTests(unittest.TestCase):
         self.assertEqual(CandidateUniverse.RANKING_TOP20, ranking_metadata.candidate_universe)
         self.assertEqual("2026-09-07T23:05:31+00:00", ranking_revisions[0]["available_at"])
         self.assertEqual("SOR", investor[0]["payload"]["market"])
-        self.assertEqual("SOR", program[0]["payload"]["market"])
+        # The public REST response does not identify the day of these rows.
+        # Only TOP20's verified after-close workflow records a recovery batch.
+        self.assertEqual([], program)
 
     def test_ranking_ingest_outside_morning_window_does_not_persist(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -387,11 +389,17 @@ class MarketDataIngestorTests(unittest.TestCase):
                 "dt": "20260908", "tm": "090000", "stk_cd": "005930", "bigd_rank": "1",
             }]}
             for query_type in ("1", "5"):
-                for hour, minute in ((7, 54), (8, 6), (9, 0)):
+                for hour, minute in ((7, 54), (7, 55), (7, 59), (8, 6), (9, 0), (20, 0)):
                     MarketDataIngestor(
                         store, now_provider=lambda h=hour, m=minute: datetime(2026, 9, 8, h, m),
                     ).ingest("ka00198", {"qry_tp": query_type}, payload)
+                MarketDataIngestor(store, now_provider=lambda: datetime(2026, 9, 8, 8)).ingest(
+                    "ka00198", {"qry_tp": query_type}, {
+                        "item_inq_rank": [dict(payload["item_inq_rank"][0], tm="075930")],
+                    },
+                )
                 self.assertEqual([], store.load_dataset_snapshots("ranking", query_type))
+                self.assertEqual([], store.load_observation_revisions("ranking", query_type))
             store.close()
 
     def test_archives_new_high_fundamentals_and_nxt_metadata(self) -> None:

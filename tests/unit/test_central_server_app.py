@@ -4326,6 +4326,153 @@ class CentralServerAppTests(unittest.TestCase):
             export.assert_not_called()
             token.assert_not_called()
 
+    def test_daily_decline_native_market_reuses_stored_index_and_approved_0b_without_execution_policy(self) -> None:
+        import hashlib
+
+        from kiwoom_monitor.central_server.market_ingest import MarketDataIngestor
+        from tests.unit.test_daily_decline import BARS, CUT, HISTORY, SIGNAL_DAY, SYMBOL, synthetic_scenario
+        from tests.unit.test_news_material import recorded_filing
+
+        clock = [CUT]
+        fixture = synthetic_scenario()
+        document = {key: fixture[key] for key in ("symbol", "venue", "signal_day", "basis")}
+        document.update(
+            version="dd-shadow-setup-evidence/v2", benchmark_market="KOSPI",
+            policy={"lookback_sessions": 2, "minimum_decline_bps": 2000,
+                    "minimum_relative_decline_bps": 1000, "minimum_volatility_multiple_bps": 20000},
+            strategy_references={"version": "strategy-reference/v1", "calendar": fixture["calendar"], "listings": []},
+        )
+        url = "/api/v1/research/daily-decline-setup"
+        headers = {"Authorization": "Bearer private-token"}
+        signal_key, previous_key = (day.strftime("%Y%m%d") for day in (SIGNAL_DAY, HISTORY[-1]))
+
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            path = Path(directory) / "dd-native-market.sqlite3"
+            store = SQLiteQueryStore(path, now_provider=lambda: clock[0])
+            stack.callback(store.close)
+            stack.enter_context(patch("kiwoom_monitor.central_server.app.create_query_store", return_value=store))
+            stack.enter_context(patch("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.server_now",
+                                      side_effect=lambda: clock[0]))
+            token = stack.enter_context(patch("kiwoom_monitor.infrastructure.kiwoom_rest.KiwoomRestClient.get_access_token",
+                                               side_effect=AssertionError("DD must use existing market inputs")))
+            rest = stack.enter_context(patch("kiwoom_monitor.central_server.app.CentralRestBroker.request",
+                                             side_effect=AssertionError("DD must not query a broker")))
+            stack.enter_context(patch("kiwoom_monitor.central_server.app.CentralRestBroker.start", new_callable=AsyncMock))
+            stack.enter_context(patch("kiwoom_monitor.central_server.app.CentralRealtimeCollector.start", new_callable=AsyncMock))
+            app = create_app(CentralServerSettings(
+                f"sqlite:///{path}", "private-token", kiwoom_app_key="fixture-key", kiwoom_secret_key="fixture-secret",
+                autonomous_top20_enabled=False, market_event_collection_enabled=False, news_history_jobs_enabled=False,
+            ))
+            client = stack.enter_context(TestClient(app))
+            collector = app.state.realtime_collector
+            ingestor = MarketDataIngestor(store, now_provider=lambda: clock[0])
+
+            def assess(value):
+                raw = json.dumps(value).encode()
+                return client.post(url, headers=headers, content=raw, params={"evidence_sha256": hashlib.sha256(raw).hexdigest()})
+
+            def store_index(market, daily):
+                store.save_dataset_snapshot("market_index_chart", f"{signal_key}:{market}", signal_key,
+                    {"market": market, "as_of": SIGNAL_DAY.isoformat(), "daily": daily, "minutes": []})
+
+            def push_trade(item, price):
+                collector._publish_parsed({"trnm": "REAL", "data": [
+                    {"type": "0B", "item": item, "values": {"10": price, "15": "2", "20": clock[0].strftime("%H%M%S")}},
+                ]})
+
+            for bar in BARS:
+                day = bar["observation_key"]
+                clock[0] = datetime.fromisoformat(bar["available_at"])
+                prices = bar["payload"]
+                ingestor.ingest("ka10081", {"stk_cd": SYMBOL, "upd_stkpc_tp": "1"}, {"stk_dt_pole_chart_qry": [
+                    {"dt": day.replace("-", ""), "open_pric": str(prices["open"]), "high_pric": str(prices["high"]),
+                     "low_pric": str(prices["low"]), "cur_prc": str(prices["close"])},
+                ]})
+            store_index("kospi", [{"dt": signal_key, "cur_prc": "-98000"}, {"dt": previous_key, "cur_prc": "100000"}])
+            store_index("kosdaq", [{"dt": signal_key, "cur_prc": "+101000"}, {"dt": previous_key, "cur_prc": "100000"}])
+
+            clock[0] = CUT
+            response = assess(document)
+            self.assertEqual(200, response.status_code)
+            first = response.json()
+            self.assertEqual((-200, 1618), (first["benchmark"]["return_bps"], first["setup"]["relative_decline_bps"]))
+            self.assertEqual("QUALIFIED", first["setup"]["status"])
+            self.assertEqual("UNKNOWN", first["setup"]["catalyst_state"])
+            self.assertIn(first["benchmark"]["evidence_id"], first["setup"]["evidence_ids"])
+            self.assertEqual("UNKNOWN", first["price_observation"]["status"])
+            self.assertEqual({
+                "signal_price_basis": "adjusted_daily",
+                "raw_price_protection": {"status": "UNKNOWN", "reason": "raw_protection_level_unverified"},
+            }, first["input_assessment"])
+
+            original = {"symbol": SYMBOL, "ref": "original", "revises": None, "stage": "CONFIRMED",
+                        "effect": "INTACT", "effective_at": (CUT - timedelta(hours=1)).isoformat(),
+                        "available_at": (CUT - timedelta(hours=1)).isoformat(), "source_ref": "notice-1",
+                        "source_version": "fixture/v1"}
+            amendment = {**original, "ref": "amendment", "revises": "original", "stage": "CORRECTED",
+                         "effect": "DAMAGED", "available_at": (CUT + timedelta(seconds=1)).isoformat(),
+                         "source_ref": "notice-2"}
+            with_news = {**document, "material_news": {"event_ref": "original", "revisions": [original, amendment]}}
+            self.assertEqual("INTACT", assess(with_news).json()["setup"]["catalyst_state"])
+            clock[0] += timedelta(seconds=1)
+            revised = assess(with_news).json()
+            self.assertEqual(("QUALIFIED", "DAMAGED", 1618, False),
+                (revised["setup"]["status"], revised["setup"]["catalyst_state"],
+                 revised["setup"]["relative_decline_bps"], revised["order_authorized"]))
+            self.assertIn("amendment", revised["setup"]["evidence_ids"])
+            clock[0] = CUT
+
+            alternate = assess({**document, "benchmark_market": "KOSDAQ"}).json()
+            self.assertEqual((100, 1918), (alternate["benchmark"]["return_bps"], alternate["setup"]["relative_decline_bps"]))
+            self.assertEqual(422, assess({**document, "policy": {**document["policy"], "max_hold_sessions": 3}}).status_code)
+            clock[0] = CUT - timedelta(minutes=2)
+            early = {**document, "basis": {**document["basis"], "available_at": clock[0].isoformat()}}
+            self.assertEqual("benchmark_unavailable", assess(early).json()["setup"]["reason"])
+            clock[0] = CUT
+            client.portal.call(lambda: collector._apply_trade_source_approval({(SYMBOL, "KRX")}, clock[0], reset_all=False))
+            client.portal.call(push_trade, SYMBOL, "899")
+            self.assertEqual("UNKNOWN", assess(document).json()["price_observation"]["status"])
+
+            clock[0] = datetime(2026, 9, 22, 9, 1, tzinfo=KST)
+            client.portal.call(lambda: collector._apply_trade_source_approval(
+                {(SYMBOL, "KRX"), (SYMBOL, "NXT")}, clock[0], reset_all=False))
+            client.portal.call(push_trade, f"{SYMBOL}_NX", "901")
+            self.assertEqual("UNKNOWN", assess(document).json()["price_observation"]["status"])
+            client.portal.call(push_trade, SYMBOL, "932")
+            live = assess(document).json()
+            self.assertEqual(("OBSERVED", 932, clock[0].isoformat(), False),
+                tuple(live["price_observation"][key] for key in ("status", "price_won", "available_at", "durable")))
+            self.assertEqual("unadjusted", live["price_observation"]["price_basis"])
+            self.assertEqual(first["input_assessment"], live["input_assessment"])
+            self.assertEqual((None, False), (live["candidate"], live["order_authorized"]))
+
+            recorded = (
+                recorded_filing("recorded-root", (clock[0] - timedelta(seconds=1)).isoformat()),
+                recorded_filing("recorded-correction", (clock[0] + timedelta(seconds=1)).isoformat(),
+                                parent="recorded-root", outcome="TERMINATION_REVOKED"),
+            )
+            store.upsert_documents("news_contract_filing", [
+                {"owner": SYMBOL, "key": row["filing_ref"], "document": row} for row in recorded
+            ])
+            before = assess(document).json()
+            self.assertEqual("recorded-root", before["selected_material_event_ref"])
+            self.assertEqual(("QUALIFIED", "DAMAGED"), (before["setup"]["status"], before["setup"]["catalyst_state"]))
+            self.assertEqual("recorded-root", before["material_news"]["events"][0]["revision_ref"])
+            clock[0] += timedelta(seconds=1)
+            after = assess({**document, "material_event_ref": "recorded-root"}).json()
+            self.assertEqual(("QUALIFIED", "INTACT", False),
+                             (after["setup"]["status"], after["setup"]["catalyst_state"], after["order_authorized"]))
+            self.assertEqual("recorded-correction", after["contract_events"][0]["filing_ref"])
+            self.assertEqual("INTACT", after["material_news"]["events"][0]["effect"])
+            store_index("kospi", [{"dt": signal_key, "cur_prc": "98000"}, {"dt": "20260916", "cur_prc": "100000"}])
+            missing = assess(document).json()
+            self.assertEqual("benchmark_unavailable", missing["setup"]["reason"])
+            self.assertEqual("OBSERVED", missing["price_observation"]["status"])
+            clock[0] += timedelta(days=1)
+            self.assertEqual("UNKNOWN", assess(document).json()["price_observation"]["status"])
+            rest.assert_not_called()
+            token.assert_not_called()
+
     def test_micro_shadow_input_api_reads_native_collector_vi_and_krx_day_at_one_cut(self) -> None:
         cut = datetime(2026, 9, 11, 9, 17, 9, tzinfo=KST)
         clock = [cut]
@@ -4344,6 +4491,8 @@ class CentralServerAppTests(unittest.TestCase):
             stack.enter_context(patch("kiwoom_monitor.central_server.app.CentralRealtimeCollector.start", new_callable=AsyncMock))
             ws = stack.enter_context(patch("kiwoom_monitor.central_server.realtime_collector.connect",
                                            side_effect=AssertionError("no broker WS in MICRO read fixture")))
+            kind = stack.enter_context(patch("kiwoom_monitor.infrastructure.krx.kind_trading_halts.KindTradingHalts._request",
+                                             side_effect=AssertionError("no KIND HTTP in MICRO read fixture")))
             path = Path(directory) / "monitor.sqlite3"
             app = create_app(CentralServerSettings(
                 f"sqlite:///{path}", "private-token", query_access_token="query-token",
@@ -4365,16 +4514,22 @@ class CentralServerAppTests(unittest.TestCase):
                 async def seed_native_rows():
                     collector._apply_trade_source_approval({("005930", "KRX"), ("005930", "NXT")}, cut, reset_all=False)
                     collector.set_ram_observation_retention(20, owner=owner)
+                    clock[0] = cut.replace(second=0)
+                    collector._observe_micro_books({"trnm": "REAL", "data": [
+                        {"type": "0D", "item": "005930", "values": {"21": "091700", "23": "102"}},
+                    ]})
+                    clock[0] = cut
                     collector._publish_parsed({"trnm": "REAL", "data": [
+                        {"type": "0B", "item": "005930", "values": {"10": "102", "15": "3", "20": "091701"}},
                         {"type": "0B", "item": "005930", "values": {"10": "104", "15": "2", "20": "091703"}},
                         {"type": "0B", "item": "005930_NX", "values": {"10": "106", "15": "1", "20": "091704"}},
                     ]})
-                    base = {"9001": "A005930", "9068": "1", "1221": "100", "1223": "091501",
-                            "1224": "091701", "1490": "1", "9081": "KRX"}
+                    base = {"9001": "A005930", "9068": "2", "1221": "100", "1223": "091501",
+                            "1224": "000000", "1490": "1", "9081": "KRX"}
                     await publish_vi(base)
-                    await publish_vi(base | {"9068": "2"})
+                    await publish_vi(base | {"1224": "091701"})
                     clock[0] += timedelta(seconds=1)
-                    await publish_vi(base | {"9068": "2", "1490": "2"})
+                    await publish_vi(base | {"1224": "091701", "1490": "2"})
                     clock[0] = cut
 
                 def save_day(observation_second=0):
@@ -4388,6 +4543,13 @@ class CentralServerAppTests(unittest.TestCase):
 
                 client.portal.call(seed_native_rows)
                 save_day()
+                prior_day = (cut.date() - timedelta(days=1)).isoformat()
+                store.upsert_documents("market_data_coverage", [{
+                    "owner": f"{prior_day}:005930:KRX", "key": "complete", "document": {
+                        "kind": "minute_no_trade", "reason": "krx_full_day_halt", "as_of": prior_day,
+                        "halt_proof": {"source": "krx-kind", "starts_on": prior_day},
+                    },
+                }])
                 with patch.object(collector, "ram_observation_snapshot", wraps=collector.ram_observation_snapshot) as ram, \
                         patch.object(store, "load_document", wraps=store.load_document) as day_read, \
                         patch.object(store, "load_market_event_history", wraps=store.load_market_event_history) as vi_read:
@@ -4409,22 +4571,42 @@ class CentralServerAppTests(unittest.TestCase):
                                      (result["status"], result["candidate"], result["order_authorized"], result["decision_at"]))
                     self.assertEqual(["native_quote_depth", "native_instrument_tradability", "native_cross_stream_order",
                                       "native_vi_release_execution_price"], result["missing_inputs"])
-                    self.assertEqual(("OBSERVED", 1, "2026-09-11T09:17:03+09:00"),
+                    self.assertEqual(("OBSERVED", 2, "2026-09-11T09:17:03+09:00"),
                                      (result["trade"]["state"], result["trade"]["count"], result["trade"]["latest"]["observed_at"]))
+                    comparison = result["trade"]["release_comparison"]
+                    self.assertEqual((1, 102, 104, None), (comparison["same_second_count"],
+                        comparison["single_same_second_trade"]["price_won"],
+                        comparison["first_retained_later_trade"]["price_won"], comparison["release_execution_price_won"]))
                     self.assertEqual({("1223", "2026-09-11T09:15:01+09:00"), ("1224", "2026-09-11T09:17:01+09:00")},
                                      {(row["fid"], row["observed_at"]) for row in result["vi"]["observations"]})
                     self.assertEqual(2, len(result["vi"]["observations"]))
+                    evidence = result["market_state_evidence"]
+                    self.assertEqual({"state": "OBSERVED", "source": "kiwoom_websocket_0s", "status_code": "3",
+                                      "observed_at": "2026-09-11T09:00:00+09:00", "available_at": cut.isoformat()},
+                                     evidence["market_operation_0s"])
+                    self.assertEqual({"state": "OBSERVED", "source": "kiwoom-websocket-1h",
+                                      "last_observed": result["vi"]["latest_episode"]["release"]}, evidence["vi_1h"])
+                    self.assertEqual({"state": "UNKNOWN", "reason": "no_visible_kind_trading_notice"},
+                                     evidence["kind_halt_resume"])
                     ram.assert_called_once_with(("005930",), seconds=8, include_micro_books=True)
                     day_read.assert_called_once_with("krx_trading_day_observations", cut.date().isoformat(), "latest")
                     vi_read.assert_called_once_with("vi", code="005930", limit=7)
                     self.assertEqual(["day", "vi", "ram"], [entry[0] for entry in read_order.mock_calls])
-
                     nxt = client.get(url, params=params | {"venue": "NXT"}, headers=admin).json()
                     scalp = client.get(url, params=params | {"variant": "BOOK_SCALP"}, headers=admin).json()
                     self.assertEqual(("unconfirmed_trading_date", "OBSERVED"), (nxt["vi"]["reason"], nxt["trade"]["state"]))
+                    self.assertTrue(all(source["state"] == "UNKNOWN" for source in nxt["market_state_evidence"].values()))
                     self.assertIsNone(scalp["vi"])
-                    self.assertEqual(1, day_read.call_count)
-                    self.assertEqual(1, vi_read.call_count)
+                    self.assertEqual(evidence, scalp["market_state_evidence"])
+                    self.assertEqual(2, day_read.call_count)
+                    self.assertEqual(2, vi_read.call_count)
+
+                    matched = client.get(url, params=params | {"lookback_seconds": 10}, headers=admin).json()
+                    proof = matched["trade"]["release_comparison"]
+                    self.assertEqual(("INDICATIVE_MATCH", 102, None, False), (
+                        proof["indicative_match"]["state"], proof["indicative_match"]["candidate_price_won"],
+                        proof["release_execution_price_won"], matched["order_authorized"],
+                    ))
 
                     async def retain_admitted_book(values):
                         collector._observe_micro_books({"trnm": "REAL", "data": [
@@ -4450,22 +4632,49 @@ class CentralServerAppTests(unittest.TestCase):
                                       book["latest"]["indicative_price_won"], book["latest"]["bids"][0]["quantity"]))
                     self.assertEqual(["native_instrument_tradability", "native_cross_stream_order"],
                                      observed["missing_inputs"])
+                    self.assertEqual({"state": "UNKNOWN", "reason": "same_reported_second",
+                                      "application_receipt_order": {"state": "UNKNOWN", "reason": "distinct_receipt_clocks_unavailable"}},
+                                     observed["book_trade_clock_order"])
+                    clock[0] += timedelta(milliseconds=250)
+                    client.portal.call(retain_admitted_book, ask | {"51": "104", "71": "3"})
+                    same_second = client.get(url, params=scalp_params, headers=admin).json()["book_trade_clock_order"]
+                    self.assertEqual(("UNKNOWN", "application_receipt_clock", "TRADE_BEFORE_BOOK"), (
+                        same_second["state"], same_second["application_receipt_order"]["basis"],
+                        same_second["application_receipt_order"]["relation"],
+                    ))
+                    clock[0] = cut
+                    client.portal.call(retain_admitted_book, ask | {"21": "091702", "51": "104", "71": "3"})
+                    preceding = client.get(url, params=scalp_params, headers=admin).json()["book_trade_clock_order"]
+                    self.assertEqual(("OBSERVED", "reported_clock_seconds", "BOOK_BEFORE_TRADE"),
+                                     (preceding["state"], preceding["basis"], preceding["relation"]))
+                    client.portal.call(retain_admitted_book, ask | {"21": "091704", "51": "104", "71": "3"})
+                    following = client.get(url, params=scalp_params, headers=admin).json()["book_trade_clock_order"]
+                    self.assertEqual("TRADE_BEFORE_BOOK", following["relation"])
                     self.assertEqual("UNKNOWN", client.get(
                         url, params=scalp_params | {"venue": "NXT"}, headers=admin,
                     ).json()["book"]["state"])
 
+                    client.portal.call(publish_vi, {"9001": "A005930", "9068": "2", "1221": "101", "1223": "091708",
+                                                    "1224": "000000", "1490": "1", "9081": "KRX"})
+                    active_vi = client.get(url, params=scalp_params, headers=admin).json()
+                    self.assertEqual("ACTIVATED", active_vi["market_state_evidence"]["vi_1h"]["last_observed"]["kind"])
+                    self.assertFalse(active_vi["order_authorized"])
+
+                    day_count, vi_count = day_read.call_count, vi_read.call_count
                     clock[0] += timedelta(seconds=1)
                     save_day(1)  # The changed document is stamped after the cut despite the earlier observation.
                     clock[0] = cut
                     future_day = client.get(url, params=params, headers=admin).json()
                     self.assertEqual("unconfirmed_trading_date", future_day["vi"]["reason"])
-                    self.assertEqual(2, day_read.call_count)
-                    self.assertEqual(1, vi_read.call_count)
+                    self.assertTrue(all(source["state"] == "UNKNOWN" for source in future_day["market_state_evidence"].values()))
+                    self.assertEqual(day_count + 1, day_read.call_count)
+                    self.assertEqual(vi_count, vi_read.call_count)
                     self.assertIs(collector._ram_observation_owner, owner)
                     self.assertEqual(20, collector._ram_trade_retention_seconds)
             token.assert_not_called()
             rest.assert_not_called()
             ws.assert_not_called()
+            kind.assert_not_called()
             self.assertEqual("completed", app.state.shutdown_status["state"])
 
     def test_operational_settings_can_be_changed_and_are_persisted(self) -> None:
@@ -4726,7 +4935,7 @@ class CentralServerAppTests(unittest.TestCase):
                             "shadow_candidate_config": {**config, "signal_valid_seconds": 0},
                         })
                         self.assertEqual(422, invalid.status_code)
-                        store = SQLiteQueryStore(path)
+                        store = SQLiteQueryStore(path, now_provider=lambda: clock[0])
                         for minute in range(11):
                             save_bar(store, minute, 1000, 10, native=False)
                         rank_at = start + timedelta(minutes=11, seconds=3)
@@ -4749,7 +4958,15 @@ class CentralServerAppTests(unittest.TestCase):
                         after_query = client.get(candidates_url, headers=headers).json()
                         self.assertEqual([], after_query["events"])
                         self.assertNotIn("last_decision_at", after_query["quality"])
+                        def save_news(key, title):
+                            url = f"https://press.invalid/{key}"
+                            store.upsert_documents("news_article", [{"owner": "005930", "key": url,
+                                "document": {"title": title, "link": url, "original_link": url,
+                                             "published_at": start.isoformat()}}])
+
+                        save_news("before", "삼성전자 최초 보도")
                         clock[0] = start + timedelta(minutes=13, seconds=3)
+                        save_news("after", "삼성전자 후속 보도")
                         save_bar(store, 12, 1100, 25)
                         monitor.run_once()
                         page = client.get(candidates_url, headers=headers).json()
@@ -4759,6 +4976,8 @@ class CentralServerAppTests(unittest.TestCase):
                                          tuple(event[key] for key in ("status", "strategy_id", "strategy_variant", "signal_reference_price")))
                         self.assertEqual(start + timedelta(minutes=13, seconds=30),
                                          datetime.fromisoformat(event["expires_at"]))
+                        self.assertEqual(["삼성전자 최초 보도"],
+                                         [row["title"] for row in event["material_news"]["recent_reports"]])
                         self.assertEqual(variant, page["quality"]["strategy_variant"])
                         run_id = monitor.monitor_id
                     with TestClient(create_app(settings)) as client:
@@ -5310,6 +5529,26 @@ class CentralServerAppTests(unittest.TestCase):
                     headers={"Authorization": "Bearer private-token"},
                 )
         self.assertEqual(404, response.status_code)
+
+    def test_nxt_catalog_endpoint_returns_only_the_requested_trading_date(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "monitor.sqlite3"
+            settings = CentralServerSettings(f"sqlite:///{path}", "private-token")
+            store = SQLiteQueryStore(path)
+            store.initialize()
+            day = "2026-11-09"
+            flags = {"005930": True, "000660": False}
+            store.save_dataset_snapshot("nxt_eligibility_catalog", day, day, {"flags": flags})
+            store.close()
+            headers = {"Authorization": "Bearer private-token"}
+            with TestClient(create_app(settings)) as client:
+                path = "/api/v1/market/snapshots/nxt_eligibility_catalog"
+                saved = client.get(path, params={"subject": day, "limit": 1}, headers=headers)
+                missing = client.get(path, params={"subject": "2026-11-10", "limit": 1}, headers=headers)
+        self.assertEqual(200, saved.status_code)
+        self.assertEqual(flags, saved.json()["snapshots"][0]["payload"]["flags"])
+        self.assertEqual(200, missing.status_code)
+        self.assertEqual([], missing.json()["snapshots"])
 
     def test_top20_statistics_endpoint_returns_nas_aggregate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -11,7 +11,7 @@ import secrets
 import sqlite3
 import sys
 import time
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any, Mapping, Callable
@@ -31,6 +31,7 @@ from kiwoom_monitor.application.research_execution import (
     SimulationCostModel,
     SimulationExecutionConfig,
 )
+from kiwoom_monitor.domain.simulation_contract import default_research_cost_model
 from kiwoom_monitor.application.research_evaluation import (
     DevelopmentEvidence,
     build_development_evidence,
@@ -785,7 +786,6 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
     )
     if session_profile is not None and session_profile not in SUPPORTED_RESEARCH_SESSION_PROFILES:
         raise ValueError(f"unsupported research session profile: {session_profile}")
-    cost_raw = _mapping(execution_raw.get("cost_model"), "execution.cost_model")
     dataset = _request_path(root, document.get("dataset"), "dataset")
     database = _request_path(root, document.get("database"), "database")
     runs_dir = _request_path(root, document.get("runs_dir"), "runs_dir")
@@ -797,15 +797,17 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
     strategy = (MinuteExperiment.from_document(family, strategy_raw, paper_request=document.get("shadow_only") is not True)
                 if minute_experiment
                 else parse_strategy_config(family, strategy_raw))
+    evaluation = ResearchEvaluationSpec.from_dict(evaluation_raw)
+    cost = (SimulationCostModel(**dict(_mapping(execution_raw["cost_model"], "execution.cost_model")))
+            if "cost_model" in execution_raw else default_research_cost_model(evaluation.folds[0].start, evaluation.folds[-1].end))
     execution = SimulationExecutionConfig(
         version=str(execution_raw.get("version", "")),
         same_bar_path_version=str(execution_raw.get("same_bar_path_version", "")),
         initial_cash_won=int(execution_raw.get("initial_cash_won", 0)),
-        cost_model=SimulationCostModel(**dict(cost_raw)),
+        cost_model=cost,
     )
     if minute_experiment != (execution.version == COMPLETED_CLOSE_EXECUTION_VERSION):
         raise ValueError("completed-close execution and a Section 12 minute experiment must be selected together")
-    evaluation = ResearchEvaluationSpec.from_dict(evaluation_raw)
     partition_raw = document.get('development_partition')
     partition = DevelopmentPartitionSpec.from_dict(_mapping(partition_raw, 'development_partition')) if partition_raw is not None else None
     if partition is not None:
@@ -916,7 +918,9 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
 def _breakout_filter_variants(baseline: MinuteExperiment, raw: Any) -> tuple[MinuteExperiment, ...]:
     if baseline.policy.variant != "B0" or not isinstance(raw, list) or len(raw) != 3:
         raise ValueError("breakout comparison requires B0 followed by B1, B2 and B3")
-    variants = tuple(MinuteExperiment.from_document(BREAKOUT_STUDY_FAMILY, _mapping(row, "breakout variant")) for row in raw)
+    variants = tuple(MinuteExperiment.from_document(
+        BREAKOUT_STUDY_FAMILY, _mapping(row, "breakout variant"), paper_request=True,
+    ) for row in raw)
     if tuple(variant.policy.variant for variant in variants) != ("B1", "B2", "B3"):
         raise ValueError("breakout comparison variants must be ordered B1, B2, B3")
     if any((variant.quantity, variant.capital_won, variant.policy.exit_at_kst) !=
@@ -1629,6 +1633,12 @@ def _section12_minute_result(repository: ResearchRepository, run_id: str, varian
         fields["strategy_reference_sha256"] = spec["strategy_references"]["sha256"]
     if spec.get("parameters", {}).get("panic_allow_unresolved_news") is True:
         fields["panic_allow_unresolved_news"] = True
+    if "panic_previous_session_news" in spec.get("parameters", {}):
+        fields["panic_previous_session_news"] = spec["parameters"]["panic_previous_session_news"]
+    if "material_news" in spec.get("parameters", {}):
+        fields["material_news_revision_count"] = len(spec["parameters"]["material_news"])
+        if "material_event_ref" in spec["parameters"]:
+            fields["material_event_ref"] = spec["parameters"]["material_event_ref"]
     source_event_links = spec.get("evaluation_spec", {}).get("source_event_links", ())
     if source_event_links:
         fields["source_event_group_count"] = len({link["event_id"] for link in source_event_links})
@@ -1637,12 +1647,12 @@ def _section12_minute_result(repository: ResearchRepository, run_id: str, varian
 
 def _evaluate_frozen_daily_decline_setup(request, scenario, descriptor_size, guard, checkpoint):
     from kiwoom_monitor.application.daily_decline import (
-        decode_daily_decline_setup_inputs, evaluate_daily_decline_shadow,
+        DailyDeclineSignalPolicy, decode_daily_decline_setup_inputs, evaluate_daily_decline_shadow,
     )
 
     required = {"version", "frozen_dataset", "symbol", "venue", "signal_day", "cut",
                 "strategy_references", "basis", "benchmark"}
-    if not required <= scenario.keys() or scenario.keys() - required - {"catalyst", "execution_evidence"}:
+    if not required <= scenario.keys() or scenario.keys() - required - {"catalyst", "material_news", "execution_evidence"}:
         raise ValueError("invalid DD native setup descriptor")
     reference = _mapping(scenario["frozen_dataset"], "frozen_dataset")
     manifest_sha = reference.get("manifest_sha256")
@@ -1684,7 +1694,12 @@ def _evaluate_frozen_daily_decline_setup(request, scenario, descriptor_size, gua
         if frozen.manifest.get("dataset_id") != manifest["bundle_id"] or frozen.manifest.get("children") != children:
             raise ValueError("DD frozen bundle changed during load")
 
-    inputs = decode_daily_decline_setup_inputs(scenario, request.policy)
+    execution_requested = "execution_evidence" in scenario
+    signal_fields = {field.name for field in fields(DailyDeclineSignalPolicy)}
+    signal_only = request.policy.keys() == signal_fields
+    if execution_requested and signal_only:
+        raise ValueError("DD execution evidence requires an explicit execution policy")
+    inputs = decode_daily_decline_setup_inputs(scenario, request.policy, signal_only=signal_only)
     symbol, venue = inputs["symbol"], inputs["venue"]
     subject = f"{symbol}:{venue}"
     if (frozen.manifest.get("kinds") != ["daily_bar"] or frozen.manifest.get("subject") != subject
@@ -1706,7 +1721,7 @@ def _evaluate_frozen_daily_decline_setup(request, scenario, descriptor_size, gua
 
     identity = {"frozen_manifest_sha256": manifest_sha, "frozen_dataset_id": frozen.manifest["dataset_id"],
                 "revision_ids_hash": frozen.manifest["revision_ids_hash"]}
-    if 'execution_evidence' in scenario:
+    if execution_requested:
         from kiwoom_monitor.application.daily_decline import replay_frozen_daily_decline
         return replay_frozen_daily_decline(frozen.observations, scenario, request.policy, decision,
                                           checkpoint=checkpoint), identity

@@ -2,7 +2,9 @@
 from datetime import datetime, timedelta
 
 from .leader_breakout import validate_leader_position_proof, replay_leader_stop_observation
-from .minute_order_management import MinuteOrderManagementClaim, assess_current_minute_order
+from .minute_order_management import (
+    MinuteOrderManagementClaim, acknowledged_minute_quote, assess_current_minute_order, execution_broker_venue,
+)
 from kiwoom_monitor.domain.strategy_contract import _time
 
 
@@ -38,7 +40,7 @@ def assess_leader_order_management(spec, *, run_id, config, position_proof, reco
     context = validate_leader_position_proof(position_proof, config, spec, run_id)
     if (spec.execution_plan_mode != LEADER_NATIVE_PLAN_MODE or terms is None
             or terms.accepted_order_management != 'reassess_then_amend_price/v1'
-            or not isinstance(record.intent, PlannedOrderIntent)
+            or not isinstance(record.intent, PlannedOrderIntent) or record.intent.venue != spec.supported_venue
             or (record.intent.account_ref, record.intent.run_id, record.intent.symbol,
                 record.intent.plan.plan_id, record.intent.plan.policy_ref)
             != (spec.account_scope.account_ref, run_id, context.symbol,
@@ -103,19 +105,24 @@ def assess_leader_order_management(spec, *, run_id, config, position_proof, reco
             raise ValueError('LEADER_CURRENT_ORDER_QUOTE_UNAVAILABLE')
         normalized = {'price_won': raw['signal_reference_price'], 'available_at': raw['available_at'],
             'input_ref': raw['input_ref'], 'observation': observation}
-        if set(value) != {'observation'} and value != normalized:
+        raw_keys = {'observation'}
+        if execution_broker_venue(record) == 'NXT':
+            route = acknowledged_minute_quote(spec, value['route_quote'], cut, current_time)
+            normalized = {**route, 'observation': observation, 'route_quote': route}
+            raw_keys.add('route_quote')
+        if set(value) != raw_keys and value != normalized:
             raise ValueError('LEADER_CURRENT_ORDER_QUOTE_CHANGED')
         return normalized
 
-    def invalid_price(price):
+    def invalid_price(_price):
         reference = context.reference_price
         if staged and original['final_action'] == 'ADD':
             metadata = decision_source['snapshot']['feature_values'][0]['value']['position_step']
             reference = config.execution_contract.position_steps[metadata['index']].reference_price
-        if price * 10_000 <= reference * (10_000 + config.breakout_buffer_bps):
-            return 'current_leader_breakout_not_confirmed'
         observation = quote['observation']
         raw = replay_leader_stop_observation(config, context, observation)
+        if raw['signal_reference_price'] * 10_000 <= reference * (10_000 + config.breakout_buffer_bps):
+            return 'current_leader_breakout_not_confirmed'
         if raw['turnover_won'] is None or raw['turnover_won'] < config.minimum_turnover_won:
             return 'current_leader_turnover_not_confirmed'
         return None
@@ -139,7 +146,7 @@ def assess_leader_order_management(spec, *, run_id, config, position_proof, reco
 
 def prepare_leader_order_management_claim(store, runtime, execution, spec, record, *, config, quote,
         recovery, risk, entry_enabled, protection_notice=None, plan_entry_notional_won=None, verified_peer_orders=None,
-        selected_management_context=None, selected_management_policy=None):
+        selected_management_context=None, selected_management_policy=None, route_quote=None):
     from .mock_automation_risk import mock_automation_risk_snapshot_from_dict
 
     account = spec.account_scope.account_ref
@@ -164,7 +171,8 @@ def prepare_leader_order_management_claim(store, runtime, execution, spec, recor
     assessment = assess_leader_order_management(spec, run_id=runtime.run_id, config=config, position_proof=pin,
         record=record, head=execution.load_plan_position(account, runtime.run_id, record.intent.symbol, record.intent.plan),
         order_events=execution.events(record.intent.intent_id), recovery=recovery, risk=risk,
-        quote={'observation': quote.observation()} if quote is not None else None,
+        quote=({'observation': quote.observation(), **({'route_quote': route_quote} if route_quote else {})}
+               if quote is not None and (execution_broker_venue(record) != 'NXT' or route_quote is not None) else None),
         decided_at=risk.observed_at if selected_management_context is not None else runtime.server_now(),
         now=runtime.server_now(), entry_enabled=entry_enabled,
         decision_source=source, protection_notice=protection_notice, stop_risk=stop_risk,

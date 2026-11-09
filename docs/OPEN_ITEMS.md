@@ -4,6 +4,14 @@
 
 **12절 승인 개발의 완료와 남은 실증·운영 재개 조건**은 [승인 로드맵의 12.12 대조](architecture/section12-development-roadmap-20261105.md#s12-acceptance-remaining)에서 관리한다. 격리 개발, 과거 자료 실증, 실제 운영 인계를 각각 판정한다.
 
+**DD 후속과 전략 공통 뉴스.** [정본 11.307](architecture/app-target-20261023.md#dd-native-market-inputs)에서 DD 분할·보유를, [11.314](architecture/app-target-20261023.md#panic-dd-contract-corrections)에서 해지 정정 비교를, [11.315](architecture/app-target-20261023.md#recorded-official-filing-ingestion)에서 원문 보관의 다중 장·운영 수락 잔여를 관리한다. [11.316](architecture/app-target-20261023.md#morning-news-catchup-and-adverse)은 공급처별 아침 보완·보유 종목·공식 악재의 연결 범위를 기록한다. [11.317](architecture/app-target-20261023.md#panic-prior-official-adverse-paper)에 낙주 장후 악재의 세 방식 비교와 부도 분봉 공백을 남긴다. KIND 목차형 원문 저장은 [11.318](architecture/app-target-20261023.md#kind-toc-morning-replay), 최종 실패 선별 복구는 [11.319](architecture/app-target-20261023.md#kind-toc-terminal-recovery)에서 로컬 검증했다. 실제 운영 수락과 실진입 이월 시간·뉴스 필수 여부·가중치는 별도다.
+
+**MICRO 실증 잔여.** [정본 11.308](architecture/app-target-20261023.md#micro-live-vi-clock)에서 정확한 VI 해제 체결가와 거래소 호가·체결 순서를, [정본 11.309](architecture/app-target-20261023.md#micro-market-status-evidence)에서 장중 종목별 정지·재개와 거래 가능 상태의 결측을 관리한다. [정본 11.310](architecture/app-target-20261023.md#micro-historical-kind-halt)의 과거 종일 정지 근거는 장후 확인이 저장된 범위만 지원한다.
+
+**실계좌·NXT 주문.** 일반 자동운용의 SOR 기본값과 직접 지정은 [정본 11.332](architecture/app-target-20261023.md#native-sor-order-routing)를 따른다. [11.333](architecture/app-target-20261023.md#local-real-order-sor-recovery)에서 실계좌 지정가 주문 형식과 SOR 재시작 복구를 가짜 브로커·격리 DB로 검증했다. 실제 실계좌 주문 연결의 승인·활성화, 시장·세션별 키움 응답 수락, NXT 단독 세션 정책은 남아 있다.
+
+**돌파·테마·종가베팅·신규주의 뉴스 재료.** 일반 Paper와 장중 후보 판단에 재료를 연결했다. B3의 실자료 효과와 재료 선택 기준, 종가베팅의 밤사이 공시 대응, DD 보유 중 재료 훼손의 운용 정책과 실제 운영 수락은 남아 있다. [Paper와 엠플러스 사례](architecture/app-target-20261023.md#strategy-material-decision-context) · [장중 자동 공급](architecture/app-target-20261023.md#intraday-strategy-material).
+
 **정본 비운영 후속과 TR 분리의 외부 조건:** [6개 AR 재개 조건과 미정 정책](architecture/canonical-offline-followup-20261107.md#기존-6개-조건의-운영-경계)을 확인한다. 지원 대상의 실제 설치/장중 호출량, 운영 자료·권한·스케줄, 실제 봉인 자료와 전략 정책 수락을 로컬 검사와 분리한다.
 
 **네 운용군 설계의 후속(2026-10-30 r003 반영):** [12.13 연구→AR 리팩토링 계약](architecture/app-target-20261023.md#mimosa-research-refactor-contract)·[12.10 전환 순서](architecture/app-target-20261023.md#1210-기존-ar와의-전환-순서)·[12.11 미정 정책](architecture/app-target-20261023.md#1211-미정-매매운용-정책)·[12.12 관련 검증](architecture/app-target-20261023.md#1212-구현-시-확인할-대표-연결과-이번-반영의-검증-범위)을 단일 상세로 사용한다. 당시186개 보고서 통합 연구와 전략/백테스트 명세는 완료했지만 관측식/예외·계좌 배분/병행·계획별 수량·종가 익일 복구·연구/실행/화면 연결은 미완료로 기록했다. 해당 승인 개발은 [S12 최종 수락](architecture/app-target-20261023.md#section12-final-development-acceptance)에서 종결했고 과거 실증·실제 장중 공급·운영 전환은 별도로 남긴다. 공통 입력·목적별 상태·분모·계좌 사실·입력 가용시점을 해당 AR 변경에 반영하고 일봉DD와 장중PANIC을 구분한다. 새 미결 ID나 R3/AR 완료를 만들지 않았으며 실제 작업 순서·재개/실행 제한은 정본0절을 따른다.

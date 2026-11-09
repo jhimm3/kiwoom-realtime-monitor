@@ -25,7 +25,9 @@ _VALIDATION_LABELS = {"UNVERIFIED": "실제 분석 전 · 키 미검증", "VERIF
 class NasCredentialsDialog(QDialog):
     def __init__(self, client: CentralCredentialsClient, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("NAS 모의계좌 관리")
+        local = client.source.mode == "local_server"
+        self._destination = "이 PC" if local else "NAS"
+        self.setWindowTitle(f"{self._destination} 모의계좌 관리")
         self.setMinimumWidth(520)
         self._client = client
         self._global = client.provider in client.GLOBAL_FIELDS
@@ -42,7 +44,7 @@ class NasCredentialsDialog(QDialog):
         self._timer.timeout.connect(self._check_status)
         layout = QFormLayout(self)
         destination = QLabel(client.source.server_url); destination.setWordWrap(True)
-        layout.addRow("저장 대상 NAS", destination)
+        layout.addRow(f"저장 대상 {self._destination}", destination)
         self._status = QLabel("계좌 설정 지원 여부를 확인합니다."); self._status.setWordWrap(True)
         layout.addRow(self._status)
         self._profiles = QComboBox(); self._profiles.currentIndexChanged.connect(self._profile_changed)
@@ -65,11 +67,11 @@ class NasCredentialsDialog(QDialog):
         self._app_key.setMaxLength(4096); self._secret_key.setMaxLength(4096)
         self._app_key.setPlaceholderText("새 키만 입력")
         self._secret_key.setPlaceholderText("새 키만 입력")
-        layout.addRow("NAS 모의 App Key", self._app_key)
-        layout.addRow("NAS 모의 Secret Key", self._secret_key)
+        layout.addRow(f"{self._destination} 모의 App Key", self._app_key)
+        layout.addRow(f"{self._destination} 모의 Secret Key", self._secret_key)
         self._prepare_button = QPushButton("API 키와 계좌 확인"); self._prepare_button.clicked.connect(self._prepare)
         layout.addRow(self._prepare_button)
-        self._preview = QLabel("계좌 확인 후 NAS 적용을 선택하세요."); self._preview.setWordWrap(True)
+        self._preview = QLabel(f"계좌 확인 후 {self._destination} 적용을 선택하세요."); self._preview.setWordWrap(True)
         layout.addRow(self._preview)
         self._apply_button = QPushButton("확인한 계좌에 적용"); self._apply_button.clicked.connect(self._apply)
         self._cancel_button = QPushButton("확인 요청 취소"); self._cancel_button.clicked.connect(self._cancel)
@@ -79,7 +81,7 @@ class NasCredentialsDialog(QDialog):
         layout.addRow(self._apply_button); layout.addRow(self._cancel_button); layout.addRow(self._disable_button)
         layout.addRow(self._rename_button); layout.addRow(self._delete_button)
         self._monitor = QCheckBox("계좌 조회 사용"); self._monitor.toggled.connect(self._monitor_changed)
-        self._orders = QCheckBox("수동 모의주문 허용")
+        self._orders = QCheckBox("모의주문 허용" if local else "수동 모의주문 허용")
         layout.addRow(self._monitor); layout.addRow(self._orders)
         self._settings_button = QPushButton("계좌 설정 적용"); self._settings_button.clicked.connect(self._save_settings)
         layout.addRow(self._settings_button)
@@ -282,7 +284,7 @@ class NasCredentialsDialog(QDialog):
         self._refresh(); worker.start()
 
     def _load(self):
-        self._run(self._client.load, self._loaded, "NAS 공급자 상태 확인 중…" if self._global else "NAS 계좌 목록 확인 중…")
+        self._run(self._client.load, self._loaded, "NAS 공급자 상태 확인 중…" if self._global else f"{self._destination} 계좌 목록 확인 중…")
 
     @Slot(object)
     def _loaded(self, result):
@@ -311,7 +313,7 @@ class NasCredentialsDialog(QDialog):
             self._profiles.addItem(f"{name} · {status}" + (f" · {validation}" if validation else ""), profile)
             if profile.get("profile_id") == target: self._profiles.setCurrentIndex(self._profiles.count() - 1)
         self._profiles.blockSignals(False)
-        self._status.setText("계좌를 선택하고 새 키를 입력하세요." if self._supported else "이 NAS는 해당 계좌의 키 변경을 지원하지 않습니다.")
+        self._status.setText("계좌를 선택하고 새 키를 입력하세요." if self._supported else "이 서버는 해당 계좌의 키 변경을 지원하지 않습니다.")
         if self._global:
             self._status.setText("새 키를 입력하세요." if self._supported else "이 NAS는 해당 공급자의 키 변경을 지원하지 않습니다.")
         if self._operation and self._operation.get("state") in _STATE_LABELS:
@@ -326,7 +328,7 @@ class NasCredentialsDialog(QDialog):
     def _profile_changed(self, index):
         self._operation = None; self._settings = None
         self._app_key.clear(); self._secret_key.clear()
-        self._preview.setText("새 키 준비 후 NAS 적용을 선택하세요." if self._global else "계좌 확인 후 NAS 적용을 선택하세요.")
+        self._preview.setText("새 키 준비 후 NAS 적용을 선택하세요." if self._global else f"계좌 확인 후 {self._destination} 적용을 선택하세요.")
         self._refresh(); self._load_settings()
 
     def _load_settings(self):
@@ -509,13 +511,13 @@ class NasCredentialsDialog(QDialog):
         if not self._operation or self._operation.get("state") != "READY": return
         revision, ref = self._operation["expected_revision"], self._operation["target_account_ref"]
         self._operation = {**self._operation, "state": "DRAINING"}
-        self._run(lambda: self._client.apply(revision, ref), self._operation_result, "NAS에 적용 요청 중…")
+        self._run(lambda: self._client.apply(revision, ref), self._operation_result, f"{self._destination}에 적용 요청 중…")
 
     def _cancel(self):
         self._run(self._client.cancel, self._operation_result, "확인 요청 취소 중…")
 
     def _check_status(self):
-        self._run(self._client.status, self._operation_result, "NAS 요청 상태 확인 중…")
+        self._run(self._client.status, self._operation_result, f"{self._destination} 요청 상태 확인 중…")
 
     def _reload(self):
         if self._client.pending_profile and self._client.operation_id: self._check_status()
@@ -532,7 +534,7 @@ class NasCredentialsDialog(QDialog):
         revision, monitor, orders = self._settings["revision"], self._monitor.isChecked(), self._orders.isChecked()
         self._settings = None  # A lost PUT response must be re-read before another CAS.
         self._run(lambda: self._client.update_account(ref, profile, revision, monitor_enabled=monitor,
-            mock_order_enabled=orders), self._settings_loaded, "NAS 계좌 설정 적용 중…")
+            mock_order_enabled=orders), self._settings_loaded, f"{self._destination} 계좌 설정 적용 중…")
 
     @Slot(str)
     def _failed(self, message):

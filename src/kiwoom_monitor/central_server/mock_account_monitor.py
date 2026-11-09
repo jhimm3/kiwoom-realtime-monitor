@@ -665,8 +665,19 @@ class MockAccountMonitor:
                     before if scope_requested and before_complete else None,
                 )
                 records, unmapped = [], []
+                route_details = {}
+                explicit_venue = getattr(self._runtime, 'supports_automation_venue', lambda _: False)('NXT') is True
+                if explicit_venue:
+                    for detail in recovery.order_details:
+                        route_details.setdefault(detail.broker_order_id, []).append(detail)
                 for snapshot in recovery.orders:
-                    record = await asyncio.to_thread(self._runtime.reconcile_by_broker_order, snapshot)
+                    details = route_details.get(snapshot.broker_order_id, ())
+                    venues = {detail.venue for detail in details if detail.venue_confirmed or detail.venue == 'UNKNOWN'}
+                    venue = next(iter(venues)) if len(venues) == 1 else 'UNKNOWN' if venues else None
+                    route = ({'broker_venue': venue,
+                              'broker_details': details}
+                             if explicit_venue else {})
+                    record = await asyncio.to_thread(self._runtime.reconcile_by_broker_order, snapshot, **route)
                     if record is not None:
                         expected_runtime_revision += 2
                         records.append(record)
@@ -864,13 +875,17 @@ class MockAccountMonitor:
             snapshot = snapshot_from_order_execution(
                 execution, account_ref=self._runtime.account_ref, as_of=as_of,
             )
+            route = {}
+            if getattr(self._runtime, 'supports_automation_venue', lambda _: False)('NXT') is True:
+                route['broker_venue'] = {'1': 'KRX', 'KRX': 'KRX', '2': 'NXT', 'NXT': 'NXT'}.get(execution.market, 'UNKNOWN')
             if record is None:
                 side = OrderSide.BUY if execution.side == "매수" else OrderSide.SELL if execution.side == "매도" else None
                 if side is not None:
                     await asyncio.to_thread(self._runtime.observe_amendment_fill, snapshot,
-                        original_broker_order_id=execution.original_broker_order_id, side=side)
+                        original_broker_order_id=execution.original_broker_order_id, side=side, **route)
             elif record.intent.run_id == self._runtime.run_id:
-                await asyncio.to_thread(self._runtime.reconcile, record.intent.intent_id, snapshot)
+                if not route or self._runtime._matches_broker_venue(record, route['broker_venue']):
+                    await asyncio.to_thread(self._runtime.reconcile, record.intent.intent_id, snapshot, **route)
             self.request_automation_execution_recovery()
 
     def _aware_now(self) -> datetime:

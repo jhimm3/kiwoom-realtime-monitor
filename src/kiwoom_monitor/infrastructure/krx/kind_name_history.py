@@ -18,7 +18,7 @@ _BASE = "https://kind.krx.co.kr"
 _USER_AGENT = "Mozilla/5.0 KiwoomRealtimeMonitor/1.1"
 
 
-def _decode_response(response: object) -> str:
+def decode_kind_response(response: object) -> str:
     payload = response.read()
     charset = response.headers.get_content_charset()
     head = payload[:2048].decode("ascii", errors="ignore")
@@ -150,7 +150,7 @@ class KindNameHistorySync:
         url = path if path.startswith("http") else _BASE + path
         request = Request(url, headers={"User-Agent": _USER_AGENT, "Referer": _BASE + "/"})
         with self._opener.open(request, timeout=20) as response:
-            return _decode_response(response)
+            return decode_kind_response(response)
 
     def _post(self, path: str, fields: dict[str, str]) -> str:
         request = Request(
@@ -159,4 +159,4 @@ class KindNameHistorySync:
             headers={"User-Agent": _USER_AGENT, "Referer": _BASE + "/disclosure/details.do?method=searchDetailsMain", "X-Requested-With": "XMLHttpRequest"},
         )
         with self._opener.open(request, timeout=30) as response:
-            return _decode_response(response)
+            return decode_kind_response(response)

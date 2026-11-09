@@ -8,6 +8,8 @@ from typing import Any, Protocol, TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from kiwoom_monitor.application.stock_enrichment import NXT_CATALOG_KIND
+
 if TYPE_CHECKING:
     from .autonomous_top20 import AutonomousTop20Service
 
@@ -36,16 +38,21 @@ def create_market_dataset_read_router(
         allowed = {
             "ranking", "top20_membership", "top20_index", "market_state",
             "investor_flow", "program_flow", "new_high", "stock_fundamentals",
-            "nxt_eligibility", "market_index_chart",
+            "nxt_eligibility", NXT_CATALOG_KIND, "market_index_chart",
         }
         if kind not in allowed:
             raise HTTPException(status_code=404, detail="지원하지 않는 중앙 시장 자료입니다.")
+        latest = None
         if kind == "top20_membership" and limit == 1 and prefer_live and top20_service is not None:
             latest = top20_service.latest_membership_snapshot(subject)
-            if latest is not None:
-                return {"kind": kind, "subject": subject, "snapshots": [latest]}
-        values = await asyncio.to_thread(store.load_dataset_snapshots, kind, subject, limit)
-        return {"kind": kind, "subject": subject, "snapshots": values}
+        values = [latest] if latest is not None else await asyncio.to_thread(store.load_dataset_snapshots, kind, subject, limit)
+        response: dict[str, object] = {"kind": kind, "subject": subject, "snapshots": values}
+        if kind in {"ranking", "top20_membership"} and limit == 1 and top20_service is not None and values:
+            items = values[0].get("payload", {}).get("items", [])
+            response["stock_enrichment_codes"] = list(top20_service.stock_enrichment_codes(
+                tuple(str(row.get("stk_cd", "")).strip() for row in items if isinstance(row, dict)),
+            ))
+        return response
 
     @router.get("/api/v1/market/top20-series", dependencies=[Depends(authorize)])
     async def top20_series(trading_date: date, basis: str = Query(default="display", pattern="^(display|realtime)$")) -> dict[str, object]:

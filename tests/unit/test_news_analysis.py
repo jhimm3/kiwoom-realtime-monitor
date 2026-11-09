@@ -607,6 +607,17 @@ class NewsAnalysisTest(unittest.TestCase):
         self.assertEqual(["claimed", "requested"], claims)
 
     @patch("kiwoom_monitor.infrastructure.naver_news.urlopen")
+    def test_bounded_naver_search_distinguishes_limit_from_actual_coverage(self, mocked_urlopen) -> None:
+        raw = {"title": "삼성전자 뉴스", "description": "실적 발표",
+               "link": "https://n/1", "pubDate": "Wed, 26 Aug 2026 09:10:00 +0900"}
+        client = NaverNewsClient(NaverNewsCredentials("id", "secret"))
+        for total, expected in ((1001, False), (1, True)):
+            mocked_urlopen.return_value = _Response({"total": total, "items": [raw]})
+            items, complete = client.search_with_coverage("삼성전자", max_results=1)
+            self.assertEqual(1, len(items))
+            self.assertEqual(expected, complete)
+
+    @patch("kiwoom_monitor.infrastructure.naver_news.urlopen")
     def test_legacy_fallback_claims_both_actual_requests(self, mocked_urlopen: object) -> None:
         mocked_urlopen.side_effect = [
             HTTPError("https://hub", 401, "unauthorized", {}, None),

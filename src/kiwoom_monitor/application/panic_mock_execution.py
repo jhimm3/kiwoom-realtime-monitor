@@ -201,6 +201,7 @@ def dispatch_panic_entry(repository, runtime, spec, *, parameters, event, quote,
             return dispatch_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)
     evidence, decision, plan = build_panic_entry_evidence(spec, run_id=runtime.run_id, parameters=parameters,
         event=event, quote=quote, decided_at=decided_at, now=now)
+    runtime.check_automation_buy_vi(event["symbol"], datetime.fromisoformat(evidence["snapshot"]["quote"]["available_at"]))
     gate = assess_mock_automation_decision_from_risk(repository, runtime, decision, recovery, risk, plan=plan, **scope)
     if gate.status is MockAutomationGateStatus.BLOCKED: return gate, None, None
     repository.save_panic_entry_evidence(runtime.account_ref, plan.plan_id, evidence)
@@ -218,7 +219,7 @@ def build_panic_exit_evidence(spec, *, run_id, parameters, event, entry_evidence
                 root.intent.decision_id, root.intent.quantity, root.intent.limit_price, root.intent.venue, root.intent.order_type, root.intent.created_at)
             != (mock_automation_intent_id(spec.spec_id, entry_decision.decision_id), spec.account_scope.account_ref,
                 run_id, OrderSide.BUY, 'mock', event['symbol'], PANIC_ORDER_POLICY_VERSION, original_plan,
-                entry_decision.decision_id, entry_decision.quantity, entry_decision.signal_reference_price, 'KRX', OrderType.LIMIT, entered)
+                entry_decision.decision_id, entry_decision.quantity, entry_decision.signal_reference_price, spec.supported_venue, OrderType.LIMIT, entered)
             or (head.plan.plan_id, head.plan.policy_ref, head.symbol)
             != (original_plan.plan_id, original_plan.policy_ref, event['symbol'])
             or head.quantity <= 0 or head.unreconciled_sell_quantity):

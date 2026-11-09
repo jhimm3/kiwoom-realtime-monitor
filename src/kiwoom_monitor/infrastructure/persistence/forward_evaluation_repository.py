@@ -232,8 +232,10 @@ class ForwardEvaluationRepository:
         from kiwoom_monitor.application.close_mock_execution import CLOSE_EXIT_COLLECTION, close_exit_key
         from kiwoom_monitor.domain.order_contract import OrderPlanRef
 
-        if (value["snapshot"]["account_ref"] != account_ref
-                or close_exit_key(OrderPlanRef(**value["snapshot"]["plan"])) != key):
+        plan = OrderPlanRef(**value["snapshot"]["plan"])
+        expected = close_exit_key(plan, value['decision']['decision_id'])
+        legacy = close_exit_key(plan) if 'calendar_basis' not in value['snapshot'] else None
+        if value['snapshot']['account_ref'] != account_ref or key not in {expected, legacy}:
             raise ValueError("CLOSE exit evidence does not match its account and plan revision")
         return self._save_immutable(CLOSE_EXIT_COLLECTION, account_ref, key, dict(value))
 

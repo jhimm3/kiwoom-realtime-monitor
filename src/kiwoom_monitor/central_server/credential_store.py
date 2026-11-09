@@ -10,6 +10,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tempfile
 import threading
 from dataclasses import dataclass, field
@@ -39,10 +40,11 @@ class CredentialStore:
     file is the commit point; a failed fence update is reconciled on next load.
     """
 
-    def __init__(self, directory: str | Path, metadata_store: Any):
+    def __init__(self, directory: str | Path, metadata_store: Any, *, local: bool = False):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         self._aes_type = AESGCM
         self._metadata = metadata_store
+        self._local = local
         self._lock = threading.RLock()
         self._directory = Path(directory).absolute()
         for path in (self._directory, *self._directory.parents):
@@ -108,22 +110,36 @@ class CredentialStore:
         }])
 
     def _master(self, *, create: bool = False) -> bytes:
-        path = self._path("master.key")
+        os_protected = self._local and sys.platform in {"win32", "darwin"}
+        path = self._path("master.protected" if os_protected else "master.key")
         if not path.exists():
             if not create or any(self._directory.glob("*.json")) or self._metadata.load_documents(
                 "credential_vault_state", "", 1,
             ):
                 raise CredentialStoreError("RECOVERY_REQUIRED")
+            key = self._aes_type.generate_key(bit_length=256)
+            if os_protected:
+                from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import _protect
+                key = _protect(key, path=path)
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as stream:
-                stream.write(self._aes_type.generate_key(bit_length=256))
+                stream.write(key)
                 stream.flush()
                 os.fsync(stream.fileno())
             self._sync_directory()
         value = path.read_bytes()
+        if os_protected:
+            from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import _unprotect
+            value = _unprotect(value, path=path)
         if len(value) != 32:
             raise CredentialStoreError("RECOVERY_REQUIRED")
         return value
+
+    def local_mock_identity_key(self) -> bytes:
+        with self._lock:
+            if not self._local or self._lease is None:
+                raise CredentialStoreError("LOCAL_VAULT_UNAVAILABLE")
+            return hmac.digest(self._master(create=True), b"local-mock-account-identity/v1", "sha256")
 
     def _sync_directory(self) -> None:
         if os.name != "nt":

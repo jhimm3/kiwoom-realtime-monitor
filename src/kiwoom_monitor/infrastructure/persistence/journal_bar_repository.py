@@ -24,6 +24,7 @@ from kiwoom_monitor.infrastructure.persistence.local_bar_observations import (
 from kiwoom_monitor.infrastructure.persistence.market_data_metadata_repository import (
     upsert_market_data_metadata,
 )
+from kiwoom_monitor.infrastructure.persistence.stock_repository import CURRENT_STOCKS_SQL
 
 @dataclass(frozen=True)
 class BarBackfillState:
@@ -502,8 +503,10 @@ class JournalBarRepositoryMixin:
         try:
             uri = monitor_path.resolve().as_uri() + "?mode=ro"
             with closing(sqlite3.connect(uri, uri=True, timeout=0.05)) as connection:
+                settings = connection.execute("SELECT 1 FROM sqlite_master WHERE name='settings' AND type='table'").fetchone()
+                current = f" AND ({CURRENT_STOCKS_SQL})" if settings else ""
                 return tuple((str(code), str(name)) for code, name in connection.execute(
-                    "SELECT code,name FROM stocks WHERE code<>'' AND name<>'' ORDER BY name"
+                    f"SELECT code,name FROM stocks WHERE code<>'' AND name<>''{current} ORDER BY name"
                 ).fetchall())
         except sqlite3.Error:
             return ()

@@ -474,6 +474,18 @@ class NewsBodyWireTests(unittest.TestCase):
                 local.close()
             query=CentralContentClient(url,QUERY).load_news_history('body',target=article['article_revision_id'])
             self.assertEqual(bodies,query['revisions'])
+            filing_url = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20261024900001"
+            official = seed(store, title="단일판매ㆍ공급계약해지", link=filing_url)
+            filing = {"filing_url": filing_url, "original_filing_url": "",
+                      "document_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20261024900001",
+                      "filing_html": "<table><tr><td>해지금액</td><td>100</td></tr></table>"}
+            filing_runner = NewsJobRunner(client, body_input=client.load_body_input,
+                                          body_accept=client.accept_body_result, now_provider=client.server_now,
+                                          filing_fetcher=lambda *_a, **_kw: filing)
+            self.assertEqual(1, asyncio.run(filing_runner.run_once(preferred_stage="BODY")))
+            archived, = store.load_documents("news_official_filing", "005930")
+            self.assertEqual(filing["filing_html"], archived["document"]["filing_html"])
+            self.assertEqual(official["article_revision_id"], archived["document"]["article_revision_id"])
             for path in ('/api/v1/settings/operations','/api/v1/research/reported-results/not-mine','/api/v1/settings/credentials'):
                 self.assertNotEqual(200,wire.get(path,headers={**expected,'Authorization':'Bearer '+BODY}).status_code)
 

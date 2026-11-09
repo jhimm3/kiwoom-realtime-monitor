@@ -3354,6 +3354,83 @@
         "tmp/canonical-offline-20261107/architecture-first.json",
         "tmp/canonical-offline-20261107/final-source.json"
       ]
+    },
+    {
+      "id": "N03-program-flow-after-close-archive-20261107",
+      "reason": "사용자 요청에 따라 PC에서 완료한 프로그램매매 장후 자료를 NAS 보관 배치로 동결한다.",
+      "connection": "명시 설정된 실행 PC의 TOP20 장후 성공과 대기 중인 0W 저장 완료 뒤 기존 SQLite dataset 스냅샷을 하루 범위로 읽는다. 기존 NAS 보관 API·내구 영수증을 재사용한다.",
+      "validation": "동결 시 SQLite SELECT 한 번으로 같은 WAL 읽기 시점을 유지한다. 장중 수집과 기존 조회·저장에는 SQL 사이트가 추가되지 않는다. 전송 재시도는 고정 파일만 읽는다.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_datasets.py|SQLiteDatasetStoreMixin.read_program_flow_archive|connection.execute": 1
+      },
+      "evidence": ["docs/architecture/canonical-offline-followup-20261107.md#program-flow-after-close-archive"]
+    },
+    {
+      "id": "S12-04-recorded-official-filing-entry-cut-20261108",
+      "reason": "Check whether an official termination became available after a PANIC candidate was recorded but before its native BUY claim.",
+      "connection": "Existing BODY acceptance commits the official revision and compact state evidence together. PANIC entry reads only the candidate symbol using the existing native claim cursor. DD and PANIC Shadow read the same compact receipt owner.",
+      "validation": "One bounded indexed SELECT per native PANIC BUY check. No new per-tick query, connection, broker request, or sell-side query. Native fake transport tests exercise post-candidate termination rejection, confirmed revocation, and protection of an already owned position.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_require_panic_execution_claim|cursor.execute": 1
+      },
+      "evidence": ["tests/unit/test_panic_mock_execution.py", "tests/unit/test_news_jobs.py"]
+    },
+    {
+      "id": "S12-04-morning-held-news-20261108",
+      "reason": "Keep collecting news for confirmed positions when they leave TOP20, using the existing native account snapshots.",
+      "connection": "Automatic stock news refresh borrows one latest scoped snapshot for each admitted mock account. The account owner projects only positive symbols to news collection. Real balances reuse the existing recovery document.",
+      "validation": "One indexed read per active mock account in the existing low-priority news refresh. No added broker request, write, scheduler, or tick-path access.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_execution.py|_latest_mock_news_position_snapshot|cursor.execute": 1
+      },
+      "evidence": ["tests/unit/test_central_news_service.py"]
+    },
+    {
+      "id": "S12-04-intraday-strategy-material-20261108",
+      "reason": "Attach committed news and official originals to the existing strategy judgment cut.",
+      "connection": "The native news revision store reads scoped watchlist articles, confirmed global targets, official archive metadata and existing compact facts in one statement. Section 12 Shadow reads only on actionable setups, the 0B leader reads at publication, and DD reads on native assessment.",
+      "validation": "One bounded SELECT per requested symbol and cut, shared in each completed-bar fanout. No SQL in the 0B callback and no schema or order-proof change. Before/after correction tests use the BODY acceptance path and isolated SQLite.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|PostgresNewsRevisionStoreMixin.load_strategy_material_inputs|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|SQLiteNewsRevisionStoreMixin.load_strategy_material_inputs|connection.execute": 1
+      },
+      "evidence": ["docs/architecture/app-target-20261023.md#intraday-strategy-material"]
+    },
+    {
+      "id": "S12-05-premarket-current-stock-catalog-20261109",
+      "reason": "Publish the complete Kiwoom stock list alongside NXT flags and protect its current names from older catalog writers. Historical stock identity and the owned SQLite schema remain available.",
+      "connection": "The existing morning worker writes one dated snapshot and bulk identity update in an existing SQLite transaction. Legacy catalog updates keep their statement flow, adding a write reservation before name checks. The journal picker checks whether an older read-only database has the settings table before applying the current membership filter.",
+      "validation": "The day writer uses a single prior-snapshot read, one bulk previous-name lookup, changed-name history, bulk identity upsert and one snapshot write. Legacy exact lookup and trading/quote paths have no new per-tick connection or TR. Tests cover partial requests, current and historical names, removed membership, and remote reuse.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/journal_bar_repository.py|JournalBarRepositoryMixin.load_monitor_stock_catalog|connection.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository._load_premarket_snapshot|con.execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository._remember_renames|con.execute": 4,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository._upsert_stock_batch|con.execute": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.save_premarket_catalog|con.execute": 2,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.save_premarket_catalog|con.executemany": 1,
+        "db|src/kiwoom_monitor/infrastructure/persistence/stock_repository.py|StockRepository.upsert|con.execute": 2
+      },
+      "evidence": ["docs/architecture/app-target-20261023.md#premarket-nxt-catalog", "tests/unit/test_nxt_eligibility_worker_controller.py"]
+    },
+    {
+      "id": "N03-market-observations-after-close-20261107",
+      "reason": "장후 완료 거래일의 순위·분봉·일봉·TOP20 편입을 기존 보관 전송에 연결한다.",
+      "connection": "실행 PC의 파일 SQLite에서 고정 자료를 읽고 기존 보류 파일·NAS 내구 영수증을 재사용한다.",
+      "validation": "거래일당 한 읽기 SELECT와 기존 가용시각 인덱스를 사용한다. 전일 아침 보완분의 실제 가용시각을 보존한다. 장중 경로와 NAS 수락에는 새 SQL 사이트가 없다.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_research_export.py|SQLiteResearchExportStoreMixin.read_after_close_observations|connection.execute": 1
+      },
+      "evidence": ["docs/architecture/app-target-20261023.md#after-close-observations-and-listing-evidence"]
+    },
+    {
+      "id": "S12-kind-intraday-evidence-20261109",
+      "reason": "Connect committed official KIND suspension intervals to MICRO and the existing mock BUY precheck.",
+      "connection": "The accepted BODY archive owns the compact evidence alongside the immutable official original. The lookup uses the symbol and decision cut with the existing document index. The same selector serves MICRO and the order precheck.",
+      "validation": "One bounded SELECT per explicit MICRO read or BUY precheck. No additional market TR, HTTP request, per-tick DB access, or SELL and cancel lookup. The local tests exercise BODY commit, time and venue isolation, stale quotes after the stated release, and a notice committed between the native queue and the fake broker submission.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_read_kind_trading_notices|cursor.execute": 1
+      },
+      "evidence": ["tests/unit/test_news_jobs.py", "tests/unit/test_close_order_management.py"]
     }
   ]
 }

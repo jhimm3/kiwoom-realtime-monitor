@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
+from datetime import datetime
 from threading import Event, Thread
 from time import monotonic
 from typing import Any
 
 from kiwoom_monitor.domain.market_data_contract import MarketDataObservation
 from kiwoom_monitor.domain.research_contract import DATASET_SNAPSHOT_HISTORY_KINDS
+from kiwoom_monitor.domain.time_basis import KST
 from kiwoom_monitor.infrastructure.market_data_metadata_codec import market_metadata_storage_values
 from kiwoom_monitor.central_server.database_codec import bounded_limit, dataset_snapshot_result_rows
 from kiwoom_monitor.central_server.database_observation_writes import (
@@ -48,6 +51,20 @@ def _uses_async_dataset_commit(values: list[DatasetSnapshotWrite]) -> bool:
     return bool(values) and all(value[0] in ASYNC_COMMIT_DATASET_KINDS for value in values)
 
 class SQLiteDatasetStoreMixin:
+    @contextmanager
+    def read_program_flow_archive(self, day: str):
+        """Stream one closed day's native snapshots from a single WAL read cut."""
+        prefix = day.replace("-", "")
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "SELECT subject,snapshot_key,saved_at,payload_json FROM central_dataset_snapshots "
+                "WHERE kind='program_flow' AND snapshot_key>=? AND snapshot_key<? ORDER BY subject,snapshot_key",
+                (prefix + ":", prefix + ";"),
+            )
+            yield ({"subject": subject, "snapshot_key": key,
+                    "saved_at": datetime.fromtimestamp(saved_at, KST).isoformat(), "payload": json.loads(payload)}
+                   for subject, key, saved_at, payload in cursor)
+
     def save_dataset_snapshot(
         self, kind: str, subject: str, snapshot_key: str, payload: dict[str, Any],
         *, observation: MarketDataObservation[object] | None = None,

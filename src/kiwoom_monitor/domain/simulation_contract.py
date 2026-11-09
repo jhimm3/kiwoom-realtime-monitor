@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any
 
 COST_MODEL_VERSION = "fixed_bps/v1"
@@ -13,6 +13,7 @@ EXECUTION_MODEL_VERSION = "next_tradable_bar_open/v1"
 SAME_BAR_PATH_VERSION = "conservative_with_optimistic_bound/v1"
 COMPLETED_CLOSE_EXECUTION_VERSION = "completed_close_then_next_open/v1"
 NO_INTRABAR_PATH_VERSION = "no_intrabar_fill/v1"
+RESEARCH_COST_SOURCE = "agreed_research_cost/v1"
 
 
 def _aware_datetime(value: object) -> datetime:
@@ -76,6 +77,19 @@ class SimulationCostModel:
             for field in ("commission_bps", "sell_tax_bps", "slippage_bps"):
                 result[field] = str(result[field])
         return result
+
+    def fees_won(self, notional: int, *, sell: bool) -> tuple[int, int]:
+        return fee_won(notional, self.commission_bps), fee_won(notional, self.sell_tax_bps) if sell else 0
+
+
+def fee_won(notional: int, rate_bps: int | Decimal) -> int:
+    return int((Decimal(notional) * rate_bps / 10_000).to_integral_value(rounding=ROUND_DOWN))
+
+
+def default_research_cost_model(valid_from: str = "", valid_to: str = "") -> SimulationCostModel:
+    """The agreed research estimate, independent of any account or period's actual costs."""
+    return SimulationCostModel(COST_MODEL_DECIMAL_VERSION, "1.5", "20", "0",
+                               "model_estimate", RESEARCH_COST_SOURCE, valid_from, valid_to)
 
 
 @dataclass(frozen=True)

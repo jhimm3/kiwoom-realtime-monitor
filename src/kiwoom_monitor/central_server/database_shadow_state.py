@@ -18,16 +18,31 @@ def _canonical_document(value: dict[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _without_material_context(value: dict[str, Any]) -> dict[str, Any]:
+    # News context is descriptive. Keep its first saved view, including on retry
+    # after a crash or a reader outage, and compare the whole original decision.
+    return {key: item for key, item in value.items() if key != "material_news"}
+
+
+def _same_decision_document(stored: str | dict, decision: dict[str, Any]) -> bool:
+    return _canonical_document(_without_material_context(json_mapping(stored))) == _canonical_document(
+        _without_material_context(decision)
+    )
+
+
 def _same_candidate_document(stored: str, candidate: dict[str, Any], encoded: str) -> bool:
     if stored == encoded:
+        return True
+    previous = _without_material_context(json_mapping(stored))
+    current = _without_material_context(candidate)
+    if _canonical_document(previous) == _canonical_document(current):
         return True
     # An existing event already commits to its setup via snapshot_id. A retry
     # may supply the new projection, while the original row stays immutable.
     setup_field = "panic_entry_setup" if candidate.get("strategy_id") == "panic_rebound" else "close_ipo_entry_setup"
-    if setup_field in candidate:
-        previous_shape = dict(candidate)
-        del previous_shape[setup_field]
-        return stored == _canonical_document(previous_shape)
+    if setup_field in current:
+        del current[setup_field]
+        return _canonical_document(previous) == _canonical_document(current)
     return False
 
 
@@ -48,7 +63,7 @@ def _save_sqlite_shadow_evaluation(
             "SELECT document_json FROM central_shadow_decisions WHERE decision_id=?",
             (str(decision["decision_id"]),),
         ).fetchone()
-        if existing is None or str(existing[0]) != encoded_decision:
+        if existing is None or not _same_decision_document(str(existing[0]), decision):
             raise ValueError("shadow decision id already has different immutable content")
     if candidate is None:
         return
@@ -86,7 +101,7 @@ def _save_postgres_shadow_evaluation(
             (str(decision["decision_id"]),),
         )
         existing = cursor.fetchone()
-        if existing is None or _canonical_document(json_mapping(existing[0])) != _canonical_document(decision):
+        if existing is None or not _same_decision_document(json_mapping(existing[0]), decision):
             raise ValueError("shadow decision id already has different immutable content")
     if candidate is None:
         return

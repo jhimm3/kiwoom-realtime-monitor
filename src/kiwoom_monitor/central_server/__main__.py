@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import signal
+from dataclasses import replace
 from pathlib import Path
 
 from .app import create_app
@@ -23,10 +24,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--parent-pid", type=int, default=0)
     parser.add_argument("--shutdown-event", default="")
+    parser.add_argument("--local-mock-automation", action="store_true")
     arguments, _ = parser.parse_known_args()
     if arguments.shutdown_event and (os.name != "nt" or arguments.parent_pid <= 0):
         parser.error("--shutdown-event requires an owned Windows child")
     settings = CentralServerSettings.from_environment()
+    if arguments.local_mock_automation:
+        if arguments.parent_pid <= 0 or settings.host != "127.0.0.1" or not settings.database_url.startswith("sqlite:///"):
+            parser.error("--local-mock-automation requires an owned loopback server with local SQLite")
+        database_path = Path(settings.database_url.removeprefix("sqlite:///"))
+        if not database_path.is_absolute():
+            parser.error("--local-mock-automation requires an absolute SQLite path")
+        settings = replace(settings, local_mock_credential_directory=str(
+            database_path.with_name(database_path.name + ".mock-credentials"),
+        ))
     configure_server_logging(
         Path(os.environ.get("CENTRAL_SERVER_LOG_DIR", "data/logs")),
         retention_days=_log_retention_days(),

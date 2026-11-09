@@ -1136,6 +1136,11 @@ class LeaderBreakoutTests(unittest.TestCase):
 
     def test_live_monitor_judges_0b_without_db_read_and_defers_writes(self):
         store = Mock()
+        store.load_strategy_material_inputs.return_value = {
+            "articles": [{"article_revision_id": "news-1", "identity": "story", "available_at": AT.timestamp(),
+                          "published_at": None, "document": {"title": "공급계약 관련 보도", "link": "https://press.invalid/1"}}],
+            "originals": [], "filings": [],
+        }
         monitor = CandidateMonitor(store, policy(), poll_seconds=1, universe_max_age_seconds=90)
         monitor._leader_accepting = True
         monitor.observe_trade(trade(990), AT, source="s", approved=True)
@@ -1148,6 +1153,10 @@ class LeaderBreakoutTests(unittest.TestCase):
         self.assertEqual(1, len(candidates))
         self.assertIsNone(candidates[0]["quantity"])
         self.assertFalse(candidates[0]["order_authorized"])
+        self.assertEqual("news-1", candidates[0]["material_news"]["recent_reports"][0]["revision_ref"])
+        store.load_strategy_material_inputs.assert_called_once_with(
+            candidates[0]["symbol"], AT + timedelta(milliseconds=1),
+        )
         store.load_observation_revisions_after.assert_not_called()
 
     def test_lost_source_cannot_bridge_old_price_on_reapproval(self):

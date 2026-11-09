@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 import uuid
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -678,6 +679,80 @@ class MockCredentialOwnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(503, client.post("/api/v1/mock/orders", headers=headers,
                     json={"request_id": "legacy", "symbol": "005930", "side": "BUY",
                           "quantity": 1, "limit_price": 1000}).status_code)
+
+    async def test_local_app_registers_mock_account_and_applies_settings_only_over_loopback(self):
+        from fastapi.testclient import TestClient
+        from kiwoom_monitor.central_server.app import create_app
+        from kiwoom_monitor.central_server.config import CentralServerSettings
+
+        vault_path = self.root / "local-mock"
+        settings = CentralServerSettings(
+            f"sqlite:///{self.root / 'local.sqlite'}", "local-token",
+            host="127.0.0.1", local_mock_credential_directory=str(vault_path),
+            autonomous_top20_enabled=False, market_event_collection_enabled=False,
+            news_naver_market_enabled=False, news_history_jobs_enabled=False,
+        )
+        headers = {"Authorization": "Bearer local-token"}
+        prefix = "/api/v1/settings/credentials"
+        mock_profiles = f"{prefix}/kiwoom_mock/profiles"
+        app = create_app(settings)
+        with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 12345)) as http:
+            self.assertTrue(http.get("/api/v1/capabilities", headers=headers).json()["capabilities"]["local_mock_automation_v1"])
+            providers = http.get(prefix, headers=headers).json()["providers"]
+            self.assertEqual(["kiwoom_mock"], [row["provider"] for row in providers if row["supported"]])
+            body = {"request_id": str(uuid.uuid4()), "label": "local-test"}
+            self.assertEqual(401, http.post(mock_profiles, json=body).status_code)
+            self.assertEqual(403, http.post(mock_profiles, json=body, headers={
+                **headers, "Host": "nas.test", "X-Forwarded-Proto": "https",
+            }).status_code)
+            self.assertEqual(404, http.post(f"{prefix}/kiwoom_real/profiles", json=body, headers=headers).status_code)
+            with closing(TestClient(app, base_url="http://127.0.0.1", client=("192.0.2.1", 12345))) as remote:
+                self.assertEqual(403, remote.post(mock_profiles, json=body, headers=headers).status_code)
+
+            response = http.post(mock_profiles, json=body, headers=headers)
+            self.assertEqual(200, response.status_code, response.text)
+            profile_id = response.json()["profile_id"]
+            response = http.post(f"{mock_profiles}/{profile_id}/prepare", headers=headers, json={
+                "request_id": str(uuid.uuid4()), "expected_revision": 0,
+                "replacement": {"app_key": "a1", "secret_key": "fake-secret"},
+            })
+            self.assertEqual(202, response.status_code, response.text)
+            operation_id = response.json()["operation_id"]
+            operation_url = f"/api/v1/settings/credential-operations/{operation_id}"
+
+            async def wait_operation():
+                await asyncio.shield(app.state.credential_runtime._operations[operation_id].task)
+
+            http.portal.call(wait_operation)
+            ready = http.get(operation_url, headers=headers).json()
+            self.assertEqual("READY", ready["state"], ready)
+            account_ref = ready["target_account_ref"]
+            response = http.post(operation_url + "/apply", headers=headers, json={
+                "expected_revision": 0, "target_account_ref": account_ref,
+            })
+            self.assertEqual(202, response.status_code, response.text)
+            http.portal.call(wait_operation)
+            self.assertEqual("ACTIVE", http.get(operation_url, headers=headers).json()["state"])
+            account_url = f"/api/v1/settings/accounts/{account_ref}?environment=mock"
+            current = http.get(account_url, headers=headers).json()["settings"]
+            self.assertFalse(current["mock_order_enabled"])
+            saved = http.put(account_url, headers=headers, json={
+                "expected_revision": current["revision"], "active_profile_id": profile_id,
+                "monitor_enabled": True, "mock_order_enabled": True,
+            })
+            self.assertEqual(200, saved.status_code, saved.text)
+            self.assertTrue(saved.json()["settings"]["mock_order_enabled"])
+            self.assertIsNotNone(app.state.mock_credential_owner.bundle(profile_id).gateway)
+            self.assertIsNone(app.state.mock_automation_supervisor.status(account_ref, credential_profile_id=profile_id)["runner"])
+
+        self.assertNotIn(b"fake-secret", next(vault_path.glob("kiwoom_mock--*.json")).read_bytes())
+        reopened = create_app(settings)
+        with TestClient(reopened, base_url="http://127.0.0.1", client=("127.0.0.1", 12345)) as http:
+            async def wait_restored():
+                await asyncio.gather(*reopened.state.mock_credential_owner._boot_tasks)
+
+            http.portal.call(wait_restored)
+            self.assertEqual(account_ref, reopened.state.mock_credential_owner.bundle(profile_id).account_ref)
 
     async def test_reserved_market_profile_is_not_advertised_or_prepared_as_account_runtime(self):
         from kiwoom_monitor.central_server.credential_runtime import CredentialOperationError

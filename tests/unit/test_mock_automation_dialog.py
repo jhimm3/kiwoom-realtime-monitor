@@ -375,6 +375,362 @@ class MockAutomationDialogControlTests(unittest.TestCase):
         self.dialog.deleteLater()
         self.app.processEvents()
 
+    def test_local_dialog_opens_account_settings_and_refreshes_with_the_same_client(self):
+        from kiwoom_monitor.infrastructure.central_credentials_client import CentralCredentialsClient
+        from kiwoom_monitor.infrastructure.central_server_config import DataSourceSettings
+
+        credentials = CentralCredentialsClient(DataSourceSettings("local_server", "http://127.0.0.1:8787", "token"))
+        dialog = MockAutomationDialog(FakeContent(), credentials)
+        self.addCleanup(dialog.deleteLater)
+        with (patch("kiwoom_monitor.presentation.nas_credentials_dialog.NasCredentialsDialog") as settings,
+              patch.object(dialog, "_request") as request):
+            dialog._account_setup.click()
+            request.assert_not_called()
+            settings.return_value.finished.connect.call_args.args[0](0)
+        settings.assert_called_once_with(credentials, dialog)
+        settings.return_value.open.assert_called_once_with()
+        request.assert_called_once_with("refresh")
+
+    def test_local_strategy_rehearsal_from_settings_to_flat_and_recovery_on_both_venues(self):
+        from dataclasses import asdict, replace
+        from datetime import time as daytime, timedelta
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QPushButton
+        from kiwoom_monitor.application.market_session_schedule import listing_evidence_document
+        from kiwoom_monitor.application.section12_minute_research import MinuteExperiment
+        from kiwoom_monitor.domain.strategy_contract import LEADER_BREAKOUT_FAMILY_ID
+        from tests.unit.test_close_and_ipo import CloseAndIpoTests
+        from tests.unit.test_leader_breakout import AT, policy, trade
+        from tests.unit.test_panic_rebound import PanicReboundTests
+
+        def frame(at, price, *, bar=None, tick=None, fill=None):
+            result = {'at': at.isoformat(), 'quotes': {
+                venue: {'price': price + offset, 'available_at': at.isoformat(), 'eligible': True,
+                        'phase': 'CONTINUOUS'} for venue, offset in (('KRX', 0), ('NXT', 1))}}
+            if bar is not None:
+                result['bar'] = asdict(bar)
+            if tick is not None:
+                result['trade'] = tick
+            if fill:
+                result['fills'] = fill
+            return result
+
+        def bar_frame(bar):
+            return frame(datetime.fromisoformat(bar.available_at), bar.close, bar=bar)
+
+        def close_reference(fixture):
+            return {'version': 'strategy-reference/v1', 'listings': [listing_evidence_document(fixture.listing)],
+                    'calendar': [{**asdict(day), 'trading_date': day.trading_date.isoformat(),
+                                  'available_at': day.available_at.isoformat(),
+                                  'sessions': [{**asdict(window), 'trading_date': window.trading_date.isoformat(),
+                                                'starts_at': window.starts_at.isoformat(),
+                                                'ends_at': window.ends_at.isoformat()} for window in day.sessions]}
+                                 for day in fixture.calendar]}
+
+        def tail(at, prices, *, first_fill=True):
+            return [frame(at + timedelta(seconds=index + 1), price, fill=(
+                {'BUY': 2} if index == 0 and first_fill else {'SELL': 2} if index == 3 else None))
+                    for index, price in enumerate(prices)]
+
+        empty = {'version': 'strategy-reference/v1', 'calendar': [], 'listings': []}
+        leader = [frame(AT + timedelta(seconds=index), price, tick=trade(price, at=AT + timedelta(seconds=index)))
+                  for index, price in enumerate((995, 1010))]
+        leader += tail(AT + timedelta(seconds=1), (1012, 947, 945, 944))
+        leader_params = {'capital_won': 100_000, 'quantity': 4, 'policy': policy().to_dict()}
+        cases = [(LEADER_BREAKOUT_FAMILY_ID, '005930', leader_params, empty, leader, 3)]
+
+        close = CloseAndIpoTests()
+        close.setUp()
+        cut = datetime.fromisoformat(close.signal.available_at)
+        for family, rules in (('close_betting/v1', close.close), ('ipo_breakout/v1', close.ipo_breakout),
+                              ('ipo_close/v1', close.ipo_close)):
+            frames = [bar_frame(bar) for bar in (*close.prior, close.signal)]
+            if family == 'close_betting/v1':
+                frames.extend([frame(cut + timedelta(seconds=1), 106, fill={'BUY': 2}),
+                    frame(cut + timedelta(seconds=11), 106), bar_frame(close.closing), bar_frame(close.opening),
+                    frame(datetime.fromisoformat(close.opening.available_at) + timedelta(seconds=1), 102, fill={'SELL': 2})])
+            else:
+                frames.extend(tail(cut, (106, 91, 90, 90)))
+            cases.append((family, close.symbol, MinuteExperiment(family, 100_000, 4, rules).to_dict(),
+                          close_reference(close), frames, 4))
+
+        panic = PanicReboundTests()
+        panic.setUp()
+        cut = datetime.fromisoformat(panic.rows[-1].available_at)
+        panic_params = MinuteExperiment('panic_rebound/v1', 100_000, 4, panic.rules, (panic.proof,)).to_dict()
+        cases.append(('panic_rebound/v1', '123456', panic_params, empty,
+                      [*(bar_frame(bar) for bar in panic.rows), *tail(cut, (911, 890, 889, 889))], 5))
+
+        with (tempfile.TemporaryDirectory() as directory,
+              patch('kiwoom_monitor.infrastructure.kiwoom_rest.client.KiwoomRestClient.request_once',
+                    side_effect=AssertionError('local screen attempted real broker I/O')) as wire):
+            root = Path(directory)
+            for family, symbol, parameters, references, frames, restart_at in cases:
+                path = root / f'{family.split("/")[0]}.json'
+                path.write_text(json.dumps({'version': 'local-strategy-rehearsal/v1', 'family': family, 'symbol': symbol,
+                    'parameters': parameters, 'references': references, 'frames': frames, 'signal_valid_seconds': 10,
+                    'maximum_quote_age_seconds': 3, 'maximum_adverse_slippage_bps': 300, 'protective_slippage_bps': 300,
+                    'sessions': {'KRX': ['KRX_REGULAR'], 'NXT': ['NXT_MAIN_MARKET']}}, ensure_ascii=False), encoding='utf-8')
+                for venue in ('KRX', 'NXT'):
+                    with self.subTest(family=family, venue=venue):
+                        case_root = root / path.stem
+                        ini = str(case_root.with_suffix('.ini'))
+                        def open_screen():
+                            settings = QSettings(ini, QSettings.Format.IniFormat)
+                            with patch('kiwoom_monitor.presentation.mock_automation_dialog.QSettings', return_value=settings):
+                                screen = MockAutomationDialog(FakeContent(), FakeCredentials(), rehearsal_root=case_root)
+                            button = next(w for w in screen.findChildren(QPushButton)
+                                          if w.text() == 'KRX·NXT 로컬 주문 리허설')
+                            button.click()
+                            return screen, screen._rehearsal_dialog
+
+                        screen, dialog = open_screen()
+                        try:
+                            dialog._source.setText(str(path))
+                            dialog._venue.setCurrentText(venue)
+                            dialog._start.click()
+                            for _ in range(restart_at):
+                                dialog._next.click()
+                            self.assertIsNotNone(dialog._run, dialog._summary.text())
+                            self.assertEqual(2, dialog._run.status()['commands'], dialog._summary.text())
+                            self.assertEqual(2, dialog._run.status()['held'])
+                        finally:
+                            dialog.close()
+                            screen.deleteLater()
+
+                        restarted, dialog = open_screen()
+                        try:
+                            self.assertEqual((str(path), venue), (dialog._source.text(), dialog._venue.currentText()))
+                            dialog._start.click()
+                            self.assertEqual(restart_at, dialog._run.cursor, dialog._summary.text())
+                            self.assertEqual(2, dialog._run.status()['held'])
+                            dialog._play.click()
+                            deadline = time.monotonic() + 10
+                            while dialog._timer.isActive() and time.monotonic() < deadline:
+                                self.app.processEvents()
+                            self.assertFalse(dialog._timer.isActive())
+                            self.assertIsNotNone(dialog._run, dialog._summary.text())
+                            final = dialog._run.status()
+                            self.assertEqual(('CANCELLED', 'FILLED', 0, 4),
+                                             (final['BUY'], final['SELL'], final['held'], final['commands']), dialog._summary.text())
+                            self.assertIn('보유 0주', dialog._summary.text())
+                            ledger_path, = case_root.glob(f'*-{venue}/fake-broker.json')
+                            commands = json.loads(ledger_path.read_text(encoding='utf-8'))['commands']
+                            self.assertEqual(['kt10000', 'kt10002', 'kt10003', 'kt10001'], [item['api_id'] for item in commands])
+                            self.assertTrue(all(item['body']['dmst_stex_tp'] == venue for item in commands))
+                            self.assertEqual(commands[0]['order_id'], commands[1]['body']['orig_ord_no'])
+                            self.assertEqual(commands[1]['order_id'], commands[2]['body']['orig_ord_no'])
+                            self.assertEqual('2', commands[3]['body']['ord_qty'])
+                            first_quote = frames[restart_at - 2]['quotes'][venue]['price']
+                            self.assertEqual(str(first_quote), commands[0]['body']['ord_uv'])
+                        finally:
+                            dialog.close()
+                            restarted.deleteLater()
+                        self.app.processEvents()
+            from kiwoom_monitor.central_server.local_strategy_rehearsal import LocalStrategyRehearsal
+
+            tape = json.loads((root / f'{LEADER_BREAKOUT_FAMILY_ID.split("/")[0]}.json').read_text(encoding='utf-8'))
+            tape['frames'][1]['quotes'].pop('NXT')
+            missing_quote = root / 'missing-nxt.json'
+            missing_quote.write_text(json.dumps(tape), encoding='utf-8')
+            run = LocalStrategyRehearsal(missing_quote, root / 'missing-nxt', 'NXT')
+            try:
+                run.step()
+                self.assertEqual(0, run.step()['commands'])
+                run.stop_entry()
+            finally:
+                run.close()
+            resumed = LocalStrategyRehearsal(missing_quote, root / 'missing-nxt', 'NXT')
+            try:
+                self.assertTrue(resumed.status()['entry_stopped'])
+                self.assertEqual(2, resumed.status()['cursor'])
+            finally:
+                resumed.close()
+            wire.assert_not_called()
+
+    def test_portfolio_rehearsal_keeps_staged_orders_and_shared_cash_separate_after_restart(self):
+        from dataclasses import replace
+        from datetime import timedelta
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QPushButton
+        from kiwoom_monitor.central_server.local_strategy_rehearsal import LocalStrategyRehearsal
+        from kiwoom_monitor.domain.order_contract import OrderSide
+        from kiwoom_monitor.domain.strategy_contract import LEADER_BREAKOUT_FAMILY_ID
+        from tests.unit.test_leader_breakout import AT, execution_config, policy, trade
+
+        a, b = '005930', '000660'
+        first = execution_config().to_dict()
+        first['execution_contract'].update(version='leader_breakout_execution/v2', quantity=4, capital_won=10000,
+            position_steps=[{'step_id': 'add', 'action': 'ADD', 'trigger': 'observed_cross_above',
+                             'reference_price': 1020, 'quantity': 3, 'reason_ref': 'fixture:second-cross'},
+                            {'step_id': 'trim', 'action': 'REDUCE', 'trigger': 'price_at_or_above',
+                             'reference_price': 1030, 'quantity': 2, 'reason_ref': 'fixture:partial-exit'}])
+        other = replace(policy(), contexts=(replace(policy().contexts[0], symbol=b, evidence_ref='other-symbol'),)).to_dict()
+        references = {'version': 'strategy-reference/v1', 'calendar': [], 'listings': []}
+        def observation(code, at, price, fills):
+            return {'trade': trade(price, at=at, code=code), 'fills': fills,
+                    'quotes': {venue: {'price': price + offset, 'available_at': at.isoformat(),
+                        'eligible': True, 'phase': 'CONTINUOUS'} for venue, offset in (('KRX', 0), ('NXT', 1))}}
+
+        frames = []
+        rows = (
+            (995, 995, {}, {}), (1010, 1010, {}, {}), (1015, 1010, {'BUY': 4}, {'BUY': 2}),
+            (1025, 1010, {}, {}), (1026, 945, {'BUY': 1}, {}), (1040, 945, {'BUY': 2}, {'SELL': 2}),
+            (1041, 945, {'SELL': 1}, {}), (1041, 945, {'SELL': 1}, {}), (945, 945, {}, {}),
+            (945, 945, {'SELL': 5}, {}),
+        )
+        for index, (price_a, price_b, fill_a, fill_b) in enumerate(rows):
+            at = AT + timedelta(seconds=index)
+            frames.append({'at': at.isoformat(), 'observations': {a: observation(a, at, price_a, fill_a),
+                                                                b: observation(b, at, price_b, fill_b)}})
+        tape = {'version': 'local-strategy-rehearsal/v2', 'capital_won': 20000, 'frames': frames,
+                'plans': [{'family': LEADER_BREAKOUT_FAMILY_ID, 'symbol': code, 'references': references,
+                           'parameters': {'policy': rules, 'quantity': quantity, 'capital_won': 10000}}
+                          for code, rules, quantity in ((a, first, 4), (b, other, 2))],
+                'signal_valid_seconds': 10, 'maximum_quote_age_seconds': 3, 'maximum_adverse_slippage_bps': 300,
+                'protective_slippage_bps': 300, 'sessions': {'KRX': ['KRX_REGULAR'], 'NXT': ['NXT_MAIN_MARKET']}}
+        with (tempfile.TemporaryDirectory() as directory,
+              patch('kiwoom_monitor.infrastructure.kiwoom_rest.client.KiwoomRestClient.request_once',
+                    side_effect=AssertionError('portfolio contacted a real broker')) as wire):
+            root = Path(directory)
+            source = root / 'portfolio.json'
+            source.write_text(json.dumps(tape), encoding='utf-8')
+
+            def open_screen():
+                settings = QSettings(str(root / 'portfolio.ini'), QSettings.Format.IniFormat)
+                with patch('kiwoom_monitor.presentation.mock_automation_dialog.QSettings', return_value=settings):
+                    screen = MockAutomationDialog(FakeContent(), FakeCredentials(), rehearsal_root=root / 'runs')
+                next(button for button in screen.findChildren(QPushButton)
+                     if button.text() == 'KRX·NXT 로컬 주문 리허설').click()
+                return screen, screen._rehearsal_dialog
+
+            for venue in ('KRX', 'NXT'):
+                with self.subTest(venue=venue):
+                    screen, dialog = open_screen()
+                    try:
+                        dialog._source.setText(str(source))
+                        dialog._venue.setCurrentText(venue)
+                        dialog._start.click()
+                        for _ in range(5):
+                            dialog._next.click()
+                        self.assertIsNotNone(dialog._run, dialog._summary.text())
+                        stage = dialog._run.status()
+                        self.assertEqual((5, 2, 5), (stage['plans'][a]['held'], stage['plans'][b]['held'], stage['commands']))
+                        self.assertEqual('ACCEPTED', stage['plans'][b]['SELL'])
+                        self.assertEqual(1, stage['plans'][a]['stages']['stage-0']['filled'])
+                        self.assertIn(a, dialog._summary.text())
+                        self.assertIn(b, dialog._summary.text())
+                    finally:
+                        dialog.close()
+                        screen.deleteLater()
+
+                    screen, dialog = open_screen()
+                    try:
+                        self.assertEqual((str(source), venue), (dialog._source.text(), dialog._venue.currentText()))
+                        dialog._start.click()
+                        self.assertEqual(5, dialog._run.cursor, dialog._summary.text())
+                        self.assertEqual(5, dialog._run.status()['commands'])
+                        while dialog._run is not None and not dialog._run.done:
+                            dialog._next.click()
+                        self.assertIsNotNone(dialog._run, dialog._summary.text())
+                        final = dialog._run.status()
+                        self.assertEqual((0, 0, 8), (final['plans'][a]['held'], final['plans'][b]['held'], final['commands']))
+                        ledger, = (root / 'runs').glob(f'*-{venue}/fake-broker.json')
+                        broker = json.loads(ledger.read_text(encoding='utf-8'))
+                        commands = broker['commands']
+                        self.assertEqual([('kt10000', a), ('kt10000', b), ('kt10000', a), ('kt10002', a),
+                                          ('kt10001', b), ('kt10001', a), ('kt10002', a), ('kt10001', a)],
+                                         [(item['api_id'], item['body']['stk_cd']) for item in commands])
+                        self.assertTrue(all(item['body']['dmst_stex_tp'] == venue for item in commands))
+                        self.assertEqual(commands[2]['order_id'], commands[3]['body']['orig_ord_no'])
+                        self.assertEqual(commands[5]['order_id'], commands[6]['body']['orig_ord_no'])
+                        self.assertEqual(('2', '1', '5'), (commands[3]['body']['mdfy_qty'], commands[6]['body']['mdfy_qty'],
+                                                           commands[7]['body']['ord_qty']))
+                        for code, side, slot, expected in ((a, OrderSide.BUY, 'stage-0', 3),
+                                                            (a, OrderSide.SELL, 'stage-1', 2),
+                                                            (a, OrderSide.SELL, 'SELL', 5), (b, OrderSide.SELL, 'SELL', 2)):
+                            events = dialog._run.orders.read_events(side, symbol=code, slot=slot)
+                            fills = [event for event in events if event['event_type'] == 'FILL']
+                            self.assertEqual(expected, sum(event['quantity'] for event in fills))
+                            self.assertTrue(all(broker['orders'][event['broker_order_id']]['symbol'] == code for event in fills))
+                    finally:
+                        dialog.close()
+                        screen.deleteLater()
+                    self.app.processEvents()
+
+            capped = root / 'capital-conflict.json'
+            capped.write_text(json.dumps({**tape, 'capital_won': 5000, 'frames': frames[:2]}), encoding='utf-8')
+            replay = LocalStrategyRehearsal(capped, root / 'runs', 'NXT')
+            try:
+                replay.step()
+                cut = replay.step()
+                self.assertEqual(('ACCEPTED', 'REJECTED', 1, 4044), (cut['plans'][a]['BUY'],
+                    cut['plans'][b]['BUY'], cut['commands'], cut['reserved_cash']))
+            finally:
+                replay.close()
+            wire.assert_not_called()
+
+    def test_ipo_gap_reduction_reprices_the_remainder_and_exits_only_remaining_shares(self):
+        from dataclasses import asdict
+        from datetime import time as daytime, timedelta
+        from kiwoom_monitor.application.market_session_schedule import listing_evidence_document
+        from kiwoom_monitor.application.section12_minute_research import MinuteExperiment
+        from kiwoom_monitor.central_server.local_strategy_rehearsal import LocalStrategyRehearsal
+        from tests.unit.test_close_and_ipo import CloseAndIpoTests
+
+        close = CloseAndIpoTests()
+        close.setUp()
+        family = 'ipo_close/v1'
+        params = MinuteExperiment(family, 100_000, 4, close.ipo_close).to_dict()
+        references = {'version': 'strategy-reference/v1', 'listings': [listing_evidence_document(close.listing)],
+                      'calendar': [{**asdict(day), 'trading_date': day.trading_date.isoformat(),
+                          'available_at': day.available_at.isoformat(),
+                          'sessions': [{**asdict(window), 'trading_date': window.trading_date.isoformat(),
+                              'starts_at': window.starts_at.isoformat(), 'ends_at': window.ends_at.isoformat()}
+                              for window in day.sessions]} for day in close.calendar]}
+
+        def frame(*, bar=None, at=None, price=None, fills=None):
+            if bar is not None:
+                at, price = datetime.fromisoformat(bar.available_at), bar.close
+            row = {'quotes': {venue: dict(price=price + offset, available_at=at.isoformat(),
+                    eligible=True, phase='CONTINUOUS') for venue, offset in (('KRX', 0), ('NXT', 1))},
+                   'fills': fills or {}}
+            if bar is not None:
+                row['bar'] = asdict(bar)
+            return {'at': at.isoformat(), 'observations': {close.symbol: row}}
+
+        kept = close.bar(close.following, daytime(10, 2), price=103, revision='remainder-held')
+        exit_bar = close.bar(close.following, daytime(10, 7), price=103, revision='end-of-hold')
+        frames = [*(frame(bar=bar) for bar in (*close.prior, close.signal)),
+                  frame(at=datetime.fromisoformat(close.signal.available_at) + timedelta(seconds=1), price=104, fills={'BUY': 4}),
+                  frame(bar=close.closing), frame(bar=close.opening),
+                  frame(at=datetime.fromisoformat(close.opening.available_at) + timedelta(seconds=1), price=103, fills={'SELL': 1}),
+                  frame(bar=kept, fills={'SELL': 1}), frame(bar=exit_bar),
+                  frame(at=datetime.fromisoformat(exit_bar.available_at) + timedelta(seconds=1), price=103, fills={'SELL': 2})]
+        tape = {'version': 'local-strategy-rehearsal/v2', 'capital_won': 100_000, 'frames': frames,
+                'plans': [dict(family=family, symbol=close.symbol, parameters=params, references=references)],
+                'signal_valid_seconds': 10, 'maximum_quote_age_seconds': 3, 'maximum_adverse_slippage_bps': 300,
+                'protective_slippage_bps': 300, 'sessions': {'KRX': ['KRX_REGULAR'], 'NXT': ['NXT_MAIN_MARKET']}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'ipo-gap-reduce.json'
+            source.write_text(json.dumps(tape), encoding='utf-8')
+            for venue in ('KRX', 'NXT'):
+                with self.subTest(venue=venue):
+                    replay = LocalStrategyRehearsal(source, root / 'runs', venue)
+                    try:
+                        while not replay.done:
+                            status = replay.step()
+                        plan = status['plans'][close.symbol]
+                        self.assertEqual((0, 'FILLED', 2), (plan['held'], plan['SELL'], plan['stages']['ipo-reduce']['filled']))
+                        commands = replay.broker.state['commands']
+                        self.assertEqual(['kt10000', 'kt10001', 'kt10002', 'kt10001'], [item['api_id'] for item in commands])
+                        self.assertEqual(('2', '1', '2'), (commands[1]['body']['ord_qty'], commands[2]['body']['mdfy_qty'],
+                                                           commands[3]['body']['ord_qty']))
+                        self.assertEqual(commands[1]['order_id'], commands[2]['body']['orig_ord_no'])
+                    finally:
+                        replay.close()
+
     def test_selected_original_management_uses_current_target_epoch_and_exact_saved_readback(self):
         dialog = self.dialog
         dialog._management_packet = dict(operation_id='original-order', packet_sha256='a' * 64,
@@ -513,10 +869,16 @@ class MockAutomationDialogControlTests(unittest.TestCase):
                     {"spec_id": selection["member_spec_ids"][0], "state": "STOPPED", "planned_protection": {
                         "state": "SUBMISSION_UNKNOWN", "plan_quantity": 2, "reserved_quantity": 2,
                         "detailed_filled_quantity": 0}},
-                    {"spec_id": selection["member_spec_ids"][1], "state": "READY"}]})
+                    {"spec_id": selection["member_spec_ids"][1], "state": "READY"}]},
+            held_close_material=[{"symbol": "005930", "cut": "2026-11-09T00:01:00+00:00", "status": "OBSERVED",
+                "partial": False, "changes_after_entry": [{"title": "[정정] 공급계약 해지",
+                    "effect": "INTACT", "available_at": "2026-11-09T09:00:30+09:00"}]}])
         self.dialog._completed("refresh", self.context)
         self.assertIn("현재 제어에 적용됨", self.dialog._selection_details.text())
         self.assertIn("계좌 공통 실행", self.dialog._runtime.text())
+        self.assertIn("종가베팅 005930 · 11-09 09:01:00 판단 시점 공시 · 진입 이후 변경 1건",
+                      self.dialog._runtime.text())
+        self.assertIn("[정정] 공급계약 해지 · 해지 철회 · 11-09 09:00:30 저장", self.dialog._runtime.text())
         self.assertIn("돌파 · 중지 · 보호 매도 접수 미확인 · 계획 보유 2주 · 주문 예약 2주 · 상세 체결 0주",
                       self.dialog._members_status.text())
         self.assertIn("종가 · 준비", self.dialog._members_status.text())
@@ -598,6 +960,24 @@ class MockAutomationDialogControlTests(unittest.TestCase):
                 self.assertEqual('continue_original_plan/v1', build.call_args.kwargs['close_execution_policy'].stopped_management)
                 self.assertEqual('reassess_then_amend_price/v1', build.call_args.kwargs['close_execution_policy'].accepted_order_management)
                 self.assertIsNone(build.call_args.kwargs['unfilled_execution_policy'])
+
+    def test_local_ready_dialog_passes_the_explicit_nxt_choice_to_publication(self):
+        from kiwoom_monitor.domain.research_contract import CLOSE_FINAL_CANDIDATE_VERSION
+        from kiwoom_monitor.presentation.mock_automation_dialog import MockAutomationPublicationDialog
+
+        candidate = {'package': {'candidate_spec': {'version': CLOSE_FINAL_CANDIDATE_VERSION,
+                                                    'family': 'ipo_close/v1'}}}
+        dialog = MockAutomationPublicationDialog(candidate, {}, 'profile', ({'event_id': 'shadow'},), self.dialog)
+        self.addCleanup(dialog.deleteLater)
+        self.assertEqual('SOR', dialog._venue.currentData())
+        dialog._close_inputs['maximum_adverse_slippage_bps'].setText('100')
+        dialog._close_inputs['protective_slippage_bps'].setText('200')
+        dialog._close_management.setCurrentIndex(2)
+        with patch('kiwoom_monitor.presentation.mock_automation_dialog.build_mock_automation_publication_documents') as build:
+            for venue in ('SOR', 'KRX', 'NXT'):
+                dialog._venue.setCurrentIndex(dialog._venue.findData(venue))
+                dialog.publication_values()
+                self.assertEqual(venue, build.call_args.kwargs['supported_venue'])
 
     def test_panic_ready_requires_explicit_prices_and_original_plan_management_terms(self):
         from kiwoom_monitor.domain.execution_activation import PANIC_NATIVE_PLAN_MODE
@@ -808,6 +1188,7 @@ class MockAutomationDialogControlTests(unittest.TestCase):
                     ({'event_id': 'explicit-shadow'},), self.dialog)
                 self.addCleanup(review.deleteLater)
                 self.assertIsNotNone(review._position_terms)
+                self.assertEqual('SOR', review._venue.currentData())
                 text = review._position_terms.text()
                 self.assertIn('최초 진입 2주', text)
                 self.assertIn('추가 매수 1주', text)

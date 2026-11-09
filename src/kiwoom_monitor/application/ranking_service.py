@@ -7,7 +7,10 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
-from kiwoom_monitor.domain.ranking import RankedStock
+from kiwoom_monitor.application.ranking_schedule import ranking_history_due
+from kiwoom_monitor.application.stock_enrichment import load_excluded_product_codes
+from kiwoom_monitor.domain.ranking import RankedStock, normalize_stock_code
+from kiwoom_monitor.domain.time_basis import as_kst
 
 
 logger = logging.getLogger(__name__)
@@ -28,12 +31,48 @@ class RankingService:
     STALE_SNAPSHOT_RETRY_LIMIT = 20
     STALE_SNAPSHOT_RETRY_MAX_SECONDS = 0.75
 
-    def __init__(self, client: RestClient, stocks: StockWriter | None = None, query_type: str = "5") -> None:
+    def __init__(self, client: RestClient, stocks: StockWriter | None = None, query_type: str = "5", *,
+                 stock_only_enrichment: bool = False) -> None:
         self._client = client
         self._stocks = stocks
         self._query_type = query_type if query_type in {"1", "2", "3", "4", "5"} else "5"
         self._missing_current_price_logged: set[str] = set()
         self._last_response_from_local_fallback = False
+        self._stock_only_enrichment = stock_only_enrichment
+        self._stock_master_date = None
+        self._excluded_product_codes: frozenset[str] | None = None
+        self._stock_master_retry_at = 0.0
+
+    def _enrichment_codes(self, response: dict, codes: tuple[str, ...], now: object) -> frozenset[str]:
+        if not self._stock_only_enrichment:
+            return frozenset(map(normalize_stock_code, codes))
+        provided = response.get("stock_enrichment_codes")
+        if self._last_response_from_storage:
+            if isinstance(provided, list):
+                return frozenset(map(normalize_stock_code, provided))
+            if isinstance(now, datetime) and not ranking_history_due(now):
+                return frozenset()
+            # Older central servers do not expose a typed universe. Use the
+            # existing PC KRX catalog only for codes it confirms as stocks.
+            load_markets = getattr(self._stocks, "load_markets", None)
+            if callable(load_markets):
+                return frozenset(normalize_stock_code(code) for code, market in load_markets(codes).items()
+                                 if market in {"KOSPI", "KOSDAQ"})
+            return frozenset()
+        request_page = getattr(self._client, "request_with_continuation", None)
+        if (isinstance(now, datetime) and ranking_history_due(now) and codes and callable(request_page)
+                and self._stock_master_date != now.date() and time.monotonic() >= self._stock_master_retry_at):
+            try:
+                self._excluded_product_codes = load_excluded_product_codes(request_page)
+            except Exception as error:
+                self._stock_master_retry_at = time.monotonic() + 300
+                logger.warning("키움 ETF·ETN·ELW 제외 목록 갱신 실패: %s", type(error).__name__)
+            else:
+                self._stock_master_date = now.date()
+        excluded = (self._excluded_product_codes if not isinstance(now, datetime)
+                    or not ranking_history_due(now) or self._stock_master_date == now.date() else None)
+        return frozenset(normalize_stock_code(code) for code in codes
+                         if excluded is not None and normalize_stock_code(code) not in excluded)
 
     @staticmethod
     def validate_query_type(query_type: str) -> None:
@@ -139,19 +178,29 @@ class RankingService:
         records = response.get("item_inq_rank", [])
         if not isinstance(records, list):
             raise ValueError("ka00198의 item_inq_rank 형식이 올바르지 않습니다.")
-        first_record = next((record for record in records if isinstance(record, dict)), {})
-        preview = ", ".join(
-            f"{str(record.get('bigd_rank', '?')).strip()}위 {str(record.get('stk_nm', '')).strip()}"
-            for record in records[:3]
-            if isinstance(record, dict)
+        now = self.server_now()
+        observed_at = self._snapshot_at(records)
+        history_due = (
+            (not isinstance(now, datetime) or ranking_history_due(now))
+            and (observed_at is None or ranking_history_due(observed_at))
         )
-        logger.info(
-            "ka00198 응답 기준: %s %s · 상위 %s",
-            str(first_record.get("dt", "")).strip(),
-            str(first_record.get("tm", "")).strip(),
-            preview,
-        )
+        if history_due:
+            first_record = next((record for record in records if isinstance(record, dict)), {})
+            preview = ", ".join(
+                f"{str(record.get('bigd_rank', '?')).strip()}위 {str(record.get('stk_nm', '')).strip()}"
+                for record in records[:3]
+                if isinstance(record, dict)
+            )
+            logger.info(
+                "ka00198 응답 기준: %s %s · 상위 %s",
+                str(first_record.get("dt", "")).strip(),
+                str(first_record.get("tm", "")).strip(),
+                preview,
+            )
 
+        enrichment_codes = self._enrichment_codes(response, tuple(
+            str(record.get("stk_cd", "")).strip() for record in records if isinstance(record, dict)
+        ), now)
         stocks: list[RankedStock] = []
         stock_rows: list[tuple[str, str, str]] = []
         for record in records:
@@ -161,9 +210,11 @@ class RankingService:
             name = str(record.get("stk_nm", "")).strip()
             if not code or not name:
                 continue
-            stock_rows.append((code, name, ""))
+            enrich = normalize_stock_code(code) in enrichment_codes
+            if enrich:
+                stock_rows.append((code, name, ""))
             current_price = self._ranking_current_price(record)
-            if current_price is None and code not in self._missing_current_price_logged:
+            if history_due and current_price is None and code not in self._missing_current_price_logged:
                 self._missing_current_price_logged.add(code)
                 price_fields = {
                     key: record.get(key)
@@ -179,9 +230,10 @@ class RankingService:
                     change_rate=str(record.get("base_comp_chgr", "-")).strip() or "-",
                     new_high_periods=frozenset(),
                     current_price=current_price,
+                    enrich=enrich,
                 )
             )
-        if self._stocks is not None:
+        if history_due and self._stocks is not None and stock_rows:
             self._stocks.cache_ranking_stocks(tuple(stock_rows))
         self._last_response_from_local_fallback = bool(
             getattr(self._client, "using_fallback", False)
@@ -203,6 +255,7 @@ class RankingService:
         now = self.server_now()
         if not isinstance(now, datetime):
             return False
+        now = as_kst(now)
         base = now.replace(second=0, microsecond=0)
         if self._query_type in {"5", "4"}:
             expected = base.replace(second=30) if now.second >= 30 else base
@@ -214,7 +267,7 @@ class RankingService:
             expected = base.replace(minute=0)
         else:
             return False
-        return snapshot_at < expected
+        return as_kst(snapshot_at) < expected
 
     @classmethod
     def _is_partial_stored_snapshot(cls, records: object) -> bool:

@@ -192,9 +192,19 @@ def management_checkpoint_matches(packet, value):
 def management_checkpoint_references(packet, documents):
     """Only the selected runner's actual historical recovery dependencies."""
     from kiwoom_monitor.domain.order_contract import OrderPlanRef
+    from kiwoom_monitor.domain.selected_order_evidence import PLAN_MANAGEMENT_VERSION, selected_plan_orders
     account, member = packet['account_ref'], packet['source_spec_id']
     key = 'member:' + member if 'member_spec_id' in packet else 'current'
     refs = set()
+    if packet.get('version') == PLAN_MANAGEMENT_VERSION and packet['order']['policy_version'] == 'close_execution_adapter/v1':
+        from .close_mock_execution import CLOSE_EXIT_COLLECTION, close_exit_key, uses_official_close_calendar
+
+        candidate = packet['management_closure'].get('shadow_candidate')
+        if isinstance(candidate, dict) and uses_official_close_calendar(candidate):
+            for native in selected_plan_orders(packet):
+                if native['side'] == 'SELL':
+                    plan = OrderPlanRef(**native['plan'])
+                    refs.add((CLOSE_EXIT_COLLECTION, account, close_exit_key(plan, native['decision_id'])))
     def risk(identity):
         if identity: refs.add(('execution_mock_automation_risk_snapshots', account, identity))
     def notice_references(notice):

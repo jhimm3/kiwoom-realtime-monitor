@@ -68,6 +68,7 @@ def _research_process_environment(environment: Mapping[str, str]) -> dict[str, s
         'MONITOR_SERVER_ACCESS_TOKEN', 'KIWOOM_SERVER_ACCESS_TOKEN', 'MONITOR_SERVER_QUERY_ACCESS_TOKEN',
         'MONITOR_SERVER_RESEARCH_INPUT_GRANTS_JSON', 'MONITOR_SERVER_RESEARCH_RESULT_GRANTS_JSON',
         'MONITOR_SERVER_NEWS_BODY_GRANTS_JSON', 'MONITOR_SERVER_OBSERVATION_ARCHIVE_GRANTS_JSON',
+        'MONITOR_SERVER_PROGRAM_ARCHIVE_TARGET_FILE', 'MONITOR_SERVER_PROGRAM_ARCHIVE_SOURCE_STREAM',
         'KIWOOM_SERVER_DATABASE_URL', 'KIWOOM_SERVER_SECRET_DIR',
         'CREDENTIAL_TRUSTED_PROXIES', 'NAVER_NEWS_CLIENT_ID', 'NAVER_NEWS_CLIENT_SECRET',
         'DART_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'ANTHROPIC_API_KEY',
@@ -1317,7 +1318,7 @@ class ResearchDialog(QDialog):
                 if column == 4 and has_context and context.get('source_kind') == 'frozen_research_evidence':
                     trace = result.get('result', {})
                     evidence = {key: trace[key] for key in ('evidence_provenance', 'execution_evidence',
-                        'state', 'evidence', 'input_assessment') if key in trace}
+                        'state', 'evidence', 'historical_vi', 'historical_kind_halt', 'input_assessment') if key in trace}
                     item.setToolTip(value + '\n' + json.dumps(evidence, ensure_ascii=False, indent=2))
                 self._table.setItem(row_index, column,item)
 
@@ -1460,6 +1461,15 @@ def format_research_result_rows(result: Mapping[str, Any]) -> tuple[tuple[str, .
         else:
             pending_label = summary.get("pending_action_id") or ("없음" if "pending_order" in summary or "pending_action_id" in summary else "N/A")
         evidence = " · ".join(str(trace[key]) for key in ("market_issue", "broker_issue") if trace.get(key))
+        costs, realized = summary.get("total_cost_won"), summary.get("realized_pnl_won")
+        cost_evidence = []
+        if type(costs) is int:
+            cost_evidence.append(f'상세 체결 비용 {costs:,}원')
+        if type(realized) is int:
+            cost_evidence.append(f'실현손익 {realized:,}원')
+        if trace.get('default_cost_model'):
+            cost_evidence.append('기본 추정 비용 포함')
+        evidence = ' · '.join(filter(None, (evidence, *cost_evidence)))
         source_label = '합성'
         if isinstance(context, Mapping) and context.get('source_kind') == 'frozen_research_evidence':
             provenance = trace.get('evidence_provenance', {})
@@ -1472,10 +1482,17 @@ def format_research_result_rows(result: Mapping[str, Any]) -> tuple[tuple[str, .
             fills = state.get('fills', ()) if isinstance(state, Mapping) else ()
             fees = sum(fill['fee_won'] for fill in fills if isinstance(fill, Mapping)
                        and type(fill.get('fee_won')) is int)
-            if fills: references.append(f'상세 체결 비용 {fees:,}원')
+            if fills and type(costs) is not int:
+                references.append(f'상세 체결 비용 {fees:,}원')
             inputs = trace.get('input_assessment', {})
             if isinstance(inputs, Mapping) and inputs.get('missing_inputs'):
                 references.append('미확인: ' + ', '.join(inputs['missing_inputs']))
+            halt = trace.get('historical_kind_halt')
+            if isinstance(halt, Mapping):
+                references.append({
+                    'CONFIRMED_FULL_DAY_HALT': 'KIND 종일 거래정지 확인',
+                    'CONFLICT': 'KIND 종일 거래정지와 체결 자료 상충',
+                }.get(halt.get('state'), 'KIND 거래정지 미확인'))
             evidence = ' · '.join(filter(None, (evidence, *references)))
         return ((identity, str(summary.get("status") or setup_status or "미확인"),
                  _section12_count(summary.get("position_quantity", summary.get("owned_quantity"))),

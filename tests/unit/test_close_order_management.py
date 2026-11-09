@@ -1,4 +1,5 @@
 """Current conditions -> existing account owner -> one native amendment/cancellation."""
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest.mock import patch
 from kiwoom_monitor.central_server.minute_plan_management import MinutePlanManagement
 from kiwoom_monitor.central_server.database import SQLiteQueryStore
 from kiwoom_monitor.central_server.execution_runtime import ManualMockOrderGateway
+from kiwoom_monitor.central_server.market_events import MarketEventService
 from kiwoom_monitor.central_server.mock_account_monitor import MockAccountMonitor
 from kiwoom_monitor.domain.execution_activation import CloseMockExecutionPolicy
 from kiwoom_monitor.domain.order_contract import AccountSnapshot, BrokerAmendmentSubmission, BrokerFill, BrokerOrderSnapshot, BrokerSubmission, OrderSide, OrderState
@@ -36,7 +38,8 @@ class BrokerBook:
 
     def add(self, number, intent, *, parent=None, quantity=None, price=None):
         self.rows[number] = dict(number=number, side=intent.side, ordered=quantity or intent.quantity,
-            remaining=quantity or intent.quantity, price=price or intent.limit_price, fills=[], parent=parent, state=OrderState.ACCEPTED)
+            remaining=quantity or intent.quantity, price=price or intent.limit_price, fills=[], parent=parent,
+            state=OrderState.ACCEPTED, symbol=intent.symbol, venue=intent.venue)
 
     def fill(self, number, quantity, identity='shared'):
         row = self.rows[number]
@@ -73,34 +76,36 @@ class BrokerBook:
         self.reads += 1
         ctx = self.context
         ctx.clock[0] += timedelta(milliseconds=1)
-        positions, cash, reserved, orders, details = 0, 100_000, 0, [], []
+        positions, cash, reserved, orders, details = {}, 100_000, 0, [], []
         for row in self.rows.values():
             filled = sum(fill.quantity for fill in row['fills'])
             gross = sum(fill.quantity * fill.price for fill in row['fills'])
             buy = row['side'] is OrderSide.BUY
-            positions += filled if buy else -filled
+            symbol = row['symbol']
+            positions[symbol] = positions.get(symbol, 0) + (filled if buy else -filled)
             cash += -gross if buy else gross
             reserved += row['remaining'] * row['price'] if buy else 0
             if row['remaining'] or filled or row['state'] is OrderState.CANCELLED:
-                orders.append(BrokerOrderSnapshot(row['number'], ctx.runtime.account_ref, ctx.buy.intent.symbol,
+                orders.append(BrokerOrderSnapshot(row['number'], ctx.runtime.account_ref, symbol,
                     row['state'], filled, row['remaining'], ctx.clock[0], tuple(row['fills'])))
-                details.append(BrokerOrderDetails(row['number'], row['ordered'], row['side'], row['price'], 'KRX',
+                details.append(BrokerOrderDetails(row['number'], row['ordered'], row['side'], row['price'], row['venue'],
                     original_broker_order_id=row['parent']))
         return MockAccountRecovery(AccountSnapshot(ctx.runtime.account_ref, cash, reserved,
-            {ctx.buy.intent.symbol: positions} if positions else {}, ctx.clock[0]), tuple(orders), tuple(details))
+            {symbol: quantity for symbol, quantity in positions.items() if quantity}, ctx.clock[0]), tuple(orders), tuple(details))
 
     async def read_trade_cost_pages(self, start, end):
         grouped = {}
         for row in self.rows.values():
             for fill in row['fills']:
-                key = (fill.occurred_at.date(), row['side'])
+                key = (fill.occurred_at.date(), row['side'], row['symbol'])
                 grouped[key] = grouped.get(key, 0) + fill.quantity * fill.price
         return ({'trst_ovrl_trde_prps_array': [dict(cntr_dt=day.strftime('%Y%m%d'), trde_dt=day.strftime('%Y%m%d'),
-            stk_cd=self.context.buy.intent.symbol, io_tp_nm='매수' if side is OrderSide.BUY else '매도',
-            trde_amt=str(gross), exct_amt=str(gross), cmsn='0', tax_sum_cmsn='0') for (day, side), gross in grouped.items()]},)
+            stk_cd=symbol, io_tp_nm='매수' if side is OrderSide.BUY else '매도',
+            trde_amt=str(gross), exct_amt=str(gross), cmsn='0', tax_sum_cmsn='0') for (day, side, symbol), gross in grouped.items()]},)
 
 
-async def management_context(case, factory=None, *, stopped=True, family='close_betting/v1', phase='listing_day'):
+async def management_context(case, factory=None, *, stopped=True, family='close_betting/v1', phase='listing_day',
+                             venue='KRX'):
     from kiwoom_monitor.application.close_mock_execution import dispatch_close_entry
     from tests.unit.test_mock_automation_specification import MockAutomationSpecificationTests
     if factory is None:
@@ -108,10 +113,11 @@ async def management_context(case, factory=None, *, stopped=True, family='close_
         factory = lambda: SQLiteQueryStore(Path(directory) / 'management.sqlite3')
     store = factory(); store.initialize(); case.addCleanup(store.close)
     if family == 'close_betting/v1':
-        ctx = MockAutomationSpecificationTests._verify_close_entry_claim(case, store, close_terms=management_terms(stopped))
+        ctx = MockAutomationSpecificationTests._verify_close_entry_claim(case, store,
+            close_terms=management_terms(stopped), venue=venue)
     else:
         from tests.unit.test_ipo_mock_execution import prepare_ipo_execution
-        ctx = prepare_ipo_execution(case, store, family, phase, close_terms=management_terms(stopped))
+        ctx = prepare_ipo_execution(case, store, family, phase, close_terms=management_terms(stopped), venue=venue)
         gate, ctx.buy, _ = dispatch_close_entry(ctx.repository, ctx.runtime, ctx.spec, parameters=ctx.parameters,
             event=ctx.event, quote=ctx.quote, recovery=ctx.recovery, risk=ctx.risk)
         case.assertIsNotNone(ctx.buy, gate)
@@ -150,8 +156,9 @@ async def advance(ctx):
     return await ctx.manager.advance(ctx.control, limit=10, allow_entry=lambda: False)
 
 
-async def verify_current_buy(case, factory=None, *, lost_ack=False, cancel=False, family='close_betting/v1', phase='listing_day'):
-    ctx = await management_context(case, factory, family=family, phase=phase)
+async def verify_current_buy(case, factory=None, *, lost_ack=False, cancel=False, family='close_betting/v1',
+                             phase='listing_day', venue='KRX'):
+    ctx = await management_context(case, factory, family=family, phase=phase, venue=venue)
     case.assertGreater(ctx.clock[0], ctx.buy.intent.expires_at)
     case.assertTrue(ctx.bundle.monitor.latest_automation_execution_cut['risk'].reconciliation_complete)
     ctx.book.lost_ack = lost_ack
@@ -202,7 +209,7 @@ async def verify_ipo_current(case, factory=None, *, family, phase):
         case.assertEqual((OrderState.CANCELLED, 1), (final.state, final.detailed_filled_quantity))
 
 
-async def verify_current_sell(case, factory=None):
+async def verify_current_sell(case, factory=None, *, vi_active=False):
     from kiwoom_monitor.application.mock_automation_admission import MockAutomationDesiredState
     ctx = await verify_current_buy(case, factory)
     ctx.book.fill('amended-1', 3)
@@ -212,6 +219,14 @@ async def verify_current_sell(case, factory=None):
     basis = dict(risk.owned_entry_prices)[ctx.buy.intent.symbol]
     trigger = basis * (10_000 - ctx.parameters['policy']['protection_loss_bps']) // 10_000
     ctx.clock[0] += timedelta(seconds=1)
+    if vi_active:
+        service = MarketEventService(None, ctx.store, now_provider=lambda: ctx.clock[0])
+        case.addAsyncCleanup(service.close)
+        case.enterContext(patch.object(ctx.runtime, '_buy_vi_rejection', service.automation_buy_vi_rejection))
+        await service.handle_ws_message({'trnm': 'REAL', 'data': [{'type': '1h', 'values': {
+            '9001': ctx.buy.intent.symbol, '9068': '2', '1223': ctx.clock[0].strftime('%H%M%S'), '1224': '000000',
+        }}]}, None)
+        case.assertEqual('vi_active', service.automation_buy_vi_rejection(ctx.buy.intent.symbol, ctx.clock[0]))
     ctx.quotes[ctx.buy.intent.symbol] = {**ctx.quote, 'price_won': trigger, 'available_at': ctx.clock[0],
         'input_ref': 'collector-trade:current-management:stop'}
     await advance(ctx)
@@ -274,6 +289,152 @@ async def verify_native_current_recheck(case, factory=None):
 
 
 class CloseCurrentOrderManagementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nxt_current_buy_amends_original_then_recovers_ambiguous_ack(self):
+        ctx = await verify_current_buy(self, venue='NXT', lost_ack=True, cancel=True)
+        self.assertEqual('NXT', ctx.execution.load(ctx.buy.intent.intent_id).intent.venue)
+
+    async def test_committed_kind_halt_between_queue_and_submit_prevents_buy(self):
+        from kiwoom_monitor.application.close_mock_execution import dispatch_close_entry
+        from tests.unit.test_mock_automation_specification import MockAutomationSpecificationTests
+
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        store = SQLiteQueryStore(Path(directory) / "kind-entry.sqlite3")
+        store.initialize()
+        self.addCleanup(store.close)
+        ctx = MockAutomationSpecificationTests._verify_close_entry_claim(self, store, prepare_only=True)
+        at = ctx.clock[0]
+        symbol = ctx.event["symbol"]
+        service = MarketEventService(None, store, now_provider=lambda: ctx.clock[0])
+        self.addAsyncCleanup(service.close)
+        recovery = MockAccountRecovery(AccountSnapshot(ctx.runtime.account_ref, 100_000, 0, {}, at), ())
+        risk = ctx.repository.load_latest_mock_automation_risk(ctx.runtime.account_ref)
+        queue = ctx.runtime._lifecycle.queue_planned
+
+        def accept_notice(intent):
+            result = queue(intent)
+            with patch.object(store, "_now_provider", return_value=at):
+                store.upsert_documents("news_official_filing", [{"owner": symbol, "key": "verified-halt",
+                    "document": {"kind_trading_notice": {
+                        "filing_ref": "kind:test", "original_filing_ref": "", "source_ref": "kind-original",
+                        "body_ref": "body", "available_at": at.isoformat(), "verified_interval": True,
+                        "starts_at": (at - timedelta(minutes=1)).isoformat(),
+                        "ends_at": (at + timedelta(minutes=1)).isoformat(),
+                    }},
+                }])
+            return result
+
+        with (patch.object(ctx.runtime, "_buy_vi_rejection", service.automation_buy_market_rejection),
+              patch.object(ctx.runtime._lifecycle, "queue_planned", side_effect=accept_notice)):
+            _, record, _ = await asyncio.to_thread(dispatch_close_entry, ctx.repository, ctx.runtime, ctx.spec,
+                parameters=ctx.parameters, event=ctx.event, quote=ctx.quote, recovery=recovery, risk=risk)
+        self.assertEqual(OrderState.REJECTED, record.state)
+        events = ctx.execution.events(record.intent.intent_id)
+        self.assertEqual(["QUEUED", "PRECHECK_REJECTED"], [event["event_type"] for event in events])
+        self.assertEqual("kind_trading_halt", events[-1]["reason"])
+        self.assertEqual([], ctx.transport.calls)
+
+    async def test_vi_entry_rechecks_the_quote_and_the_native_claim_before_sending(self):
+        from kiwoom_monitor.application.close_mock_execution import close_entry_plan_id, dispatch_close_entry
+        from tests.unit.test_mock_automation_specification import MockAutomationSpecificationTests
+
+        for activation_during_claim in (False, True):
+            with self.subTest(activation_during_claim=activation_during_claim):
+                directory = self.enterContext(tempfile.TemporaryDirectory())
+                store = SQLiteQueryStore(Path(directory) / 'vi-entry.sqlite3')
+                store.initialize()
+                self.addCleanup(store.close)
+                ctx = MockAutomationSpecificationTests._verify_close_entry_claim(self, store, prepare_only=True)
+                at = ctx.clock[0]
+                account_ref = ctx.runtime.account_ref
+                symbol = ctx.event['symbol']
+                recovery = MockAccountRecovery(AccountSnapshot(account_ref, 100_000, 0, {}, at), ())
+                risk = ctx.repository.load_latest_mock_automation_risk(account_ref)
+                service = MarketEventService(None, store, now_provider=lambda: ctx.clock[0])
+                self.addAsyncCleanup(service.close)
+                plan_id = close_entry_plan_id(ctx.spec.spec_id, ctx.runtime.run_id, ctx.event['event_id'])
+
+                def frame(trigger, release='000000'):
+                    return {'trnm': 'REAL', 'data': [{'type': '1h', 'values': {
+                        '9001': symbol, '9068': '2', '1223': trigger.strftime('%H%M%S'), '1224': release,
+                    }}]}
+
+                def dispatch(quote):
+                    return dispatch_close_entry(ctx.repository, ctx.runtime, ctx.spec, parameters=ctx.parameters,
+                        event=ctx.event, quote=quote, recovery=recovery, risk=risk)
+
+                with patch.object(ctx.runtime, '_buy_vi_rejection', service.automation_buy_vi_rejection):
+                    if activation_during_claim:
+                        queue = ctx.runtime._lifecycle.queue_planned
+                        loop = asyncio.get_running_loop()
+
+                        def activate_after_queue(intent):
+                            claim = queue(intent)
+                            asyncio.run_coroutine_threadsafe(service.handle_ws_message(frame(at), None), loop).result(5)
+                            return claim
+
+                        with patch.object(ctx.runtime._lifecycle, 'queue_planned', side_effect=activate_after_queue):
+                            _, record, _ = await asyncio.to_thread(dispatch, ctx.quote)
+                        self.assertEqual(OrderState.REJECTED, record.state)
+                        events = ctx.execution.events(record.intent.intent_id)
+                        self.assertEqual(['QUEUED', 'PRECHECK_REJECTED'], [event['event_type'] for event in events])
+                        self.assertEqual('vi_active', events[-1]['reason'])
+                        self.assertEqual((), ctx.runtime.load_active_intents())
+                        self.assertEqual([], ctx.transport.calls)
+                        continue
+
+                    trigger = at - timedelta(minutes=2)
+                    old_at = at - timedelta(seconds=1)
+                    ctx.clock[0] = old_at
+                    await service.handle_ws_message(frame(trigger), None)
+                    ctx.clock[0] = at
+                    with self.assertRaisesRegex(ValueError, '^vi_active$'):
+                        await asyncio.to_thread(dispatch, ctx.quote)
+                    self.assertIsNone(ctx.repository.load_close_entry_evidence(account_ref, plan_id))
+                    ctx.clock[0] = at - timedelta(milliseconds=250)
+                    await service.handle_ws_message(frame(trigger, old_at.strftime('%H%M%S')), None)
+                    ctx.clock[0] = at
+                    with self.assertRaisesRegex(ValueError, '^vi_requires_new_observation$'):
+                        await asyncio.to_thread(dispatch, {**ctx.quote, 'available_at': old_at})
+                    self.assertEqual([], ctx.transport.calls)
+                    _, record, _ = await asyncio.to_thread(dispatch, ctx.quote)
+                    self.assertEqual(OrderState.ACCEPTED, record.state)
+                    self.assertEqual(['BUY'], [call[1] for call in ctx.transport.calls])
+
+    async def test_vi_blocks_buy_amendment_until_fresh_quote_and_allows_cancellation(self):
+        ctx = await management_context(self)
+        service = MarketEventService(None, ctx.store, now_provider=lambda: ctx.clock[0])
+        self.addAsyncCleanup(service.close)
+        self.enterContext(patch.object(ctx.runtime, '_buy_vi_rejection', service.automation_buy_vi_rejection))
+        symbol = ctx.buy.intent.symbol
+        trigger = ctx.clock[0].strftime('%H%M%S')
+
+        async def frame(start, release='000000'):
+            await service.handle_ws_message({'trnm': 'REAL', 'data': [{'type': '1h', 'values': {
+                '9001': symbol, '9068': '2', '1223': start, '1224': release,
+            }}]}, None)
+
+        await frame(trigger)
+        await advance(ctx)
+        self.assertEqual([], ctx.book.mutations)
+        self.assertEqual('vi_active', ctx.manager.status['reason'])
+        ctx.clock[0] += timedelta(seconds=1)
+        await frame(trigger, ctx.clock[0].strftime('%H%M%S'))
+        await advance(ctx)
+        self.assertEqual([], ctx.book.mutations)
+        self.assertEqual('vi_requires_new_observation', ctx.manager.status['reason'])
+
+        ctx.clock[0] += timedelta(seconds=1)
+        ctx.quotes[symbol] = {**ctx.quotes[symbol], 'available_at': ctx.clock[0],
+                             'input_ref': 'collector-trade:current-management:post-vi'}
+        await advance(ctx)
+        self.assertEqual([('AMEND', ctx.buy.broker_order_id, 'amended-1', 3, 105)], ctx.book.mutations)
+
+        await frame(ctx.clock[0].strftime('%H%M%S'))
+        ctx.store.upsert_documents('server_operational_settings', [{'owner': 'global', 'key': 'current',
+            'document': {**ctx.settings, 'shadow_candidate_enabled': False}}])
+        await advance(ctx)
+        self.assertEqual(('CANCEL', ctx.buy.broker_order_id, 0), ctx.book.mutations[-1])
+
     async def test_ipo_breakout_rechecks_its_original_breakout_condition_in_both_listing_phases(self):
         for phase in ('listing_day', 'after_listing_day'):
             with self.subTest(phase=phase):
@@ -291,7 +452,7 @@ class CloseCurrentOrderManagementTests(unittest.IsolatedAsyncioTestCase):
         await verify_current_buy(self, lost_ack=True)
 
     async def test_current_sell_amends_owned_remainder_after_stop_without_cancel_and_reentry(self):
-        await verify_current_sell(self)
+        await verify_current_sell(self, vi_active=True)
 
     async def test_native_transaction_rechecks_current_context_before_any_mutation(self):
         await verify_native_current_recheck(self)

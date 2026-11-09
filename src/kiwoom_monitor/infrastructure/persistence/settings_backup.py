@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from kiwoom_monitor.application.stock_enrichment import PREMARKET_CATALOG_SETTING
+
 from .database import DEFAULT_COLUMNS, DEFAULT_SETTINGS
 from .backup_file import write_json_backup
 from .theme_backup import ThemeBackupError, ThemeBackupService
@@ -179,7 +181,9 @@ class SettingsBackupService:
         if connection is None:
             connection = sqlite3.connect(self._database_path)
         try:
-            settings = {key: value for key, value in connection.execute("SELECT key, value FROM settings").fetchall() if key not in excluded_setting_keys and (include_themes or key != ThemeBackupService.SYNC_STATE_KEY)}
+            settings = {key: value for key, value in connection.execute("SELECT key, value FROM settings").fetchall()
+                        if key != PREMARKET_CATALOG_SETTING and key not in excluded_setting_keys
+                        and (include_themes or key != ThemeBackupService.SYNC_STATE_KEY)}
             columns = [
                 {
                     "name": name,
@@ -398,7 +402,7 @@ class SettingsBackupService:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [(key, str(value)) for key, value in settings.items()
                  if (key in DEFAULT_SETTINGS or include_themes and key == ThemeBackupService.SYNC_STATE_KEY)
-                 and key not in excluded_setting_keys],
+                 and key != PREMARKET_CATALOG_SETTING and key not in excluded_setting_keys],
             )
             if include_column_widths:
                 connection.executemany(

@@ -348,6 +348,14 @@ class NaverNewsClient:
         self, stock_name: str, *, since: datetime | None = None, page_size: int = 100,
         max_results: int = 1000, request_claim: Callable[[], bool] | None = None,
     ) -> tuple[StockNewsItem, ...]:
+        items, _ = self.search_with_coverage(stock_name, since=since, page_size=page_size,
+                                            max_results=max_results, request_claim=request_claim)
+        return items
+
+    def search_with_coverage(
+        self, stock_name: str, *, since: datetime | None = None, page_size: int = 100,
+        max_results: int = 1000, request_claim: Callable[[], bool] | None = None,
+    ) -> tuple[tuple[StockNewsItem, ...], bool]:
         if not self._credentials.client_id or not self._credentials.client_secret:
             raise ValueError("네이버 뉴스 API Client ID와 Client Secret을 먼저 입력하세요.")
         page_size = max(1, min(100, page_size))
@@ -374,10 +382,10 @@ class NaverNewsClient:
                     continue
                 seen.add(identity)
                 results.append(item)
-            if page.display < display:
-                break
+            if reached_cutoff or page.display < display or (page.total > 0 and start + page.display > page.total):
+                return tuple(results), True
             start += display
-        return tuple(results)
+        return tuple(results), False
 
     def search_page(
         self, query_text: str, *, start: int = 1, display: int = 100,

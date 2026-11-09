@@ -93,6 +93,7 @@ class CentralServerSettings:
     account_identity_hmac_key: str = ""
     account_identity_registry_enabled: bool = False
     credential_directory: str = ""
+    local_mock_credential_directory: str = ""
     credential_trusted_proxies: tuple[str, ...] = ()
     query_access_token: str = field(default="", repr=False)
     research_result_grants: tuple[ProducerGrant, ...] = field(default=(), repr=False)
@@ -102,8 +103,18 @@ class CentralServerSettings:
     research_input_grants: tuple[ProducerGrant, ...] = field(default=(), repr=False)
     micro_book_codes: tuple[str, ...] = ()
     observation_archive_grants: tuple[ProducerGrant, ...] = field(default=(), repr=False)
+    program_flow_archive_target_file: str = field(default="", repr=False)
+    program_flow_archive_source_stream: str = ""
 
     def __post_init__(self) -> None:
+        if self.local_mock_credential_directory and (
+            self.host != "127.0.0.1" or self.credential_directory
+            or self.account_identity_registry_enabled or self.mock_account_monitor_enabled
+            or self.mock_order_transport_enabled
+        ):
+            raise ValueError("local mock credentials require an isolated loopback server")
+        if bool(self.program_flow_archive_target_file) != bool(self.program_flow_archive_source_stream):
+            raise ValueError("program flow archive requires a target connection file and source stream")
         if self.query_access_token and self.query_access_token == self.access_token:
             raise ValueError("조회 토큰과 관리자 토큰은 달라야 합니다.")
         tokens = {self.access_token, self.query_access_token}
@@ -236,6 +247,8 @@ class CentralServerSettings:
             research_result_grants=_producer_grants_from_environment("MONITOR_SERVER_RESEARCH_RESULT_GRANTS_JSON"),
             news_body_grants=_producer_grants_from_environment("MONITOR_SERVER_NEWS_BODY_GRANTS_JSON"),
             observation_archive_grants=_producer_grants_from_environment("MONITOR_SERVER_OBSERVATION_ARCHIVE_GRANTS_JSON"),
+            program_flow_archive_target_file=os.environ.get("MONITOR_SERVER_PROGRAM_ARCHIVE_TARGET_FILE", "").strip(),
+            program_flow_archive_source_stream=os.environ.get("MONITOR_SERVER_PROGRAM_ARCHIVE_SOURCE_STREAM", "").strip(),
             selected_research_artifact_file=os.environ.get("MONITOR_SERVER_SELECTED_RESEARCH_ARTIFACT_FILE", "").strip(),
             host=os.environ.get("KIWOOM_SERVER_HOST", "0.0.0.0").strip() or "0.0.0.0",
             port=port,

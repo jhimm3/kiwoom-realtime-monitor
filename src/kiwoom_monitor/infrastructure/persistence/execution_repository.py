@@ -11,6 +11,7 @@ from typing import Any, Mapping, Protocol
 
 from kiwoom_monitor.domain.order_contract import (
     AccountSnapshot,
+    LocalRehearsalOrderIntent,
     OrderEvent,
     OrderIntent,
     OrderPlanRef,
@@ -121,6 +122,20 @@ class MemberExecutionRecord(ExecutionRecord):
     member_spec_id: str
 
 
+@dataclass(frozen=True, kw_only=True)
+class SorExecutionRecord(ExecutionRecord):
+    broker_venue: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class SorMemberExecutionRecord(SorExecutionRecord, MemberExecutionRecord):
+    pass
+
+
+def execution_broker_venue(record):
+    return record.broker_venue if isinstance(record, SorExecutionRecord) else record.intent.venue
+
+
 def project_execution_record(record, member_projection):
     """Internal verified-selection view; the original native record stays unchanged."""
     member = member_projection.get(record.intent.intent_id) if member_projection else None
@@ -128,8 +143,8 @@ def project_execution_record(record, member_projection):
         return record
     if not isinstance(record.intent, PlannedOrderIntent):
         raise ValueError('only a proved planned intent has retained member ownership')
-    return MemberExecutionRecord(**{field.name: getattr(record, field.name) for field in fields(ExecutionRecord)},
-                                 member_spec_id=member)
+    record_type = SorMemberExecutionRecord if isinstance(record, SorExecutionRecord) else MemberExecutionRecord
+    return record_type(**{field.name: getattr(record, field.name) for field in fields(record)}, member_spec_id=member)
 
 
 def broker_legs_state(legs, requested, amendment=None):
@@ -186,11 +201,12 @@ def amendment_from_recovery(record, recovery: MockAccountRecovery, now):
         return None
     number = next(iter(ids))
     facts = {(item.ordered_quantity, item.side, item.limit_price, item.venue) for item in details}
-    if len(facts) != 1 or any(item.reasons for item in details):
+    if len(facts) != 1 or any(item.reasons or (record.intent.venue == 'SOR' and not item.venue_confirmed)
+                              for item in details):
         return None
     quantity, side, price, venue = next(iter(facts))
     if (type(quantity) is not int or not 0 < quantity <= command.quantity
-            or (side, price, venue) != (record.intent.side, command.limit_price, record.intent.venue)):
+            or (side, price, venue) != (record.intent.side, command.limit_price, execution_broker_venue(record))):
         return None
     orders = [order for order in recovery.orders if order.broker_order_id == number]
     if (not orders or any(order.account_ref != record.intent.account_ref or order.symbol != record.intent.symbol
@@ -301,6 +317,16 @@ class ExecutionRepository:
         self._selected_management_policy = None
 
     @property
+    def local_order_rehearsal(self) -> bool:
+        return getattr(type(self._store), "local_order_rehearsal", False) is True
+
+    def _supports_environment(self, environment: str) -> bool:
+        return environment == ("real" if self.local_order_rehearsal else "mock")
+
+    def _owner_key(self, account_ref: str) -> str:
+        return f"{'rehearsal' if self.local_order_rehearsal else 'mock'}:{account_ref}"
+
+    @property
     def selected_management_context(self):
         return self._selected_management_context
 
@@ -353,7 +379,7 @@ class ExecutionRepository:
         return factory(self._store) if factory is not None else nullcontext()
 
     def bind_runtime_owner(self, account_ref: str, run_id: str, owner_token: str) -> None:
-        ownership = {"owner_key": f"mock:{account_ref}", "owner_token": f"{run_id}:{owner_token}", "run_id": run_id}
+        ownership = {"owner_key": self._owner_key(account_ref), "owner_token": f"{run_id}:{owner_token}", "run_id": run_id}
         if self._ownership is not None and self._ownership != ownership:
             raise RuntimeError("EXECUTION_REPOSITORY_OWNER_IS_IMMUTABLE")
         self._ownership = ownership
@@ -415,7 +441,10 @@ class ExecutionRepository:
         return self.claim(intent)[0]
 
     def claim(self, intent: OrderIntent) -> tuple[ExecutionRecord, bool]:
-        record = ExecutionRecord(intent, OrderState.QUEUED, "", 0, (), None, intent.created_at)
+        if isinstance(intent, LocalRehearsalOrderIntent) != self.local_order_rehearsal:
+            raise ValueError("order intent must match the execution ledger mode")
+        record_type = SorExecutionRecord if intent.venue == 'SOR' else ExecutionRecord
+        record = record_type(intent, OrderState.QUEUED, "", 0, (), None, intent.created_at)
         if self._store.create_execution_intent(_record_document(record), **self._write_options()):
             return record, True
         existing = self.load(intent.intent_id)
@@ -427,7 +456,7 @@ class ExecutionRepository:
         self, record: ExecutionRecord, event: OrderEvent, *, _connection: Any = None,
         _amendment_recovery: MockAccountRecovery | None = None, **changes: object,
     ) -> ExecutionRecord:
-        record_type = MemberExecutionRecord if isinstance(record,MemberExecutionRecord) else ExecutionRecord
+        record_type = type(record)
         updated = record_type(
             intent=record.intent,
             state=event.state,
@@ -446,6 +475,8 @@ class ExecutionRepository:
             amendment=changes.get("amendment", record.amendment),
             broker_revision=record.broker_revision + int(bool(record.broker_legs or changes.get("broker_legs"))),
             **({'member_spec_id': record.member_spec_id} if isinstance(record,MemberExecutionRecord) else {}),
+            **({'broker_venue': changes.get('broker_venue', record.broker_venue)}
+               if isinstance(record, SorExecutionRecord) else {}),
         )
         connection_args = {} if _connection is None else {"_connection": _connection}
         options = self._write_options()
@@ -464,7 +495,7 @@ class ExecutionRepository:
         reader_args = {} if _reader is None else {'_reader': _reader}
         connection_args = {} if _connection is None else {"_connection": _connection}
         value = self._store.load_execution_intent(intent_id, **reader_args, **connection_args)
-        return project_execution_record(_record_from_document(value), member_projection) if value else None
+        return project_execution_record(_record_from_document(value, rehearsal=self.local_order_rehearsal), member_projection) if value else None
 
     def load_plan_position(self, account_ref, run_id, symbol, plan: OrderPlanRef, *, _reader=None) -> ExecutionPlanPosition:
         reader_args = {} if _reader is None else {"_reader": _reader}
@@ -480,11 +511,11 @@ class ExecutionRepository:
     def active_intents(
         self, environment: str, account_ref: str, run_id: str, *, _reader: Any = None, member_projection=None,
     ) -> tuple[ExecutionRecord, ...]:
-        if environment != "mock" or not account_ref.strip() or not run_id.strip():
+        if not self._supports_environment(environment) or not account_ref.strip() or not run_id.strip():
             raise ValueError("mock environment, account_ref and run_id are required")
         reader_args = {} if _reader is None else {"_reader": _reader}
         return tuple(
-            project_execution_record(_record_from_document(value), member_projection)
+            project_execution_record(_record_from_document(value, rehearsal=self.local_order_rehearsal), member_projection)
             for value in self._store.load_active_execution_intents(
                 environment, account_ref, run_id, **reader_args,
             )
@@ -493,13 +524,13 @@ class ExecutionRepository:
     def find_by_broker_order_id(
         self, environment: str, account_ref: str, run_id: str, broker_order_id: str, *, _connection: Any = None,
     ) -> ExecutionRecord | None:
-        if environment != "mock" or not account_ref.strip() or not run_id.strip() or not broker_order_id.strip():
+        if not self._supports_environment(environment) or not account_ref.strip() or not run_id.strip() or not broker_order_id.strip():
             raise ValueError("mock environment, account_ref, run_id and broker_order_id are required")
         connection_args = {} if _connection is None else {"_connection": _connection}
         value = self._store.find_execution_intent_by_broker_order_id(
             environment, account_ref, run_id, broker_order_id, **connection_args,
         )
-        return _record_from_document(value) if value else None
+        return _record_from_document(value, rehearsal=self.local_order_rehearsal) if value else None
 
     def account_active_intents(self, account_ref: str, *, _reader: Any = None,
                                member_projection=None) -> tuple[tuple[ExecutionRecord, ...], bool]:
@@ -556,8 +587,8 @@ class ExecutionRepository:
     def save_account_snapshot(
         self, environment: str, snapshot: AccountSnapshot, received_at: datetime,
     ) -> bool:
-        if environment != "mock":
-            raise ValueError("only mock account snapshots may enter the execution ledger")
+        if not self._supports_environment(environment):
+            raise ValueError("account snapshot must match the execution ledger mode")
         if received_at.tzinfo is None or received_at.utcoffset() is None:
             raise ValueError("account snapshot receipt must be timezone-aware")
         body = {
@@ -580,9 +611,9 @@ class ExecutionRepository:
         self, environment: str, account_ref: str, run_id: str, owner_token: str,
         now: datetime, lease_seconds: int = 60, *, _connection: Any = None,
     ) -> bool:
-        if environment != "mock":
+        if not self._supports_environment(environment):
             raise ValueError("execution runtime supports only mock")
-        owner_key = f"{environment}:{account_ref}"
+        owner_key = self._owner_key(account_ref)
         lease_owner = f"{run_id}:{owner_token}"
         from kiwoom_monitor.central_server.postgres_access import database_observer
         observer = database_observer()
@@ -596,11 +627,11 @@ class ExecutionRepository:
 
 
     def release_runtime(self, environment: str, account_ref: str, run_id: str, owner_token: str) -> bool:
-        if environment != "mock" or not all(value.strip() for value in (account_ref, run_id, owner_token)):
+        if not self._supports_environment(environment) or not all(value.strip() for value in (account_ref, run_id, owner_token)):
             raise ValueError("mock environment, account_ref, run_id and owner_token are required")
         from kiwoom_monitor.central_server.postgres_access import database_observer
         observer = database_observer()
-        owner_key = f"{environment}:{account_ref}"
+        owner_key = self._owner_key(account_ref)
         with observer.account.source_execution_owner(owner_key, run_id) if observer is not None else nullcontext():
             return self._store.release_execution_runtime(owner_key, f"{run_id}:{owner_token}",
                 **self._selected_management_options())
@@ -629,6 +660,7 @@ def _record_document(record: ExecutionRecord) -> dict[str, Any]:
         "environment": intent.environment,
         "symbol": intent.symbol,
         "venue": intent.venue,
+        **({'broker_venue': record.broker_venue} if isinstance(record, SorExecutionRecord) else {}),
         "side": intent.side.value,
         "quantity": intent.quantity,
         "order_type": intent.order_type.value,
@@ -691,9 +723,11 @@ def retain_native_plan_claim(stored, document):
                if stored.get('mock_account_member_spec_id') is not None else {})}
 
 
-def validate_broker_ledger_event(stored, document, event, *, recovery=None, now=None, authorized_assessment=None) -> None:
+def validate_broker_ledger_event(stored, document, event, *, recovery=None, now=None, authorized_assessment=None,
+                                 rehearsal=False) -> None:
     """Validate the physical-order transition again inside the native writer's CAS."""
-    before, after = _record_from_document(stored), _record_from_document(retain_native_plan_claim(stored,document))
+    before = _record_from_document(stored, rehearsal=rehearsal)
+    after = _record_from_document(retain_native_plan_claim(stored, document), rehearsal=rehearsal)
     if (before.intent != after.intent or before.broker_order_id != after.broker_order_id
             or after.broker_revision != before.broker_revision + 1
             or after.state.value != event["state"] or not after.broker_legs
@@ -728,7 +762,7 @@ def validate_broker_ledger_event(stored, document, event, *, recovery=None, now=
                 or (before.amendment is not None and before.amendment.unresolved)
                 or len(selected) != 1 or not 0 < expected.quantity <= selected[0].remaining_quantity
                 or type(expected.quantity) is not int or type(expected.limit_price) is not int or expected.limit_price <= 0
-                or before.intent.order_type is not OrderType.LIMIT or before.intent.venue != "KRX"):
+                or before.intent.order_type is not OrderType.LIMIT):
             raise RuntimeError("EXECUTION_AMENDMENT_CLAIM_CHANGED")
     elif kind in {"AMENDMENT_ACCEPTED", "AMENDMENT_RECOVERED", "AMENDMENT_REJECTED", "AMENDMENT_RESPONSE_UNKNOWN"}:
         pending = before.amendment
@@ -831,8 +865,10 @@ def _protection_claim(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return dict(claim) if claim is not None else None
 
 
-def _record_from_document(value: Mapping[str, Any]) -> ExecutionRecord:
-    intent_type = PlannedOrderIntent if "plan" in value else OrderIntent
+def _record_from_document(value: Mapping[str, Any], *, rehearsal=False) -> ExecutionRecord:
+    if rehearsal and "plan" in value:
+        raise ValueError("production plan documents cannot enter local rehearsal")
+    intent_type = LocalRehearsalOrderIntent if rehearsal else PlannedOrderIntent if "plan" in value else OrderIntent
     intent = intent_type(
         intent_id=str(value["intent_id"]), run_id=str(value["run_id"]),
         decision_id=str(value["decision_id"]), account_ref=str(value["account_ref"]),
@@ -848,6 +884,8 @@ def _record_from_document(value: Mapping[str, Any]) -> ExecutionRecord:
     last_as_of = value.get("last_broker_as_of")
     member_spec_id = _native_member_spec_id(value)
     record_type = MemberExecutionRecord if member_spec_id is not None else ExecutionRecord
+    if intent.venue == 'SOR':
+        record_type = SorMemberExecutionRecord if member_spec_id is not None else SorExecutionRecord
     return record_type(
         intent=intent, state=OrderState(str(value["state"])),
         broker_order_id=str(value.get("broker_order_id") or ""),
@@ -861,6 +899,7 @@ def _record_from_document(value: Mapping[str, Any]) -> ExecutionRecord:
         amendment=amendment_from_document(value.get("amendment")),
         broker_revision=int(value.get("broker_revision", 0)),
         **({'member_spec_id':member_spec_id} if member_spec_id is not None else {}),
+        **({'broker_venue': value.get('broker_venue')} if intent.venue == 'SOR' else {}),
     )
 
 
@@ -901,7 +940,7 @@ def _account_event_from_document(
         account_ref=account_ref,
         environment=environment,
         symbol=str(intent.get("symbol") or ""),
-        venue=str(intent.get("venue") or ""),
+        venue=str(intent.get('broker_venue') or intent.get('venue') or ''),
         side=str(intent.get("side") or ""),
         event_type=str(event.get("event_type") or ""),
         state=str(event.get("state") or ""),

@@ -127,6 +127,23 @@ class _FakeBrokerTransport:
         raise AssertionError("the fake integration does not cancel orders")
 
 
+def native_test_transport(venue, clock):
+    if venue == 'KRX':
+        return _FakeBrokerTransport(clock)
+    from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import LocalAutomationOrderTransport
+
+    calls = []
+    def request_once(api_id, path, body):
+        assert api_id in {'kt10000', 'kt10001'} and body['dmst_stex_tp'] == venue
+        number = f'fake-order-{len(calls) + 1}'
+        calls.append((number, 'BUY' if api_id == 'kt10000' else 'SELL', body['stk_cd'], int(body['ord_qty'])))
+        return {'ord_no': number, 'dmst_stex_tp': 'KRX' if venue == 'SOR' else venue}
+
+    transport = LocalAutomationOrderTransport(SimpleNamespace(request_once=request_once), now_provider=clock)
+    transport.calls = calls
+    return transport
+
+
 class _ExecutionPageSource:
     def __init__(self, repository: ExecutionRepository, account_ref: str) -> None:
         self._repository = repository
@@ -1249,7 +1266,8 @@ class MockAutomationSpecificationTests(unittest.TestCase):
         ready, changed = publish_ready_mock_automation_spec(context.repository, **call)
         self.assertEqual((MockAutomationReadinessStatus.READY, False), (ready.status, changed))
 
-    def _verify_close_entry_claim(self, store, *, prepare_only=False, close_terms=None, native_windows=False):
+    def _verify_close_entry_claim(self, store, *, prepare_only=False, close_terms=None, native_windows=False,
+                                  official_calendar=False, venue='KRX'):
         from dataclasses import asdict
         from datetime import time
         from kiwoom_monitor.application.close_mock_execution import (
@@ -1287,6 +1305,8 @@ class MockAutomationSpecificationTests(unittest.TestCase):
         self.enterContext(patch.object(store, '_execution_wall_now', lambda: clock[0], create=True))
         entry_window = replace(example.entry, schedule_version=session_window_at(cut, venue='KRX').schedule_version)
         calendar = (replace(example.calendar[0], sessions=(entry_window, example.auction)), *example.calendar[1:])
+        if official_calendar:
+            calendar = tuple(replace(row, revision_id=f'krx-equity:{row.trading_date}') for row in calendar)
         parameters = {'capital_won': 100_000, 'policy': example.close.to_dict()}
         config = json.loads(json.dumps({
             'version': MINUTE_SHADOW_VERSION, 'family': 'close_betting/v1', 'signal_valid_seconds': 30,
@@ -1337,7 +1357,7 @@ class MockAutomationSpecificationTests(unittest.TestCase):
                 'maximum_concurrent_strategies', 'maximum_concurrent_positions', 'maximum_capital_won',
                 'maximum_daily_loss_won', 'maximum_data_gap_seconds', 'maximum_submission_unknown_count',
                 'maximum_reconnect_count', 'maximum_balance_mismatch_count')},
-            execution_plan_mode=CLOSE_NATIVE_PLAN_MODE, close_execution_policy=terms)
+            execution_plan_mode=CLOSE_NATIVE_PLAN_MODE, close_execution_policy=terms, supported_venue=venue)
         from kiwoom_monitor.domain.execution_activation import forward_spec_from_dict, stage_revision_from_dict
         profile = forward_spec_from_dict(documents['forward_profile'])
         stages = tuple(stage_revision_from_dict(value) for value in documents['stage_revisions'])
@@ -1349,10 +1369,13 @@ class MockAutomationSpecificationTests(unittest.TestCase):
         readiness, changed = publish_ready_mock_automation_spec(repository, profile=profile,
             stage_revisions=stages, spec=spec, shadow_event=event, current_binding=inputs.binding)
         self.assertEqual((MockAutomationReadinessStatus.READY, True), (readiness.status, changed))
-        transport = _FakeBrokerTransport(lambda: clock[0])
+        transport = native_test_transport(venue, lambda: clock[0])
+        route_options = ({'local_automation_order_rejection': lambda _intent, _now: None}
+                         if venue in {'NXT', 'SOR'} else {})
         execution = ExecutionRepository(store)
         run_id = execution_run_id_for_spec(spec.spec_id)
-        runtime = ExecutionRuntime(OrderLifecycle(execution, transport, now_provider=lambda: clock[0]), execution,
+        runtime = ExecutionRuntime(OrderLifecycle(execution, transport, now_provider=lambda: clock[0],
+                                                  **route_options), execution,
             account_ref=ACCOUNT_REF, run_id=run_id, owner_token='close-native-entry-test', now_provider=lambda: clock[0])
         self.addCleanup(runtime.stop)
         admit_mock_automation(repository, repository, runtime, account_ref=ACCOUNT_REF,
@@ -1366,12 +1389,14 @@ class MockAutomationSpecificationTests(unittest.TestCase):
         record_mock_automation_recovery_from_risk(repository, runtime, recovery, risk, account_ref=ACCOUNT_REF, spec_id=spec.spec_id)
         quote = {'price_won': 104, 'available_at': cut, 'input_ref': 'collector-trade:fixture:1:005930:1',
                  'durable': False, 'market_status': 'TRADABLE'}
+        if venue == 'NXT':
+            quote['venue'] = venue
         call = dict(parameters=parameters, event=event, quote=quote, recovery=recovery, risk=risk)
         if prepare_only:
             return SimpleNamespace(store=store, example=example, spec=spec, parameters=parameters, event=event,
                 repository=repository, runtime=runtime, execution=execution, clock=clock, quote=quote,
                 transport=transport, settings=settings, monitor=monitor, publication=publication,
-                profile=profile, stages=stages, binding=inputs.binding, documents=documents)
+                profile=profile, stages=stages, binding=inputs.binding, documents=documents, route_options=route_options)
         with self.assertRaisesRegex(ValueError, 'approved signal slippage'):
             dispatch_close_entry(repository, runtime, spec, **{**call, 'quote': {**quote, 'price_won': 106}})
         save_settings({**settings, 'shadow_candidate_enabled': False})

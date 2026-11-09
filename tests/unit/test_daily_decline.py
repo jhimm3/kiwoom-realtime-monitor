@@ -307,6 +307,61 @@ class DailyDeclineTests(unittest.TestCase):
         self.assertEqual((0, 2, -522), (result["summary"]["owned_quantity"], result["summary"]["fill_count"],
                                        result["summary"]["realized_pnl_won"]))
 
+    def test_replay_defaults_missing_quote_cost_and_fill_fees(self):
+        events = []
+        for raw, ref, session in ((quote(1000), "entry", 1), (quote(740, session=2), "exit", 2)):
+            quote_event = quote_receipt(raw)
+            quote_event.pop("buy_unit_cost_won")
+            common = {"available_at": raw.available_at, "order_ref": ref}
+            events.extend((quote_event,
+                           {**common, "kind": "ACCEPT", "quote_ref": raw.evidence_id},
+                           {**common, "kind": "FILL", "fill_id": ref, "quantity": 20,
+                            "price_won": raw.price_won, "session_index": session},
+                           {**common, "kind": "TERMINAL"}))
+        result = replay_daily_decline(synthetic_scenario(*events), asdict(replace(SPLIT, budget_won=60_000)))
+        first_buy = result["events"][0]["action"]
+        self.assertEqual(("BUY", 20, 20_020), (first_buy["kind"], first_buy["quantity"], first_buy["reserved_won"]))
+        fills = [row for row in result["events"] if row["kind"] == "FILL"]
+        self.assertEqual([3, 31], [row["fee_won"] for row in fills])
+        self.assertTrue(all(row["cost_provenance"]["source_kind"] == "model_estimate" for row in fills))
+        self.assertEqual(-5_234, result["summary"]["realized_pnl_won"])
+
+    def test_material_news_and_price_only_use_the_same_dd_observations_and_fills(self):
+        entry, before, after = quote(1000), quote(970, minute=1), quote(970, minute=2)
+        scenario = synthetic_scenario(
+            quote_receipt(entry), {"kind": "ACCEPT", "available_at": entry.available_at,
+                                   "quote_ref": entry.evidence_id, "order_ref": "entry"},
+            {"kind": "FILL", "available_at": entry.available_at, "order_ref": "entry", "fill_id": "buy",
+             "quantity": 2, "price_won": 1000, "fee_won": 0, "session_index": 1},
+            {"kind": "TERMINAL", "available_at": entry.available_at, "order_ref": "entry"},
+            quote_receipt(before), quote_receipt(after),
+        )
+
+        def row(ref, parent, stage, at, effect):
+            return {"symbol": SYMBOL, "ref": ref, "revises": parent, "stage": stage, "effect": effect,
+                    "effective_at": at.isoformat(), "available_at": at.isoformat(),
+                    "source_ref": f"source:{ref}", "source_version": "fixture/v1"}
+
+        rows = [row("report", None, "REPORT", CUT - timedelta(hours=2), "UNKNOWN"),
+                row("confirmed", "report", "CONFIRMED", CUT - timedelta(hours=1), "INTACT"),
+                row("corrected", "confirmed", "CORRECTED", before.available_at, "INTACT"),
+                row("withdrawn", "corrected", "WITHDRAWN", after.available_at, "DAMAGED"),
+                row("other", None, "CONFIRMED", after.available_at, "INTACT")]
+        with_material = scenario | {"material_news": {"event_ref": "report", "revisions": rows}}
+        price = replay_daily_decline(scenario, asdict(SINGLE))
+        news = replay_daily_decline(with_material, asdict(replace(SINGLE, require_intact_catalyst=True)))
+        advisory = replay_daily_decline(with_material, asdict(SINGLE))
+        self.assertEqual(("QUALIFIED", "INTACT"), (news["setup"]["status"], news["setup"]["catalyst_state"]))
+        self.assertEqual(["BUY", "NONE", "NONE"], [row["action"]["kind"] for row in price["events"] if row["kind"] == "QUOTE"])
+        self.assertEqual(["BUY", "NONE", "NONE"], [row["action"]["kind"] for row in advisory["events"] if row["kind"] == "QUOTE"])
+        actions = [row for row in news["events"] if row["kind"] == "QUOTE"]
+        self.assertEqual([("BUY", "INTACT"), ("NONE", "INTACT"), ("SELL", "DAMAGED")],
+                         [(row["action"]["kind"], row["material_catalyst_state"]) for row in actions])
+        self.assertEqual("catalyst_damaged", actions[-1]["action"]["reason"])
+        self.assertEqual(("withdrawn",), actions[-1]["material_evidence_refs"])
+        self.assertEqual(2, news["summary"]["owned_quantity"])
+        self.assertIsNone(news["summary"]["realized_pnl_won"])
+
     def test_synthetic_replay_neither_skips_unknown_calendar_nor_infers_fill(self):
         raw = quote(1_000)
         fixture = synthetic_scenario(quote_receipt(raw))

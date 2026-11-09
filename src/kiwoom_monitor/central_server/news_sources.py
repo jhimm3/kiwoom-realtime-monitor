@@ -7,9 +7,10 @@ import hashlib
 import logging
 import uuid
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
+from kiwoom_monitor.application.stock_enrichment import NXT_CATALOG_KIND
 from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 from kiwoom_monitor.infrastructure.naver_news import (
     NaverNewsClient, StockNewsItem,
@@ -32,6 +33,45 @@ DEFAULT_NEWS_QUERY_SET = (
     "증권", "코스피", "코스닥", "상장사", "수주 계약", "유상증자", "인수합병", "실적 전망", "최대주주",
 )
 LOGGER = logging.getLogger(__name__)
+
+
+def news_resume_at(now: datetime) -> datetime:
+    return now.replace(hour=7, minute=0, second=0, microsecond=0)
+
+
+def automatic_news_open(now: datetime) -> bool:
+    return 7 <= now.hour < 20
+
+
+def automatic_news_wait(now: datetime, interval: float) -> float:
+    resume = news_resume_at(now)
+    if automatic_news_open(now):
+        return interval
+    if now >= resume:
+        resume += timedelta(days=1)
+    return (resume - now).total_seconds()
+
+
+def load_premarket_stock_names(store: Any, day: str) -> dict[str, str]:
+    snapshots = store.load_dataset_snapshots(NXT_CATALOG_KIND, day, 1)
+    payload = snapshots[0].get("payload", {}) if snapshots else {}
+    stocks = payload.get("stocks")
+    if not isinstance(stocks, dict) or not isinstance(payload.get("flags"), dict):
+        return {}
+    return {code: name for code, (name, _market) in stocks.items()}
+
+
+def load_news_stock_catalog(store: Any, day: str) -> tuple[tuple[str, str], ...]:
+    premarket = load_premarket_stock_names(store, day)
+    stored = store.load_documents("stock_catalog", "krx", 10_000)
+    names = dict.fromkeys(premarket.items())
+    for row in stored:
+        document = row.get("document")
+        if isinstance(document, dict):
+            code, name = str(document.get("code") or ""), str(document.get("name") or "").strip()
+            if code and name:
+                names[(code, name)] = None
+    return tuple(names)
 
 
 class QuerySetNewsCollector:
@@ -100,19 +140,21 @@ class QuerySetNewsCollector:
             await asyncio.gather(*(asyncio.shield(t) for t in tuple(self._collecting)), return_exceptions=True)
 
     async def run_once(self) -> int:
-        if self._workload_paused("news_query_set"):
+        if not automatic_news_open(self._now()) or self._workload_paused("news_query_set"):
             return 0
         if self._credential_paused or self._closing.is_set() or self._client is None or not self._enabled or not self._queries or self._query_limit <= 0:
             return 0
         completed = 0
         policy = (self._enabled, self._queries, self._poll_seconds)
         for query in policy[1]:
-            if self._workload_paused("news_query_set"):
+            if not automatic_news_open(self._now()) or self._workload_paused("news_query_set"):
                 break
             if policy != (self._enabled, self._queries, self._poll_seconds):
                 break
             source_id = _source_id(query)
             cursor = await asyncio.to_thread(self._store.load_news_source_cursor, source_id)
+            if cursor and float(cursor.get("checked_at") or 0) < news_resume_at(self._now()).timestamp():
+                cursor = {**cursor, "next_start": 1, "pending_published_at": None, "pending_identity": ""}
             scheduled = float((cursor or {}).get("next_schedule_at") or 0)
             if (cursor and scheduled > 0 and cursor.get("last_success") is not None
                     and int(cursor.get("next_start") or 1) == 1 and not cursor.get("error")):
@@ -143,7 +185,7 @@ class QuerySetNewsCollector:
         pending = (str(cursor.get("pending_published_at") or ""), str(cursor.get("pending_identity") or ""))
         run_id, checked_at = uuid.uuid4().hex, self._now().timestamp()
         while start <= 1000:
-            if self._workload_paused("news_query_set"):
+            if not automatic_news_open(self._now()) or self._workload_paused("news_query_set"):
                 return
             requests = 0
 
@@ -205,7 +247,7 @@ class QuerySetNewsCollector:
     async def _record_error(self, query: str, source_id: str, cursor: dict[str, Any], error: Exception) -> None:
         now = self._now().timestamp()
         latest = await asyncio.to_thread(self._store.load_news_source_cursor, source_id)
-        if latest:
+        if latest and float(latest.get("checked_at") or 0) >= news_resume_at(self._now()).timestamp():
             cursor = latest
         text = f"{type(error).__name__}: {error}"
         await asyncio.to_thread(self._store.save_news_source_page, {
@@ -224,17 +266,11 @@ class QuerySetNewsCollector:
         })
 
     def _load_catalog(self) -> tuple[tuple[str, str], ...]:
-        rows = self._store.load_documents("stock_catalog", "krx", 10_000)
-        result = []
-        for row in rows:
-            document = row.get("document")
-            if isinstance(document, dict):
-                code, name = str(document.get("code") or ""), str(document.get("name") or "").strip()
-                if code and name:
-                    result.append((code, name))
-        if result:
-            return tuple(result)
-        now = self._now().timestamp()
+        current = self._now()
+        catalog = load_news_stock_catalog(self._store, current.date().isoformat())
+        if catalog:
+            return catalog
+        now = current.timestamp()
         if now < self._catalog_retry_after:
             return ()
         try:
@@ -294,7 +330,8 @@ class QuerySetNewsCollector:
             except Exception:
                 LOGGER.exception("query_set 뉴스 수집 주기에 실패했습니다.")
             try:
-                await asyncio.wait_for(self._closing.wait(), timeout=min(60, self._poll_seconds))
+                await asyncio.wait_for(self._closing.wait(),
+                                       timeout=automatic_news_wait(self._now(), min(60, self._poll_seconds)))
             except TimeoutError:
                 pass
 

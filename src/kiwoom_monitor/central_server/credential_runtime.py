@@ -468,7 +468,7 @@ class CredentialRuntime:
 
 def install_credential_routes(app: Any, runtime: CredentialRuntime | None, authorize: Any,
                               trusted_proxies: tuple[str, ...] = (), account_owner: Any = None,
-                              real_account_owner: Any = None) -> None:
+                              real_account_owner: Any = None, *, local_mock: bool = False) -> None:
     """Manual bounded parsing avoids Pydantic's raw input in 422 responses."""
     from fastapi import Depends
     from starlette.responses import JSONResponse
@@ -491,6 +491,16 @@ def install_credential_routes(app: Any, runtime: CredentialRuntime | None, autho
     def secure(request: Request) -> None:
         if request.scope.get("_credential_query_present"):
             raise CredentialOperationError("QUERY_NOT_ALLOWED", 400)
+        if local_mock:
+            try:
+                loopback = request.client is not None and ipaddress.ip_address(request.client.host).is_loopback
+            except ValueError:
+                loopback = False
+            if not loopback or request.url.hostname not in {"127.0.0.1", "localhost", "::1"}:
+                raise CredentialOperationError("LOOPBACK_REQUIRED", 403)
+            if request.path_params.get("provider", "kiwoom_mock") != "kiwoom_mock":
+                raise CredentialOperationError("UNSUPPORTED_PROVIDER", 404)
+            return
         if request.scope.get("scheme") == "https": return
         peer = request.client.host if request.client else ""
         try: peer = str(ipaddress.ip_address(peer))
@@ -543,6 +553,8 @@ def install_credential_routes(app: Any, runtime: CredentialRuntime | None, autho
     @app.get(prefix, dependencies=[Depends(authorize)])
     async def credential_profiles(request: Request):
         if request.scope.get("_credential_query_present"): raise CredentialOperationError("QUERY_NOT_ALLOWED", 400)
+        if local_mock:
+            secure(request)
         return await safe_call(enabled().profiles())
 
     @app.post(prefix + "/{provider}/profiles", dependencies=[Depends(authorize)])
@@ -585,6 +597,8 @@ def install_credential_routes(app: Any, runtime: CredentialRuntime | None, autho
     @app.get(operations + "/{operation_id}", dependencies=[Depends(authorize)])
     async def status(operation_id: str, request: Request):
         if request.scope.get("_credential_query_present"): raise CredentialOperationError("QUERY_NOT_ALLOWED", 400)
+        if local_mock:
+            secure(request)
         return await safe_call(enabled().status(identifier(operation_id)))
 
     @app.post(operations + "/{operation_id}/apply", dependencies=[Depends(authorize)], status_code=202)
