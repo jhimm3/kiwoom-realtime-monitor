@@ -89,6 +89,39 @@ def fixture_batch(batch_id="c65be620-cd3a-432f-8c0e-6614cf742817", *, source_str
     return ObservationArchiveBatch.from_artifact(source_stream, manifest, observations)
 
 
+def isolated_sor_tape():
+    from kiwoom_monitor.domain.strategy_contract import LEADER_BREAKOUT_FAMILY_ID
+    from tests.unit.test_leader_breakout import AT, execution_config, policy, trade
+
+    nxt, krx = '005930', '000660'
+    references = {'version': 'strategy-reference/v1', 'calendar': [], 'listings': []}
+    second = policy()
+    second = replace(second, signal_valid_seconds=10,
+                     contexts=(replace(second.contexts[0], symbol=krx, evidence_ref='isolated-symbol'),))
+    first = execution_config().to_dict()
+    first['signal_valid_seconds'] = 10
+    frames = []
+    for index, (price, fills) in enumerate((
+        (995, {}), (1010, {}), (1010, {'BUY': 1}), (1014, {}), (1014, {'BUY': 3}),
+        (945, {}), (945, {'SELL': 4}),
+    )):
+        now = AT + timedelta(seconds=index)
+        frames.append({'at': now.isoformat(), 'observations': {
+            code: {'trade': trade(price, at=now, code=code), 'fills': fills,
+                   'quotes': {venue: {'price': price + delta, 'available_at': now.isoformat(),
+                                     'eligible': True, 'phase': 'CONTINUOUS'}
+                              for venue, delta in (('KRX', 0), ('NXT', 1))}}
+            for code in (nxt, krx)
+        }})
+    return {'version': 'local-strategy-rehearsal/v2', 'capital_won': 20000, 'frames': frames,
+            'plans': [{'family': LEADER_BREAKOUT_FAMILY_ID, 'symbol': code, 'references': references,
+                       'parameters': {'policy': rules, 'quantity': 4, 'capital_won': 10000}}
+                      for code, rules in ((nxt, first), (krx, second.to_dict()))],
+            'signal_valid_seconds': 10, 'maximum_quote_age_seconds': 3, 'maximum_adverse_slippage_bps': 300,
+            'protective_slippage_bps': 300, 'sessions': {'SOR': ['KRX_REGULAR']},
+            'sor_destinations': {nxt: 'NXT', krx: 'KRX'}, 'synthetic_nxt_codes': [nxt]}
+
+
 class ObservationArchiveTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(TemporaryDirectory()))
@@ -100,6 +133,34 @@ class ObservationArchiveTests(unittest.TestCase):
     @staticmethod
     def _url(path):
         return "sqlite:///" + path.as_posix()
+
+    def test_isolated_sor_day_resumes_physical_orders_and_archives_one_day(self):
+        from kiwoom_monitor.central_server.isolated_sor_day import run_day
+
+        tape = self.root / 'tape.json'
+        tape.write_text(json.dumps(isolated_sor_tape()), encoding='utf-8')
+        run = self.root / 'isolated'
+        with patch.dict(os.environ, {'no_proxy': '127.0.0.1'}):
+            partial = asyncio.run(run_day(tape, run, 3))
+            completed = asyncio.run(run_day(tape, run, None))
+        for code, venue, order_id, price in (
+            ('005930', 'NXT', '0000001', '1015'), ('000660', 'KRX', '0000002', '1014'),
+        ):
+            self.assertEqual({'state': 'PARTIALLY_FILLED', 'number': order_id, 'physical_venue': venue,
+                              'filled': 1, 'remaining': 3}, partial['orders'][code]['BUY'])
+            amendment, = (row['body'] for row in completed['commands']
+                          if row['api_id'] == 'kt10002' and row['body']['stk_cd'] == code)
+            self.assertEqual((venue, order_id, '3', price), tuple(amendment[key] for key in
+                ('dmst_stex_tp', 'orig_ord_no', 'mdfy_qty', 'mdfy_uv')))
+            self.assertEqual((4, 4), tuple(completed['orders'][code][side]['filled'] for side in ('BUY', 'SELL')))
+        self.assertEqual((3, 2), (completed['initial_cursor'], completed['initial_commands']))
+        self.assertEqual(['SOR', 'SOR'], [row['body']['dmst_stex_tp'] for row in completed['commands']
+                                        if row['api_id'] == 'kt10000'])
+        self.assertEqual({'ka00198', 'ka10099'}, {api for api, _ in partial['requests']})
+        self.assertNotIn('ka10099', {api for api, _ in completed['requests']})
+        self.assertEqual({'ranking', 'minute_bar', 'daily_bar', 'top20_membership', 'program_flow'},
+                         {row['kind'] for row in completed['archive_receipts']})
+        self.assertEqual(5, len(completed['archive_receipts']))
 
     def test_pc_completed_program_flow_restarts_pending_and_nas_reuses_first_receipt(self):
         day = "2026-10-26"

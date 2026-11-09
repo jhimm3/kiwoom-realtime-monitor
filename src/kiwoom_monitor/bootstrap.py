@@ -89,6 +89,9 @@ def _set_taskbar_app_id() -> None:
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "--isolated-sor-day":
+        from kiwoom_monitor.central_server.isolated_sor_day import main as isolated_sor_main
+        raise SystemExit(isolated_sor_main(sys.argv[2:]))
     if "--central-server" in sys.argv:
         from kiwoom_monitor.central_server.__main__ import main as central_server_main
         index = sys.argv.index("--central-server")

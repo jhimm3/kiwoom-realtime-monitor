@@ -48,9 +48,10 @@ class _ReplayBroker:
 
     environment = 'real'
 
-    def __init__(self, path, account, symbols, venue, capital, now):
+    def __init__(self, path, account, symbols, venue, capital, now, destinations):
         self.path, self.account, self.symbols, self.venue = path, account, tuple(symbols), venue
         self.capital, self.now = capital, now
+        self.destinations = destinations
 
     def reload(self):
         self.state = (json.loads(self.path.read_text(encoding='utf-8')) if self.path.exists()
@@ -93,12 +94,15 @@ class _ReplayBroker:
 
     def request_once(self, api_id, path, body):
         symbol = body['stk_cd']
-        if path != '/api/dostk/ordr' or body['dmst_stex_tp'] != self.venue or symbol not in self.symbols:
+        if path != '/api/dostk/ordr' or symbol not in self.symbols:
             raise ValueError('가짜 주문의 거래소 또는 종목이 바뀌었습니다.')
         commands, orders = self.state['commands'], self.state['orders']
         number = f'{len(commands) + 1:07d}'
-        response = {'ord_no': number, 'dmst_stex_tp': self.venue, 'return_code': 0}
+        physical = self.destinations[symbol]
+        response = {'ord_no': number, 'dmst_stex_tp': physical, 'return_code': 0}
         if api_id in {'kt10000', 'kt10001'}:
+            if body['dmst_stex_tp'] != self.venue:
+                raise ValueError('가짜 신규 주문의 요청 거래소가 바뀌었습니다.')
             side = 'BUY' if api_id == 'kt10000' else 'SELL'
             quantity, price, parent = int(body['ord_qty']), int(body['ord_uv']), None
         elif api_id in {'kt10002', 'kt10003'}:
@@ -106,6 +110,8 @@ class _ReplayBroker:
             original = orders[parent]
             if self._symbol(original) != symbol:
                 raise ValueError('다른 종목의 원주문을 변경할 수 없습니다.')
+            if body['dmst_stex_tp'] != original.get('venue', self.venue):
+                raise ValueError('원주문이 접수된 거래소에서만 변경할 수 있습니다.')
             if original['remaining'] <= 0:
                 return {'return_code': 1, 'return_msg': '확인된 잔량이 없습니다.'}
             side = original['side']
@@ -124,7 +130,8 @@ class _ReplayBroker:
         else:
             raise ValueError('가짜 주문의 요청 종류를 확인할 수 없습니다.')
         if quantity:
-            orders[number] = dict(symbol=symbol, side=side, quantity=quantity, remaining=quantity, price=price, parent=parent,
+            orders[number] = dict(symbol=symbol, side=side, quantity=quantity, remaining=quantity, price=price,
+                                  parent=parent, venue=physical,
                                   state='ACCEPTED', fills=[])
         commands.append({'api_id': api_id, 'body': body, 'order_id': number, 'frame': self.state['prepared']})
         self.save()
@@ -146,7 +153,8 @@ class _ReplayBroker:
                 reserved += row['remaining'] * row['price']
             orders.append(BrokerOrderSnapshot(number, self.account, symbol, OrderState(row['state']),
                                                quantity, row['remaining'], now, fills))
-            details.append(BrokerOrderDetails(number, row['quantity'], OrderSide(row['side']), row['price'], self.venue,
+            details.append(BrokerOrderDetails(number, row['quantity'], OrderSide(row['side']), row['price'],
+                                              row.get('venue', self.venue),
                                               original_broker_order_id=row['parent']))
         return AccountRecovery(AccountSnapshot(self.account, cash, reserved, {k: v for k, v in positions.items() if v}, now),
                                tuple(orders), tuple(details))
@@ -381,7 +389,7 @@ class _StrategyPlan:
         buy = records.get('BUY')
         entry = self.entries.get(buy.intent.created_at if buy else replay.now)
         progress = replay.plan_progress(self.symbol)
-        quote, market = replay.quote(row, replay.venue), replay.quote(row, 'KRX')
+        quote, market = replay.quote(row, replay.destinations[self.symbol]), replay.quote(row, 'KRX')
         market_price, route_price = market['price'] if market else None, quote['price'] if quote else None
         action, quantity = self._position_action(position, bar, entry, market_price)
         if action == 'EXIT' and not progress.get('exit_observed_at'):
@@ -424,20 +432,27 @@ class _StrategyPlan:
 class LocalStrategyRehearsal:
     """Replay explicitly selected strategy plans against a single fake account per venue."""
 
-    def __init__(self, source: Path, root: Path, venue: str, *, lease_now=kst_now):
+    def __init__(self, source: Path, root: Path, venue: str, *, lease_now=kst_now, expected_tape_hash=None):
         with source.open('rb') as stream:
             raw = stream.read(4 * 1024 * 1024 + 1)
         if len(raw) > 4 * 1024 * 1024:
             raise ValueError('로컬 리허설 입력이 4 MiB를 초과합니다.')
+        tape_hash = sha256(raw).hexdigest()
+        if expected_tape_hash is not None and tape_hash != expected_tape_hash:
+            raise ValueError('격리 시세를 준비한 뒤 리허설 입력이 바뀌었습니다.')
         tape = json.loads(raw)
         self.venue = venue
         self.portfolio = tape['version'] == 'local-strategy-rehearsal/v2'
-        if tape['version'] not in {'local-strategy-rehearsal/v1', 'local-strategy-rehearsal/v2'} or venue not in {'KRX', 'NXT'}:
+        if tape['version'] not in {'local-strategy-rehearsal/v1', 'local-strategy-rehearsal/v2'} or venue not in {'KRX', 'NXT', 'SOR'}:
             raise ValueError('지원하는 로컬 전략·거래소 입력을 선택하세요.')
         declarations = tape['plans'] if self.portfolio else [tape]
         self.plans = {plan.symbol: plan for plan in (_StrategyPlan(self, row) for row in declarations)}
         if not self.plans or len(self.plans) != len(declarations):
             raise ValueError('종목마다 하나의 전략 계획이 필요합니다.')
+        self.destinations = tape.get('sor_destinations') if venue == 'SOR' else dict.fromkeys(self.plans, venue)
+        if (not isinstance(self.destinations, dict) or self.destinations.keys() != self.plans.keys()
+                or any(value not in {'KRX', 'NXT'} for value in self.destinations.values())):
+            raise ValueError('모든 종목의 가짜 SOR 접수 거래소를 지정하세요.')
         first = next(iter(self.plans.values()))
         self.family, self.symbol = first.family, first.symbol
         self.capital = _positive(tape['capital_won']) if self.portfolio else first.capital
@@ -456,12 +471,13 @@ class LocalStrategyRehearsal:
                for value in (self.slippage_bps, self.protective_slippage_bps)):
             raise ValueError('명시한 최대 가격 이탈 범위가 필요합니다.')
         self._validate_frames()
-        identity = f'{sha256(raw).hexdigest()}-{venue}'
+        identity = f'{tape_hash}-{venue}'
         directory = root / identity
         directory.mkdir(parents=True, exist_ok=True)
         self.now = self.times[0]
         account = f'local-{identity[:16]}-{venue}'
-        self.broker = _ReplayBroker(directory / 'fake-broker.json', account, self.plans, venue, self.capital, lambda: self.now)
+        self.broker = _ReplayBroker(directory / 'fake-broker.json', account, self.plans, venue, self.capital,
+                                    lambda: self.now, self.destinations)
         scope = {'plan_slots': {symbol: plan.slots for symbol, plan in self.plans.items()}} if self.portfolio else {'symbol': self.symbol}
         self.orders = LocalOrderRehearsal(directory / 'orders', self.broker, account_ref=account, run_id=identity,
             venue=venue, sessions=tuple(MarketSession(value) for value in tape['sessions'][venue]),

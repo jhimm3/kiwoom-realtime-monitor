@@ -15,7 +15,9 @@ from kiwoom_monitor.domain.order_contract import (
     LocalRehearsalOrderIntent, OrderSide, OrderState, OrderType, TERMINAL_ORDER_STATES,
 )
 from kiwoom_monitor.infrastructure.kiwoom_rest.mock_execution import LocalRehearsalOrderTransport
-from kiwoom_monitor.infrastructure.persistence.execution_repository import ExecutionRepository, execution_broker_legs
+from kiwoom_monitor.infrastructure.persistence.execution_repository import (
+    ExecutionRepository, execution_broker_legs, execution_broker_venue,
+)
 from .database import SQLiteQueryStore
 from .execution_runtime import ExecutionRuntime
 
@@ -41,11 +43,11 @@ class LocalOrderRehearsal:
     def __init__(self, directory: Path, fake_peer, *, account_ref: str, run_id: str, symbol: str | None = None,
                  venue: str, sessions: tuple[MarketSession, ...], maximum_age: timedelta, now_provider,
                  lease_now_provider=None, plan_slots: dict[str, dict[str, OrderSide]] | None = None):
-        allowed_sessions = ({MarketSession.KRX_REGULAR} if venue == 'KRX' else {
+        allowed_sessions = ({MarketSession.KRX_REGULAR} if venue in {'KRX', 'SOR'} else {
             MarketSession.NXT_PRE_MARKET, MarketSession.NXT_MAIN_MARKET, MarketSession.NXT_AFTER_MARKET,
         })
         slots = {symbol: {side.value: side for side in OrderSide}} if plan_slots is None else plan_slots
-        if (venue not in {'KRX', 'NXT'} or not sessions or set(sessions) - allowed_sessions
+        if (venue not in {'KRX', 'NXT', 'SOR'} or not sessions or set(sessions) - allowed_sessions
                 or maximum_age <= timedelta(0) or not account_ref.strip() or not run_id.strip()
                 or (symbol is None) != (plan_slots is not None) or not slots
                 or any(not isinstance(code, str) or len(code) != 6 or not code.isascii() or not code.isdigit()
@@ -122,7 +124,8 @@ class LocalOrderRehearsal:
         cut = self._conditions
         if not self._usable(cut, now, intent.symbol) or cut.allows_order is not True or cut.eligible is not True:
             return 'LOCAL_REHEARSAL_CURRENT_CONDITIONS_UNCONFIRMED'
-        window = session_window_at(now, venue=intent.venue, eligible=cut.eligible, observed_phase=cut.phase.value)
+        venue = 'KRX' if intent.venue == 'SOR' else intent.venue
+        window = session_window_at(now, venue=venue, eligible=cut.eligible, observed_phase=cut.phase.value)
         if window.session not in self._sessions or not window.permits('continuous_trade'):
             return 'LOCAL_REHEARSAL_SESSION_UNCONFIRMED'
         return None
@@ -135,8 +138,10 @@ class LocalOrderRehearsal:
             raise ValueError('local rehearsal requires a fresh matching account')
         details = {detail.broker_order_id: detail for detail in recovery.order_details}
         orders = {order.broker_order_id: order for order in recovery.orders}
+        allowed_venues = {'KRX', 'NXT'} if self._venue == 'SOR' else {self._venue}
         if (len(details) != len(recovery.order_details) or len(orders) != len(recovery.orders)
-                or set(details) != set(orders) or any(detail.venue != self._venue or detail.reasons for detail in details.values())
+                or set(details) != set(orders)
+                or any(detail.venue not in allowed_venues or detail.reasons for detail in details.values())
                 or any(order.account_ref != self._account_ref or order.symbol not in self._slots
                        or not timedelta(0) <= now - order.as_of <= self._maximum_age for order in orders.values())):
             raise ValueError('local rehearsal broker evidence does not match the route')
@@ -153,12 +158,14 @@ class LocalOrderRehearsal:
                 if number not in orders:
                     continue
                 detail = details[number]
+                if self._venue == 'SOR' and detail.venue != execution_broker_venue(refreshed):
+                    raise ValueError('local SOR evidence conflicts with the confirmed physical venue')
                 if (orders[number].symbol, detail.side, detail.limit_price, detail.ordered_quantity,
                         detail.original_broker_order_id or '') != (record.intent.symbol, record.intent.side,
                         leg.limit_price, leg.ordered_quantity, leg.original_broker_order_id):
                     raise ValueError('local rehearsal physical order does not match the ledger')
                 if leg.last_broker_as_of is None or orders[number].as_of > leg.last_broker_as_of:
-                    self._runtime.reconcile(record.intent.intent_id, orders[number])
+                    self._runtime.reconcile(record.intent.intent_id, orders[number], broker_venue=detail.venue)
         return account, matched == set(orders)
 
     def reconcile(self):
