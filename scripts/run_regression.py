@@ -17,7 +17,7 @@ import unittest
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -334,6 +334,7 @@ def _valid_module(value: object) -> bool:
 
 
 CI_WINDOWS_PROFILES = ("ci-required-windows", "ci-extended-windows", "ci-long-windows")
+CI_WINDOWS_SHARD_COUNT = 8
 CI_MODULE_GROUPS = (
     "required_windows_additions", "long_windows_modules", "linux_required",
     "postgres_required", "postgres_extended", "sealed_extended", "operator_extended",
@@ -596,18 +597,50 @@ def _profile_workers(batches: Sequence[dict[str, Any]]) -> list[tuple[str, Seque
     return workers
 
 
+def _duration_shard_bounds(seconds: Sequence[int], count: int) -> list[int]:
+    def bounds(capacity: int, *, exact: bool = False) -> list[int]:
+        starts, used = [0], 0
+        for index, duration in enumerate(seconds):
+            leave_one_per_shard = exact and len(seconds) - index == count - len(starts)
+            if index and (used + duration > capacity or leave_one_per_shard):
+                starts.append(index)
+                used = 0
+            used += duration
+        return [*starts, len(seconds)]
+
+    # Find the lowest capacity that fits within count contiguous partitions.
+    low, high = max(seconds), sum(seconds)
+    while low < high:
+        middle = (low + high) // 2
+        if len(bounds(middle)) - 1 <= count:
+            high = middle
+        else:
+            low = middle + 1
+    return bounds(low, exact=True)
+
+
 def _all_local_shard_plan(
     workers: Sequence[tuple[str, Sequence[str]]], *, index: int, count: int,
+    worker_seconds: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
-    if type(index) is not int or type(count) is not int or count != 2 or index not in (0, 1):
-        raise ValueError("All-local shards require index 0 or 1 and count 2")
+    if (type(index) is not int or type(count) is not int or count not in (2, CI_WINDOWS_SHARD_COUNT)
+            or not 0 <= index < count):
+        raise ValueError("Invalid all-local shard index or count")
     if len(workers) < count:
         raise ValueError("All-local shards must each contain a worker")
-    encoded = json.dumps([[name, list(modules)] for name, modules in workers],
-                         ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    plan = [[name, list(modules)] for name, modules in workers]
+    if count == 2:
+        bounds = [len(workers) * part // count for part in range(count + 1)]
+    else:
+        timings = worker_seconds or {}
+        seconds = [timings.get(name, 2) for name, _ in workers]
+        if any(type(value) is not int or value < 1 for value in seconds):
+            raise ValueError("Invalid Windows worker duration in regression manifest")
+        bounds = _duration_shard_bounds(seconds, count)
+        plan = [plan, bounds]
+    encoded = json.dumps(plan, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return {"index": index, "count": count, "total_workers": len(workers),
-            "start": len(workers) * index // count,
-            "end": len(workers) * (index + 1) // count,
+            "start": bounds[index], "end": bounds[index + 1],
             "plan_sha256": hashlib.sha256(encoded).hexdigest()}
 
 
@@ -821,9 +854,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", help="profile declared in tests/regression_profiles.json")
     parser.add_argument("--output", type=Path, help="new or not-yet-created directory for this run")
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
-    parser.add_argument("--shard-index", type=int, choices=(0, 1),
-                        help="run one contiguous half of all-local; requires --shard-count 2")
-    parser.add_argument("--shard-count", type=int, choices=(2,),
+    parser.add_argument("--shard-index", type=int, choices=range(CI_WINDOWS_SHARD_COUNT),
+                        help="run one contiguous partition of all-local; requires --shard-count")
+    parser.add_argument("--shard-count", type=int, choices=(2, CI_WINDOWS_SHARD_COUNT),
                         help="split all-local into two independently contained worker ranges")
     parser.add_argument("--list", dest="list_only", action="store_true",
                         help="print a profile plan without running tests")
@@ -1155,7 +1188,8 @@ def _execute_profile(profile: str, timeout_seconds: int, output_path: Path, *, b
     if not batches or any(not batch["modules"] for batch in batches):
         raise ValueError(f"Regression profile {profile!r} has no runnable tests")
     full_workers = _profile_workers(batches)
-    shard = _all_local_shard_plan(full_workers, index=shard_index, count=shard_count) if sharded else None
+    shard = _all_local_shard_plan(full_workers, index=shard_index, count=shard_count,
+                                 worker_seconds=manifest.get("ci_windows_worker_seconds")) if sharded else None
     workers = full_workers[shard["start"]:shard["end"]] if shard else full_workers
     if shard:
         batches = [{"name": name, "modules": list(modules), "isolate_modules": False}
@@ -1289,6 +1323,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     sharded = args.shard_index is not None or args.shard_count is not None
     if sharded and (args.profile != "all-local" or args.shard_index is None or args.shard_count is None
+                    or args.shard_index >= args.shard_count
                     or args.selection or args.summarize or args.list_only or args._worker
                     or args.check_test_catalog or args.check_new_test_modules
                     or args._result_path is not None or args._modules or args.base_ref or args.fallback_ref):

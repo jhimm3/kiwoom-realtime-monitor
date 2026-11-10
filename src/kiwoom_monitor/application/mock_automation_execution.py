@@ -62,6 +62,10 @@ class MockAutomationGateStatus(StrEnum):
     APPROVED_FOR_SINGLE_SUBMISSION = "APPROVED_FOR_SINGLE_SUBMISSION"
 
 
+class MockAutomationRiskSuperseded(RuntimeError):
+    """The current gate observed a strictly newer Risk cut for the same owner."""
+
+
 @dataclass(frozen=True)
 class MockAutomationLiveMetrics:
     observed_at: datetime
@@ -1430,6 +1434,13 @@ def _validated_risk_metrics_and_admission(repository, runtime, recovery, risk, a
     loader = getattr(repository, "load_latest_mock_automation_risk", None)
     current = loader(account_ref, **reader_args) if callable(loader) else None
     if current != risk:
+        if (isinstance(risk, MockAutomationRiskSnapshot)
+                and isinstance(current, MockAutomationRiskSnapshot)
+                and current.account_ref == risk.account_ref
+                and current.execution_run_id == risk.execution_run_id
+                and current.binding_revision == risk.binding_revision
+                and current.reconciliation_revision > risk.reconciliation_revision):
+            raise MockAutomationRiskSuperseded("latest mock automation risk snapshot changed")
         raise RuntimeError("latest mock automation risk snapshot changed")
     admission = repository.load_mock_automation_admission_for_spec(account_ref, spec_id, **reader_args)
     if admission is None:

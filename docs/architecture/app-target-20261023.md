@@ -46,7 +46,7 @@
 
 **매매 연구 기본 비용.** 비용을 생략한 분봉 Paper와 DD·MICRO 체결 연구는 매수 0.015%, 매도 0.215%를 추정값으로 적용한다. 요청의 명시 비용과 보관된 실제 비용은 재현에 우선한다. [기본 비용과 기존 비교 재계산](#agreed-default-research-cost).
 
-**연속 실행 제어.** C24 검증 브랜치의 자동 CI 41872124336는 7분 33초에 최종 성공했다. 이후 `main`의 `745d5dc`에 대한 자동 CI 42760831359는 Windows, 필수·확장 PostgreSQL, 봉인 재생에서 실패했다. C24에서 확인한 Drive 대기와 PostgreSQL 테스트 준비·정리의 수정을 `main`에 옮겼다. 새 커밋의 판정은 해당 SHA의 GitHub 실행으로 구분한다. [C24 수락](#c24-hosted-539-run-540) · [main 회귀 재검증](#main-c24-regression-port).
+**연속 실행 제어.** C24 검증 브랜치의 자동 CI 41872124336는 7분 33초에 최종 성공했다. C24의 테스트만 먼저 옮긴 `main`의 `aa86d05`는 확장 PostgreSQL과 Linux에 통과하고 Windows·필수 PostgreSQL·봉인 재생에 실패했다. C24 브랜치 병합은 8개 Windows 분할과 보호 주문의 최신 Risk 재평가를 현재 `main`에 연결한다. 합친 판본의 전체 판정은 해당 SHA의 GitHub 실행으로 구분한다. [C24 수락](#c24-hosted-539-run-540) · [main 회귀 재검증](#main-c24-regression-port) · [C24 브랜치 병합](#main-c24-branch-merge).
 
 **목표·필수 원칙:** [승인 v1](#11-이번-재설계-기준-계획-v1)을 따른다. 선택한 Windows/macOS/Linux 실행 컴퓨터가 장중 공통 엔진·로컬 SSD·주문 상태를 소유하고 NAS는 장후 보관을 맡는 [목표 배치](#portable-execution-target)를 유지한다. 순위 이력과 확정된 설정/편집·미확정 주문/미완료 저장/복구의 최소 예외는 보존하고, 나머지 과거 자료는 기존 DB에 보관한다([11.12](#1112-데이터-보존과-db-구조-재설계--2026-10-24)). 동일 순간·당시 가용성·KST 표시와 시계 필요성을 구분하며 새 계층·중복 상태·매 틱 DB 조회를 추가하지 않는다. 녹화/진단·일회성 도구는 현재 유지하면서 제거 경계를 확보하고 자체 로컬 LLM은 제외한다.
 
@@ -5609,6 +5609,16 @@ Windows 로컬에서 관련 회귀 246건과 구조 검사를 통과했다. TOP2
 `main`의 자동 검사 42760831359에서 확장 PostgreSQL의 메타데이터 제약 오류형, 재생 관측기 설정, Shadow 다운그레이드 판본 문제가 확인됐다. C24에서 검증한 네 PostgreSQL 테스트 파일과 Windows Drive 화면 대기 수정을 옮겼다. 각각 실제 `CHECK` 제약 위반 확인, 관측기 설치와 복원, 참조 제약 순서의 fixture 정리, 지정된 Shadow 스키마 판본까지의 이관, Qt 처리 사이 Python 작업 실행을 다룬다. 기존 테스트에서 데이터·순서·정리 검증을 유지했다. 이전 `main`의 필수 PostgreSQL·Windows·봉인 재생의 다른 실패는 별도 판정이며, C24의 과거 통과는 현재 `main`의 통과를 대신하지 않는다. [이전 main 실행](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/42760831359) · [C24 수정 근거](#c24-hosted-539-run-540).
 
 현재 소스의 Drive 화면 1건과 임시 PostgreSQL의 수정·공용 fixture 영향 16건을 통과했다. PostgreSQL의 실행 ID와 소스 일치, 테스트 DB 제거와 포트 종료를 기존 실행기로 대조했다. [격리 PostgreSQL 실행 결과](../../tmp/s12-03-pg-baseline/c24-main-regression-20261110/postgres-run.json) · [정리 영수증](../../tmp/s12-03-pg-baseline/c24-main-regression-20261110/owned-job.json).
+
+<a id="main-c24-branch-merge"></a>
+
+### 11.339 C24 검증 브랜치 병합과 main의 회귀 범위 — 2026-11-10
+
+검증용 첫 커밋 `24d2fcc`의 변경 487개 중 482개가 당시 `main` `c1e42a2`의 Git 파일 내용 및 모드와 일치한다. 공개 이력의 공통 조상으로 계산하면 99개가 충돌하므로, 이미 들어 있는 내용을 제외한 C24 최종판의 실제 차이 14개를 `c1e42a2` 기준으로 대조했다. C24 `6495993`을 병합 부모로 포함하면서 최신 `main`의 운용 기능을 보존했다. 기존 테스트 5개 파일의 반영은 유지했고, 8개 Windows 분할의 결과 수락과 최신 Risk로 보호 취소를 다시 평가하는 경로를 연결했다. 충돌한 키 교체 테스트에서는 기존 늦은 체결 검증과 C24의 최신 Risk 전환 검증을 함께 보존했고, 원장의 기존 판정은 현재 판본에 이어 기록했다. [병합 기준과 경로](../../tmp/c24-branch-integration-20261110/basis.json).
+
+테스트만 적용했던 `aa86d05`에서는 수정한 Windows Drive 사례가 통과했다. 남은 실패에는 가짜 주문 행의 종목 누락, Linux의 `libEGL.so.1` 부재, 과거 DB 버전 기대값과 최신 버전의 차이가 있었다. TOP20 봉인 재생의 가짜 키움 응답이 장전 `ka10099` 목록 형식을 제공하지 않아 `ValueError`가 나는 것을 로컬에서 재현했다. 이 실행은 새 병합 판본의 판정과 구분한다. [이전 main 회귀](https://github.com/jhimm3/kiwoom-realtime-monitor/actions/runs/42764907363).
+
+병합 소스에서 Windows 격리 실행기 프로필 122건과 가짜 브로커의 키 교체·보호 취소·늦은 체결 4건을 통과했다. 8분할의 정확한 작업 범위, 누락 결과 거절, 최신 Risk 이후에만 기존 보호를 재평가하는 조건을 확인했다. [실행기 결과](../../tmp/c24-branch-integration-20261110/runner/run.json).
 
 ## 12. 연구노트 기반 네 운용군의 목표 설계
 
