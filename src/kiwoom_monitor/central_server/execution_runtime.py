@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterator, Mapping
 
+from .async_lifetime import await_owned_task
+
 from kiwoom_monitor.application.market_session_schedule import mock_order_entry_decision
 from kiwoom_monitor.application.order_lifecycle import OrderLifecycle
 from kiwoom_monitor.domain.execution_activation import CloseExitCalendarRecheck
@@ -613,7 +615,8 @@ class ManualMockOrderGateway:
         self._closed = True
         await self.begin_credential_change()
 
-    async def _command(self, factory: Callable[[], Awaitable[ExecutionRecord]]) -> ExecutionRecord:
+    async def _command(self, factory: Callable[[], Awaitable[ExecutionRecord]], *,
+                       join_on_cancel: bool = False) -> ExecutionRecord:
         if not self._accepting:
             raise RuntimeError("MOCK_CREDENTIAL_CHANGE_IN_PROGRESS")
         task = asyncio.create_task(factory(), name="mock-manual-command")
@@ -622,6 +625,8 @@ class ManualMockOrderGateway:
             self._commands.discard(done)
             if not done.cancelled(): done.exception()
         task.add_done_callback(completed)
+        if join_on_cancel:
+            return await await_owned_task(task)
         return await asyncio.shield(task)
 
     async def submit_limit(
@@ -679,7 +684,11 @@ class ManualMockOrderGateway:
         return await self._command(lambda: self._cancel(intent_id, quantity))
 
     async def manage_close_order(self, expected, *, spec_id, control_revision, prepare_management):
-        return await self._command(lambda: self._manage_close_order(expected, spec_id, control_revision, prepare_management))
+        # Runner close must wait for the native response to an admitted command.
+        return await self._command(
+            lambda: self._manage_close_order(expected, spec_id, control_revision, prepare_management),
+            join_on_cancel=True,
+        )
 
     def _verified_order_management_cut(self, record, cut, spec_id, control_revision):
         from kiwoom_monitor.application.minute_order_management import verified_current_order_peers

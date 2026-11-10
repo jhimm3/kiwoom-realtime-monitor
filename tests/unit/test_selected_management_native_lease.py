@@ -100,7 +100,7 @@ async def verify_selected_cancel_response_after_stop(case):
     data.quotes[symbol] = dict(price_won=1200, available_at=data.clock[0],
         input_ref='collector-trade:selected-cancel-stop-response', durable=False, market_status='TRADABLE')
     forward = ForwardEvaluationRepository(data.target.store)
-    cancelled, stops = Event(), []
+    cancelled, release_response, stops = Event(), Event(), []
     cancel = data.transport.cancel
 
     def stop_after_actual_cancel(intent, broker_order_id, quantity=0):
@@ -113,6 +113,8 @@ async def verify_selected_cancel_response_after_stop(case):
         case.assertTrue(forward.save_mock_automation_control(stopped, expected_revision=current.control_revision))
         stops.append(stopped)
         cancelled.set()
+        if not release_response.wait(10):
+            raise AssertionError('test did not release the broker response')
         return result
 
     with patch.object(data.transport, 'cancel', side_effect=stop_after_actual_cancel):
@@ -121,10 +123,28 @@ async def verify_selected_cancel_response_after_stop(case):
         case.assertEqual(200, accepted.status_code, accepted.text)
         case.assertEqual('MANAGEMENT_READY', accepted.json()['receipt']['status'])
         runner = data.supervisor._runners[bundle.account_ref]
+        root_id = data.source.packet['order']['intent_id']
+        finish = runner._finish_episodes
+
+        async def finish_after_native_response(**options):
+            events = await asyncio.to_thread(bundle.repository.events, root_id)
+            case.assertEqual(1, sum(event['event_type'] == 'CANCEL_ACCEPTED' for event in events))
+            await finish(**options)
+
+        closing = None
         try:
             case.assertTrue(await asyncio.wait_for(asyncio.to_thread(cancelled.wait, 10), timeout=15))
+            with patch.object(runner, '_finish_episodes', side_effect=finish_after_native_response):
+                closing = asyncio.create_task(runner.close())
+                # The runner sees cancellation while the broker response is
+                # still held. The native ACK must precede checkpoint shutdown.
+                await asyncio.wait({closing}, timeout=.05)
+                release_response.set()
+                await closing
         finally:
-            await runner.close()
+            release_response.set()
+            if closing is None:
+                await runner.close()
     case.assertEqual(1, len(stops))
     events = bundle.repository.events(data.source.packet['order']['intent_id'])
     case.assertEqual(1, sum(event['event_type'] == 'CANCEL_STARTED' for event in events))
