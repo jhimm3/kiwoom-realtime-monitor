@@ -12,11 +12,13 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 import uuid
 
+from kiwoom_monitor.central_server import diagnostic_metrics
 from kiwoom_monitor.central_server.database import PostgresQueryStore
 from kiwoom_monitor.central_server.central_schema import central_schema_migrations
+from kiwoom_monitor.central_server.postgres_access import database_observer, install_database_observer
 from kiwoom_monitor.central_server.schema_migrations import CentralSchemaMigrationRunner
 from kiwoom_monitor.central_server.shadow_checkpoint import (
-    downgrade_schema, save_frames, split_checkpoint,
+    MIGRATION_VERSION, downgrade_schema, save_frames, split_checkpoint,
 )
 from kiwoom_monitor.application.research_replay import CandidateUniverseFrame, KrxMinuteBarFrame
 
@@ -243,11 +245,15 @@ class ShadowCheckpointPostgresTests(unittest.TestCase):
             cursor.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
         local = PostgresQueryStore(self.url, shadow_checkpoint_frames_enabled=True)
         local._connect = lambda: psycopg.connect(self.url, options=f"-c search_path={schema}")
+        migrations = central_schema_migrations()
+        legacy_migrations = migrations[:MIGRATION_VERSION - 1]
+        checkpoint_migrations = migrations[:MIGRATION_VERSION]
         try:
             with local._connect() as connection, connection.cursor() as cursor:
-                CentralSchemaMigrationRunner(cursor, "postgres").apply(central_schema_migrations()[:-1])
+                CentralSchemaMigrationRunner(cursor, "postgres").apply(legacy_migrations)
                 cursor.execute("INSERT INTO central_shadow_monitor_state VALUES(%s,now(),%s)", (self.key, json.dumps(checkpoint(0))))
-            local.initialize()
+            with local._connect() as connection, connection.cursor() as cursor:
+                CentralSchemaMigrationRunner(cursor, "postgres").apply(checkpoint_migrations)
             latest = checkpoint(5)
             local.save_shadow_monitor_state(self.key, latest)
             # Fail after materialization/DDL inside the transaction: all layout
@@ -260,7 +266,7 @@ class ShadowCheckpointPostgresTests(unittest.TestCase):
             with local._connect() as connection, connection.cursor() as cursor:
                 self.assertEqual(1, downgrade_schema(cursor))
             with local._connect() as connection, connection.cursor() as cursor:
-                CentralSchemaMigrationRunner(cursor, "postgres").apply(central_schema_migrations()[:-1])
+                CentralSchemaMigrationRunner(cursor, "postgres").apply(legacy_migrations)
                 cursor.execute("SELECT document_json FROM central_shadow_monitor_state WHERE monitor_id=%s", (self.key,))
                 self.assertEqual(latest, cursor.fetchone()[0])
                 cursor.execute("SELECT MAX(version) FROM central_schema_migrations")
@@ -383,6 +389,8 @@ class ShadowCheckpointPostgresTests(unittest.TestCase):
         """Compare the public writer for cursor-only, one, and many frame changes."""
         from statistics import median
 
+        self.addCleanup(install_database_observer, database_observer())
+        diagnostic_metrics.install_postgres_observation()
         initial, bars = benchmark_checkpoint()
         encoded_bytes = len(json.dumps(initial, ensure_ascii=False).encode("utf-8"))
         self.assertGreater(encoded_bytes, 1_000_000)
