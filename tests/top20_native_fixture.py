@@ -48,6 +48,14 @@ class FixtureClient:
             payload = {'item_inq_rank': [{'dt': slot.strftime('%Y%m%d'), 'tm': slot.strftime('%H%M%S'),
                 'stk_cd': f'{100000+rank:06d}', 'stk_nm': f'fixture-{rank}', 'bigd_rank': str(rank)}
                 for rank in range(1, 21)]}
+        elif api_id == 'ka10099':
+            market = body['mrkt_tp']
+            stocks = {
+                '0': [(f'{100000 + rank:06d}', f'fixture-{rank}') for rank in range(1, 21)],
+                '10': [('200001', 'fixture-kosdaq')],
+            }
+            payload = {'list': [{'code': code, 'name': name, 'marketCode': market, 'nxtEnable': 'N'}
+                                for code, name in stocks[market]]}
         elif api_id == 'ka10100':
             payload = {'nxtEnable': 'N'}
         elif api_id == 'ka10001':
@@ -71,6 +79,9 @@ async def capture_native_top20_fixture(store, origin, *, capture_store=False, ca
     def emit(token, kind, fields, value):
         if kind == 'rest_input' and fields.get('input_kind') in {'logical_start', 'catalog_start'}:
             role, lane = asyncio.current_task().get_name(), value['lane']
+            if value.get('api_id') == 'ka10099':
+                # The synchronous catalog loader submits pages from its worker to the event loop.
+                role = 'top20-nxt-catalog'
             if roles.get(role, lane) != lane:
                 raise AssertionError('fixture task role claimed multiple lanes')
             roles[role] = lane

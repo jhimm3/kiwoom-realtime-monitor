@@ -47,8 +47,8 @@ def contract_storage_hash(database_path, *, document_receipt_clock=None, observa
     baseline's checks of every row, identifier, value, and JSON/hash payload.
     An explicit document_receipt_clock additionally asserts every document
     receipt equals the injected clock before projecting only that column to
-    the old fixture's epoch clock in the in-memory comparison copy. Three old
-    settings/order/query oracles opt in to projecting the exact S12 window index.
+    the old fixture's epoch clock in the in-memory comparison copy. API oracles
+    can opt in to projecting the exact S12 window index and migration receipt.
     """
     clock_columns = (
         ("central_schema_migrations", "applied_at"),

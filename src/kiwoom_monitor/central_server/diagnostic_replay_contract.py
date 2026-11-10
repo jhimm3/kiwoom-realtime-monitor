@@ -157,7 +157,7 @@ _READ_DOCUMENT_COLLECTIONS = frozenset({
 _DATASET_KINDS = frozenset({
     "market_state", "new_high", "program_flow", "ranking", "top20_membership", "top20_index",
     "market_index_chart", "investor_flow", "stock_fundamentals", "nxt_eligibility", "top20_statistics_day",
-    "top20_index_reconciled", "top20_statistics_display_day",
+    "top20_index_reconciled", "top20_statistics_display_day", "nxt_eligibility_catalog",
 })
 ACCOUNT_CLOCK_COLLECTION = 'execution_mock_automation_clock_current'
 _COLLECTOR_SINKS = frozenset(_METHOD_GROUPS["realtime"])
@@ -442,7 +442,7 @@ def validate_operation(method: str, arguments: dict) -> str:
         if not kinds or any(not isinstance(kind, str) or kind not in _DATASET_KINDS for kind in kinds):
             raise InputRejected("unsupported_dataset_kind")
         if all(kind in {"ranking", "top20_membership", "top20_index", "top20_statistics_day",
-                        "top20_index_reconciled", "top20_statistics_display_day"} for kind in kinds):
+                        "top20_index_reconciled", "top20_statistics_display_day", "nxt_eligibility_catalog"} for kind in kinds):
             return "top20"
         return "rest_market"
     if method == "save_query" and arguments.get("api_id") not in {

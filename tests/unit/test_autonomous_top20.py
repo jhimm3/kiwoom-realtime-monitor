@@ -911,11 +911,17 @@ class AutonomousTop20Tests(unittest.IsolatedAsyncioTestCase):
                         async def external_response(api_id, _path, _body, **_kwargs):
                             if api_id == "ka00198":
                                 return BrokerResult({"item_inq_rank": rows}, False, "")
+                            if api_id == "ka10099":
+                                market = _body["mrkt_tp"]
+                                code = "005930" if market == "0" else "247540"
+                                return BrokerResult({"list": [{"code": code, "name": code,
+                                    "marketCode": market, "nxtEnable": "N"}]}, False, "")
                             if api_id == "ka10100":
                                 return BrokerResult({"nxtEnable": "N"}, False, "")
                             raise AssertionError("unexpected external request: " + api_id)
 
                         broker.request = AsyncMock(side_effect=external_response)
+                        broker.request_unrecorded = AsyncMock(side_effect=external_response)
                         service = AutonomousTop20Service(
                             broker, RealtimeHub(), store, now_provider=lambda: clock,
                             catalog_loader=lambda: (), minute_backfill_enabled=False,

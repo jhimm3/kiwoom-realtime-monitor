@@ -10,11 +10,16 @@ import stat
 
 datas = [('data/near_high_sounds', 'data/near_high_sounds'), ('data/ocr_models/PP-OCRv5_mobile_det', 'data/ocr_models/PP-OCRv5_mobile_det'), ('data/ocr_models/korean_PP-OCRv5_mobile_rec', 'data/ocr_models/korean_PP-OCRv5_mobile_rec'), ('resources/app_icon.png', 'resources'), ('resources/UpdateHelper.exe', 'update_helper'), ('THIRD_PARTY_LICENSES.txt', '.'), ('licenses', 'licenses')]
 # Exact raw-byte inputs used by the product scientific implementation hash.
-# Read the existing literal tuple without importing or executing product code.
+# Resolve literal paths and named string constants without importing product code.
 implementation_tree = ast.parse(Path("src/kiwoom_monitor/domain/research_contract.py").read_text(encoding="utf-8"))
-implementation_paths = ast.literal_eval(next(node.value for node in implementation_tree.body
-    if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
-        and target.id == "RESEARCH_IMPLEMENTATION_PATHS" for target in node.targets)))
+implementation_assignments = {
+    target.id: node.value for node in implementation_tree.body if isinstance(node, ast.Assign)
+    for target in node.targets if isinstance(target, ast.Name)
+}
+implementation_paths = [
+    ast.literal_eval(implementation_assignments[node.id] if isinstance(node, ast.Name) else node)
+    for node in implementation_assignments["RESEARCH_IMPLEMENTATION_PATHS"].elts
+]
 datas += [(source, str(Path(source).relative_to("src").parent)) for source in implementation_paths]
 # End scientific raw-byte resource inputs.
 binaries = []

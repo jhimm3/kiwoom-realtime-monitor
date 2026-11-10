@@ -143,8 +143,8 @@ async def actual_management_target(case, *, lost_cancel_ack=False, source_factor
         buy=SimpleNamespace(intent=SimpleNamespace(symbol=source.packet['order']['symbol'])))
     book = BrokerBook(context, empty=True)
     for leg in target.broker.orders:
-        book.rows[leg.broker_order_id] = dict(number=leg.broker_order_id, side=OrderSide(leg.side),
-            ordered=leg.ordered_quantity, remaining=leg.remaining_quantity, price=leg.limit_price,
+        book.rows[leg.broker_order_id] = dict(number=leg.broker_order_id, symbol=leg.symbol, side=OrderSide(leg.side),
+            ordered=leg.ordered_quantity, remaining=leg.remaining_quantity, price=leg.limit_price, venue=leg.venue,
             fills=list(leg.fills), parent=leg.original_broker_order_id, state=OrderState(leg.state))
     async def read(reader):
         result = await book.read()
@@ -333,12 +333,15 @@ class SelectedManagementOwnerTests(unittest.IsolatedAsyncioTestCase):
         async def protection_submitted():
             cancellation_polled = False
             for sequence in range(200):
-                data.clock[0] += timedelta(milliseconds=10)
-                data.quotes[symbol] = {**data.quotes[symbol], 'available_at': data.clock[0],
-                    'input_ref': 'collector-trade:target-later-protection-price:' + str(sequence)}
-                data.supervisor.observe_automation_price(symbol, data.quotes[symbol])
+                if not cancellation_polled:
+                    data.clock[0] += timedelta(milliseconds=10)
+                    data.quotes[symbol] = {**data.quotes[symbol], 'available_at': data.clock[0],
+                        'input_ref': 'collector-trade:target-later-protection-price:' + str(sequence)}
+                    data.supervisor.observe_automation_price(symbol, data.quotes[symbol])
                 if (not cancellation_polled and data.book.mutations
                         and not bundle.runtime.observation_in_progress):
+                    # Keep this quote available at the acknowledged risk cut;
+                    # newer ticks would require a newer cut on the slower PG path.
                     cancellation_polled = True
                     await bundle.monitor.refresh_recovery()
                 if any(row.intent.side.value == 'SELL' for row in

@@ -3,6 +3,22 @@
   "reviewed_on": "2026-10-11",
   "approved_sites": [
     {
+      "file": "tests/integration/test_observation_archive_postgres.py",
+      "owner": "PostgresObservationArchiveTests.test_same_stream_concurrent_batches_wait_for_commit_then_append_without_reusing_sequence",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "Read-only pg_stat_activity observation of the peer backend PID in the dedicated test database, scoped to the concurrent archive assertion and closed by the context manager."
+    },
+    {
+      "file": "tests/integration/test_observation_archive_postgres.py",
+      "owner": "PostgresObservationArchiveTests.test_same_stream_concurrent_batches_wait_for_commit_then_append_without_reusing_sequence.connect_peer",
+      "call": "psycopg.connect",
+      "count": 1,
+      "category": "test_integration",
+      "reason": "Independent participant in the isolated archive schema so the test can prove advisory lock contention. The store owns the connection and the test verifies it closes."
+    },
+    {
       "file": "tests/integration/postgres_test_support.py",
       "owner": "isolated_observation_schema",
       "call": "psycopg.connect",

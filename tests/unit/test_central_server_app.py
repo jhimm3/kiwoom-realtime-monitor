@@ -327,6 +327,8 @@ async def capture_realtime_asgi_contract(app_factory, database_path, with_collec
         async def close(self): calls.append("collector.close")
         def set_breakout_trade_listener(self, listener): self.breakout_trade_listener = listener
         def credential_connection_status(self): return {"state": "controlled-upstream"}
+        def market_breadth_snapshot(self): return {}
+        def market_turnover_snapshot(self): return {}
         def initial_realtime_snapshots(self, snapshots, codes):
             calls.append({"initial": snapshots, "codes": codes})
             return [market, memory]
@@ -513,7 +515,7 @@ def capture_diagnostic_run_http_contract(client, app, state, database_path, cont
         with closing(sqlite3.connect(database_path)) as connection:
             assert storage == hashlib.sha256("\n".join(connection.iterdump()).encode()).hexdigest(), (name, "HTTP mutated application DB")
         cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response), "body": response.json(),
-                      "files": before, "storage_hash": contract_storage_hash(database_path), "calls": list(state["calls"])})
+                      "files": before, "storage_hash": contract_storage_hash(database_path, project_s12_window_migration=True), "calls": list(state["calls"])})
         return response.json()
     paths = (("GET", "snapshot"), ("POST", "runs"), ("GET", "runs/missing"), ("POST", "runs/missing/cancel"),
              ("GET", "reports"), ("GET", "reports/missing"), ("GET", "history"))
@@ -639,7 +641,8 @@ def capture_diagnostic_control_http_contract(client, app, control_path, state, d
             assert previous == files(), (name, "read/rejected request changed native control")
         cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response),
                       "body": response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text,
-                      "control_and_history": files(), "trace_calls": list(state["calls"]), "storage_hash": contract_storage_hash(database_path)})
+                      "control_and_history": files(), "trace_calls": list(state["calls"]),
+                      "storage_hash": contract_storage_hash(database_path, project_s12_window_migration=True)})
         return response
     for method, path in (("GET", "capabilities"), ("PUT", "control"), ("POST", "trace"),
                          ("GET", "trace"), ("POST", "trace/stop"), ("GET", "trace/missing"), ("GET", "trace/id/chunks/name")):
@@ -1061,7 +1064,8 @@ def capture_operations_http_contract(client, app, store, request_store, services
             assert value["updated_at"] == receipt_now, (name, value["updated_at"], receipt_now)
             value["updated_at"] = 2000.0
         cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response), "body": response.json(),
-            "storage_hash": contract_storage_hash(database_path, document_receipt_clock=(receipt_now, 2000.0)), "stored": stored,
+            "storage_hash": contract_storage_hash(database_path, document_receipt_clock=(receipt_now, 2000.0),
+                                                  project_s12_window_migration=True), "stored": stored,
             "events": list(events), "candidate_index": next((i for i, monitor in enumerate(monitors) if monitor is current), None)})
         return response.json()
 
@@ -1186,7 +1190,8 @@ def capture_account_query_http_contract(client, app, store, request_store, conte
         if any(manager._tasks for manager in managers.values()):
             raise AssertionError((name, "native query task still running after response"))
         cases.append({"name": name, "status": response.status_code, "headers": _contract_headers(response), "body": response.json(),
-                      "storage_hash": contract_storage_hash(database_path), "profile_reads": [(call.args, call.kwargs) for call in reads.call_args_list], "broker_calls": calls})
+                      "storage_hash": contract_storage_hash(database_path, project_s12_window_migration=True),
+                      "profile_reads": [(call.args, call.kwargs) for call in reads.call_args_list], "broker_calls": calls})
         return response.json()
 
     accounts, v2, v3 = "/api/v3/kiwoom/accounts", "/api/v2/kiwoom/account-query", "/api/v3/kiwoom/account-query"
@@ -1486,7 +1491,8 @@ def capture_market_event_http_contract(client, store, service, database_path, re
             raise AssertionError((name, "condition document query arguments", documents.call_args_list))
         cases.append({"name": name, "request": {"path": path, "params": params, "authenticated": authenticated},
             "status": response.status_code, "headers": {k: response.headers[k] for k in ("content-type", "content-length")},
-            "body": response.json(), "database_sha256": contract_storage_hash(database_path, document_receipt_clock=(datetime(2026, 10, 10, 3, tzinfo=timezone.utc).timestamp(), 2000.0)), "runtime_calls": runtime_calls,
+            "body": response.json(), "database_sha256": contract_storage_hash(database_path, document_receipt_clock=(datetime(2026, 10, 10, 3, tzinfo=timezone.utc).timestamp(), 2000.0),
+                                                                              project_s12_window_migration=True), "runtime_calls": runtime_calls,
             "store_calls": {key: [{"args": call.args, "kwargs": call.kwargs} for call in spy.call_args_list]
                             for key, spy in (("history", history), ("current", current), ("condition", documents))}})
 
@@ -1594,7 +1600,8 @@ def capture_market_read_http_contract(client, app, store, collectors, database_p
         historical_observation_clock = datetime(2026, 10, 10, 3, tzinfo=timezone.utc)
         normalized_before = contract_storage_hash(database_path,
             document_receipt_clock=(receipt_clock.timestamp(), receipt_clock.timestamp()),
-            observation_receipt_clock=(receipt_clock, historical_observation_clock))
+            observation_receipt_clock=(receipt_clock, historical_observation_clock),
+            project_s12_window_migration=True)
         response = client.get("/api/v1/market/" + path, params=params,
             headers={"Authorization": "Bearer private-token"} if authenticated else {})
         assert before == stored_hash(), (name, "market read changed native storage")
@@ -1602,7 +1609,8 @@ def capture_market_read_http_contract(client, app, store, collectors, database_p
                       "body": response.json(), "stored_before": normalized_before,
                       "stored_after": contract_storage_hash(database_path,
                           document_receipt_clock=(receipt_clock.timestamp(), receipt_clock.timestamp()),
-                          observation_receipt_clock=(receipt_clock, historical_observation_clock))})
+                          observation_receipt_clock=(receipt_clock, historical_observation_clock),
+                          project_s12_window_migration=True)})
 
     common = {"code": "005930", "trading_date": "2026-09-14"}
     paths = {"minute-bars": common, "recent-minute-bars": {"code": "005930", "end_date": "2026-09-14", "trading_days": 2},
@@ -2482,6 +2490,16 @@ class CentralServerAppTests(unittest.TestCase):
             for insertion in news_additions["route_insertions"]:
                 position = case["route_order"].index(insertion["before"])
                 case["route_order"][position:position] = insertion["paths"]
+            from copy import deepcopy
+            comparison_path = "/api/v1/research/morning-market-comparison"
+            comparison = deepcopy(case["schema"]["paths"]["/api/v1/market/morning-brief"]["get"])
+            comparison.update(summary="Compare Recorded",
+                              operationId="compare_recorded_api_v1_research_morning_market_comparison_get")
+            comparison["parameters"].insert(0, {"name": "as_of", "in": "query", "required": True,
+                "schema": {"type": "string", "format": "date-time", "title": "As Of"}})
+            comparison["responses"]["200"]["content"]["application/json"]["schema"] = {}
+            case["schema"]["paths"][comparison_path] = {"get": comparison}
+            case["route_order"].insert(case["route_order"].index("/api/v1/market/morning-brief/run"), comparison_path)
             # The optional revision cursor fixes tied-time export pagination;
             # all pre-existing parameters, auth and response schemas remain exact.
             case["schema"]["paths"]["/api/v1/news/history/{kind}"]["get"]["parameters"].insert(-1, {
@@ -2960,6 +2978,13 @@ class CentralServerAppTests(unittest.TestCase):
             self.assertEqual([case["name"] for case in baseline["cases"]], [case["name"] for case in actual["cases"]])
             for original, observed in zip(baseline["cases"], actual["cases"], strict=True):
                 with self.subTest(configured=configured, case=original["name"]):
+                    body = original["body"]
+                    if configured and original["name"] in {"subject-filter", "latest-live", "prefer-stored",
+                            "other-kind-stored", "missing-live-fallback", "updated-live"}:
+                        body["stock_enrichment_codes"] = []
+                        original["headers"]["content-length"] = str(len(json.dumps(
+                            body, ensure_ascii=False, separators=(",", ":"),
+                        ).encode("utf-8")))
                     self.assertEqual(original, observed)
             self.assertEqual(baseline["stored"], actual["stored"])
 
@@ -3695,7 +3720,7 @@ class CentralServerAppTests(unittest.TestCase):
         self.assertEqual(key, original_native["revisions"][0][1])
         self.assertIsNone(original_native["revisions"][0][3])
         self.assertEqual(expected_payload, json.loads(original_native["revisions"][0][4]))
-        self.assertEqual({"item_inq_rank": rows}, consumed)
+        self.assertEqual({"item_inq_rank": rows, "stock_enrichment_codes": []}, consumed)
         self.assertEqual(["/api/v1/market/snapshots/top20_membership?subject=2026-09-22&limit=1&prefer_live=true"], requests)
 
     def test_mock_account_monitor_is_wired_only_with_explicit_mock_configuration(self) -> None:
@@ -4137,6 +4162,7 @@ class CentralServerAppTests(unittest.TestCase):
             ("GET", "/api/v1/market/external-bars"),
             ("GET", "/api/v1/research/observations"),
             ("GET", "/api/v1/research/micro-inputs"),
+            ("GET", "/api/v1/research/morning-market-comparison"),
             ("POST", "/api/v1/research/daily-decline-setup"),
             ("POST", "/api/v1/research/reported-results"),
             ("GET", "/api/v1/research/reported-results/{result_id}"),

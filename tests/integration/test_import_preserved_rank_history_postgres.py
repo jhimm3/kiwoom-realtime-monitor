@@ -103,6 +103,8 @@ class ImportPreservedRankHistoryPostgresTests(unittest.TestCase):
         args = arguments(artifact)
         target_schema = "rank_import_" + args["destination_uuid"]
         self.targets.append(target_schema)
+        self.enterContext(patch.object(importer, "central_schema_migrations",
+                                      return_value=central_schema_migrations("postgres")[:24]))
         first = importer.import_artifact(artifact, dsn=self.url, create=True, now_provider=lambda: clock, **args)
         self.assertFalse(first["replayed"])
         self.assertEqual("COMPLETE", first["receipt"]["state"])

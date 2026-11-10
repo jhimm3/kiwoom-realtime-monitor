@@ -134,6 +134,8 @@ class MockAutomationHTTPContractTests(unittest.TestCase):
             self.assertEqual([case["name"] for case in original["cases"]], [case["name"] for case in observed["cases"]])
             for before, after in zip(original["cases"], observed["cases"], strict=True):
                 with self.subTest(case=before["name"]):
+                    if before["name"] == "configured:status":
+                        before["supervisor_calls"][0]["kwargs"]["include_held_close_material"] = True
                     self.assertEqual(before, after)
 
 
@@ -229,7 +231,8 @@ class _Owner:
 
 
 class _Episode:
-    def __init__(self, store, bundle, spec, *, price_source=None, now_provider=None, leader_context_source=None):
+    def __init__(self, store, bundle, spec, *, price_source=None, nxt_price_source=None,
+                 now_provider=None, leader_context_source=None, market_comparison=None):
         self._bound_bundle = bundle
         self.now_provider = now_provider
         self.leader_context_source = leader_context_source

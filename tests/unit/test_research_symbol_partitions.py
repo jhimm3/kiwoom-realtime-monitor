@@ -228,12 +228,22 @@ class SymbolPartitionTests(unittest.TestCase):
 CANONICAL_IMPLEMENTATION_INPUTS = (
     'src/kiwoom_monitor/application/market_session_schedule.py',
     'src/kiwoom_monitor/application/research_factors.py',
+    'src/kiwoom_monitor/application/research_discovery.py',
     'src/kiwoom_monitor/application/research_replay.py',
     'src/kiwoom_monitor/application/market_research_features.py',
+    'src/kiwoom_monitor/application/market_entry.py',
     'src/kiwoom_monitor/application/market_theme_shadow.py',
     'src/kiwoom_monitor/application/theme_leadership.py',
     'src/kiwoom_monitor/application/breakout_strategy.py',
     'src/kiwoom_monitor/application/leader_breakout.py',
+    'src/kiwoom_monitor/application/breakout_theme_research.py',
+    'src/kiwoom_monitor/application/account_risk_research.py',
+    'src/kiwoom_monitor/application/close_and_ipo.py',
+    'src/kiwoom_monitor/application/panic_rebound.py',
+    'src/kiwoom_monitor/application/news_material.py',
+    'src/kiwoom_monitor/application/daily_decline.py',
+    'src/kiwoom_monitor/application/micro_execution_evidence.py',
+    'src/kiwoom_monitor/application/section12_minute_research.py',
     'src/kiwoom_monitor/application/pullback_reacceleration_strategy.py',
     'src/kiwoom_monitor/application/research_families.py',
     'src/kiwoom_monitor/infrastructure/persistence/research_repository.py',
@@ -264,7 +274,7 @@ class ScientificImplementationResourceTests(unittest.TestCase):
 
     def test_source_resources_match_independent_path_and_raw_byte_oracle(self):
         corpus = {label: (self._source() / label).read_bytes() for label in CANONICAL_IMPLEMENTATION_INPUTS}
-        self.assertEqual(20, len(corpus))
+        self.assertEqual(30, len(corpus))
         self.assertEqual(self._canonical_oracle(corpus), runner.research_implementation_hash(fixtures.PROFILE))
 
     def test_zip_package_without_src_tree_preserves_raw_bytes_and_missing_input_fails(self):
@@ -276,8 +286,9 @@ class ScientificImplementationResourceTests(unittest.TestCase):
         provider_dependencies = (
             "src/kiwoom_monitor/domain/research_contract.py",
             "src/kiwoom_monitor/domain/market_data_contract.py",
+            "src/kiwoom_monitor/domain/time_basis.py",
         )
-        # Preserve the original CRLF/missing-input probe while extending the oracle to all20 inputs.
+        # Preserve the original CRLF and missing-input probes across the current source set.
         probe_input = "src/kiwoom_monitor/research_run.py"
         child = ("import json,sys;sys.path.insert(0,sys.argv[1]);"
                  "from kiwoom_monitor.application.research_implementation import research_implementation_hash;"

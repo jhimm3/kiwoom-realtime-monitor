@@ -99,12 +99,14 @@ class ReplayBaselineLeaseTests(unittest.TestCase):
         from kiwoom_monitor.central_server.database_execution import _require_execution_ownership
         now = datetime(2026, 10, 12, tzinfo=timezone.utc)
         cursor = MagicMock()
-        cursor.fetchone.return_value = ('run:alias', now + timedelta(seconds=1))
+        cursor.fetchone.side_effect = [None, ('run:alias', now + timedelta(seconds=1)),
+                                       None, ('run:alias', now + timedelta(seconds=1)), None]
         ownership = {'owner_key': 'mock:account', 'owner_token': 'run:alias', 'run_id': 'run'}
         value = {'environment': 'mock', 'account_ref': 'account'}
         def at_source():
-            self.assertEqual(1, cursor.execute.call_count)
+            self.assertEqual(2, cursor.execute.call_count)
             self.assertIn('FOR UPDATE', cursor.execute.call_args.args[0])
+            self.assertIn('central_execution_runtime_leases', cursor.execute.call_args.args[0])
             return now
         _require_execution_ownership(cursor, ownership, value, '%s', now_provider=at_source)
         with self.assertRaisesRegex(RuntimeError, 'OWNERSHIP_LOST'):

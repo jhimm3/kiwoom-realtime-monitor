@@ -163,11 +163,14 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
         raise ValueError('account member attribution is assigned only by the native plan claim')
     if new_intent_claim and value.get('broker_venue') is not None:
         raise ValueError('the broker venue must be assigned after order submission')
+    if new_intent_claim and ownership is not None and (ownership.get('cancel_retry_claim') is not None
+                                                       or ownership.get('planned_cancel_claim') is not None):
+        raise RuntimeError('MOCK_PROTECTIVE_CANCEL_RETRY_CANNOT_CREATE_ORDER')
     if ownership is None:
         if "plan" in value:
             raise RuntimeError("PLANNED_EXECUTION_OWNER_REQUIRED")
         return  # Offline ledger/import callers keep the existing unowned contract.
-    now = kst_now() if now_provider is None else now_provider()
+    clock = kst_now if now_provider is None else now_provider
     selected = None
     lease_key = ownership['owner_key']
     # Responses to durable STARTED records remain facts after STOP. Existing
@@ -182,7 +185,7 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
     if control_facts is not None:
         control_facts.pop('_native_selected_management_context', None)
     if ownership.get('selected_management_context') is not None:
-        lease_key, selected = _execution_runtime_lease_scope(cursor, p, lease_key, ownership['owner_token'], now,
+        lease_key, selected = _execution_runtime_lease_scope(cursor, p, lease_key, ownership['owner_token'], clock(),
             selected_management_context=ownership['selected_management_context'],
             selected_management_owner=ownership.get('selected_management_owner'))
         context = selected['context']
@@ -208,9 +211,6 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
     if (new_intent_claim and value.get('policy_version') == 'mock-protection-exit/v1'
             and ownership.get('protection_claim') is None):
         raise RuntimeError('MOCK_PROTECTION_CLAIM_REQUIRED')
-    if new_intent_claim and (ownership.get('cancel_retry_claim') is not None
-                             or ownership.get("planned_cancel_claim") is not None):
-        raise RuntimeError('MOCK_PROTECTIVE_CANCEL_RETRY_CANNOT_CREATE_ORDER')
     if not rehearsal and (not ownership["owner_token"].startswith(f"{ownership['run_id']}:")
             or value.get("environment") != "mock"
             or selected is None and ownership["owner_key"] != f"mock:{value.get('account_ref')}"
@@ -220,7 +220,7 @@ def _require_execution_ownership(cursor: Any, ownership: dict[str, Any] | None,
                    f"WHERE owner_key={p}" + (" FOR UPDATE" if p == "%s" else ""), (lease_key,))
     row = cursor.fetchone()
     expiry = row[1] if row and isinstance(row[1], datetime) else datetime.fromisoformat(str(row[1])) if row else None
-    if not row or row[0] != ownership["owner_token"] or expiry <= now:
+    if not row or row[0] != ownership["owner_token"] or expiry <= clock():
         raise RuntimeError("EXECUTION_OWNERSHIP_LOST")
     if rehearsal:
         return

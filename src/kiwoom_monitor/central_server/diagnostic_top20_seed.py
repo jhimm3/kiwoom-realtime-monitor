@@ -298,6 +298,13 @@ def seal_top20_cold_fixture(service, clock, *, baseline, source_manifest, outbox
     if source_origin != clock.origin:
         raise ValueError("top20_seed_source_clock_mismatch")
     baseline_identity = _baseline_identity(baseline)
+    if baseline_identity["version"] == 1:
+        # v1 is a preflight for the original endpoint set. v2 seals the full
+        # native configuration, including the new catalog and dated fills.
+        endpoints = state["configuration"]["allowed_endpoints"]
+        for api_id, path in (("ka10099", "/api/dostk/stkinfo"), ("kt00009", "/api/dostk/acnt")):
+            if endpoints.get(api_id) == path:
+                del endpoints[api_id]
     if baseline_identity['version'] == 1 and service._broker._source_wall_time is not None:
         raise ValueError('top20_seed_cache_clock_requires_v2')
     if baseline_identity['version'] == 2:

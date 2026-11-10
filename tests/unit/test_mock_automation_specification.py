@@ -5243,6 +5243,7 @@ class MockUnfilledReplacementDispatchTests(unittest.IsolatedAsyncioTestCase):
                 def execute(_self, sql, params):
                     statements.append(sql); native.execute(sql.replace('%s', '?').replace(' FOR UPDATE', ''), params)
                 def fetchone(_self): return native.fetchone()
+                def fetchall(_self): return native.fetchall()
             _require_execution_ownership(Cursor(), ownership, _record_document(child), '%s',
                                          now_provider=lambda: self.clock)
         self.assertGreaterEqual(sum(sql.endswith(' FOR UPDATE') for sql in statements), 7)
@@ -6199,7 +6200,8 @@ class MockUnfilledNativeSourceTests(unittest.IsolatedAsyncioTestCase):
         async def interleaved(function,*args,**kwargs):
             nonlocal changed
             result=await original(function,*args,**kwargs)
-            if function is record_mock_automation_recovery_from_risk and not changed:
+            if (getattr(function, '__self__', None) is self.runner.episode
+                    and getattr(function, '__name__', '') == '_record_recovery' and not changed):
                 changed=True
                 self.snapshot=replace(self.snapshot,filled_quantity=2,remaining_quantity=8,
                     fills=(*self.snapshot.fills,BrokerFill('second-partial',1,1000,self.clock)))

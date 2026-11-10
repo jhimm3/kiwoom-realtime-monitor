@@ -994,6 +994,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
                 (22, "central-news-ai-inference-v1"),
                 (23, "news_body_processor_attempt_owner"),
                 (24, "rank_current_revision_heads"),
+                (25, "close_gap_observation_windows"),
             ],
             versions,
         )
@@ -1080,7 +1081,7 @@ class CentralServerDatabaseTests(unittest.TestCase):
             self.assertEqual(document, store.load_shadow_monitor_state("old-monitor"))
             store.initialize()
             with closing(sqlite3.connect(path)) as connection:
-                self.assertEqual(24, connection.execute(
+                self.assertEqual(25, connection.execute(
                     "SELECT MAX(version) FROM central_schema_migrations",
                 ).fetchone()[0])
                 self.assertEqual((23, "news_body_processor_attempt_owner"), connection.execute(

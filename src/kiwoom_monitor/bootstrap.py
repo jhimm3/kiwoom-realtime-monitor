@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kiwoom_monitor.domain.time_basis import as_kst
+from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 
 import sys
 import argparse
@@ -537,7 +537,9 @@ def _run_desktop(
                 "nxt_eligibility_worker_factory": lambda codes: NxtEligibilityWorker(nxt_eligibility, codes, client.server_now),
                 "nxt_catalog_due": nxt_eligibility.preparation_due,
                 "entry_investor_loader": InvestorFlowService(client).load,
-                "program_trade_loader": ProgramTradeService(client, now_provider=client.server_now).load_day,
+                "program_trade_loader": ProgramTradeService(
+                    client, now_provider=getattr(client, "server_now", kst_now),
+                ).load_day,
             }
         except BaseException as error:
             first_cleanup_error = _close_unpublished_api_observers(error, owned_observers, owned_completions)

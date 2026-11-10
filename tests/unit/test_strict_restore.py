@@ -25,7 +25,7 @@ class StrictRestoreTests(unittest.TestCase):
     def setUp(self) -> None:
         # Sandbox accounts may not have a usable Windows DPAPI profile.
         for name in ("_protect", "_unprotect"):
-            patcher = patch(f"kiwoom_monitor.infrastructure.naver_news.{name}", side_effect=lambda data: data)
+            patcher = patch(f"kiwoom_monitor.infrastructure.naver_news.{name}", side_effect=lambda data, *, path: data)
             patcher.start()
             self.addCleanup(patcher.stop)
 

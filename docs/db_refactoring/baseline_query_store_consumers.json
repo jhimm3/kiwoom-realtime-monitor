@@ -972,17 +972,6 @@
     ],
     [
       "src/kiwoom_monitor/central_server/autonomous_top20.py",
-      "AutonomousTop20Service._nxt_enabled",
-      "self._store",
-      "load_documents",
-      "callable_argument",
-      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
-      "",
-      "",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/autonomous_top20.py",
       "AutonomousTop20Service._persist_missing_daily_entrants",
       "self._store",
       "upsert_documents",
@@ -2061,17 +2050,6 @@
     ],
     [
       "src/kiwoom_monitor/central_server/market_ingest.py",
-      "MarketDataIngestor._ingest_program_flow",
-      "self._store",
-      "save_dataset_snapshot",
-      "direct_call",
-      "self._store.save_dataset_snapshot",
-      "",
-      "",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/market_ingest.py",
       "MarketDataIngestor._ingest_ranking",
       "self._store",
       "save_dataset_snapshot",
@@ -2110,17 +2088,6 @@
       "upsert_documents",
       "direct_call",
       "self._store.upsert_documents",
-      "",
-      "",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/market_news_sources.py",
-      "MarketFeedNewsCollector._catalog",
-      "self._store",
-      "load_documents",
-      "direct_call",
-      "self._store.load_documents",
       "",
       "",
       "reviewed_store_binding"
@@ -3463,17 +3430,6 @@
       "claim_news_request",
       "direct_call",
       "self._store.claim_news_request",
-      "",
-      "",
-      "reviewed_store_binding"
-    ],
-    [
-      "src/kiwoom_monitor/central_server/news_sources.py",
-      "QuerySetNewsCollector._load_catalog",
-      "self._store",
-      "load_documents",
-      "direct_call",
-      "self._store.load_documents",
       "",
       "",
       "reviewed_store_binding"
@@ -5985,6 +5941,325 @@
       "POST",
       "/api/v1/research/micro-inputs",
       "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "AutonomousTop20Service._backfill_candidate_flows",
+      "self._store",
+      "load_dataset_snapshots",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "AutonomousTop20Service._backfill_candidate_flows",
+      "self._store",
+      "save_dataset_snapshot",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "AutonomousTop20Service._backfill_minutes",
+      "self._store",
+      "load_minute_bars",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "AutonomousTop20Service._load_nxt_catalog",
+      "self._store",
+      "load_dataset_snapshots",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "AutonomousTop20Service._persist_program_gaps",
+      "self._store",
+      "upsert_documents",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "AutonomousTop20Service._prepare_nxt_catalog",
+      "self._store",
+      "save_dataset_snapshot",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "AutonomousTop20Service._record_halt_without_minutes",
+      "self._store",
+      "load_documents",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "AutonomousTop20Service._record_halt_without_minutes",
+      "self._store",
+      "load_minute_bars",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "AutonomousTop20Service._record_halt_without_minutes",
+      "self._store",
+      "load_observation_revisions",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/autonomous_top20.py",
+      "AutonomousTop20Service._record_halt_without_minutes",
+      "self._store",
+      "upsert_documents",
+      "callable_argument",
+      "kiwoom_monitor.central_server.diagnostic_replay_runtime.owned_to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/candidate_monitor.py",
+      "CandidateMonitor._consume_minute_shadow.entry_news",
+      "self._store",
+      "load_documents",
+      "direct_call",
+      "self._store.load_documents",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/candidate_monitor.py",
+      "CandidateMonitor._received_news",
+      "self._store",
+      "load_strategy_material_inputs",
+      "direct_call",
+      "self._store.load_strategy_material_inputs",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/morning_market_brief.py",
+      "MorningMarketBrief._load_premarket_run",
+      "self.store",
+      "load_documents",
+      "direct_call",
+      "self.store.load_documents",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/morning_market_brief.py",
+      "MorningMarketBrief.compare_recorded_market",
+      "self.store",
+      "load_dataset_snapshots",
+      "direct_call",
+      "self.store.load_dataset_snapshots",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/morning_market_brief.py",
+      "MorningMarketBrief.compare_recorded_market",
+      "self.store",
+      "load_dataset_snapshots",
+      "direct_call",
+      "self.store.load_dataset_snapshots",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/news_service.py",
+      "CentralNewsService.refresh_once",
+      "self._store",
+      "load_document",
+      "callable_argument",
+      "asyncio.to_thread",
+      "",
+      "",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/research_read_routes.py",
+      "create_research_read_router.research_daily_decline_setup",
+      "store",
+      "load_documents",
+      "bound_reference",
+      "",
+      "POST",
+      "/api/v1/research/daily-decline-setup",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/research_read_routes.py",
+      "create_research_read_router.research_daily_decline_setup",
+      "store",
+      "load_strategy_material_inputs",
+      "bound_reference",
+      "",
+      "POST",
+      "/api/v1/research/daily-decline-setup",
+      "reviewed_store_binding"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/isolated_sor_day.py",
+      "run_day",
+      "store",
+      "load_dataset_snapshots",
+      "direct_call",
+      "store.load_dataset_snapshots",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/isolated_sor_day.py",
+      "run_day",
+      "store",
+      "load_documents",
+      "direct_call",
+      "store.load_documents",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/krx_calendar_evidence.py",
+      "KrxCalendarEvidence.refresh",
+      "self._store",
+      "upsert_documents",
+      "direct_call",
+      "self._store.upsert_documents",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/krx_calendar_evidence.py",
+      "KrxCalendarEvidence.restore",
+      "self._store",
+      "load_documents",
+      "direct_call",
+      "self._store.load_documents",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/listing_evidence.py",
+      "KindListingEvidence.refresh",
+      "self._store",
+      "upsert_documents",
+      "direct_call",
+      "self._store.upsert_documents",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/listing_evidence.py",
+      "KindListingEvidence.restore",
+      "self._store",
+      "load_documents",
+      "direct_call",
+      "self._store.load_documents",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/news_service.py",
+      "load_held_news_codes",
+      "store",
+      "load_documents",
+      "direct_call",
+      "store.load_documents",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/news_service.py",
+      "load_held_news_codes",
+      "store",
+      "load_mock_news_position_snapshot",
+      "direct_call",
+      "store.load_mock_news_position_snapshot",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/news_sources.py",
+      "load_news_stock_catalog",
+      "store",
+      "load_documents",
+      "direct_call",
+      "store.load_documents",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/news_sources.py",
+      "load_premarket_stock_names",
+      "store",
+      "load_dataset_snapshots",
+      "direct_call",
+      "store.load_dataset_snapshots",
+      "",
+      "",
+      "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/research_process.py",
+      "execute_process_request",
+      "repository",
+      "load_execution_events",
+      "direct_call",
+      "repository.load_execution_events",
+      "",
+      "",
+      "unresolved_candidate"
     ]
   ],
   "forwarding_identities": [
@@ -7153,6 +7428,105 @@
       "",
       "",
       "central-app-store-closure"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app",
+      "ProgramFlowArchive",
+      "store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-app-store-closure"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app",
+      "KrxCalendarEvidence",
+      "store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-app-store-closure"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app",
+      "CredentialStore",
+      "store",
+      "1",
+      "direct_call",
+      "",
+      "",
+      "central-app-store-closure"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app",
+      "KindListingEvidence",
+      "store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-app-store-closure"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app.held_news_codes",
+      "load_held_news_codes",
+      "store",
+      "1",
+      "asyncio.to_thread",
+      "",
+      "",
+      "central-app-store-closure"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/market_news_sources.py",
+      "MarketFeedNewsCollector._catalog",
+      "load_news_stock_catalog",
+      "self._store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-market-feed-collector"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/news_service.py",
+      "CentralNewsService.refresh_once",
+      "load_premarket_stock_names",
+      "self._store",
+      "1",
+      "asyncio.to_thread",
+      "",
+      "",
+      "central-news-service"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/news_sources.py",
+      "QuerySetNewsCollector._load_catalog",
+      "load_news_stock_catalog",
+      "self._store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-news-query-collector"
+    ],
+    [
+      "src/kiwoom_monitor/infrastructure/persistence/execution_repository.py",
+      "ExecutionRepository.local_order_rehearsal",
+      "type",
+      "self._store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "execution-repository"
     ]
   ],
   "contracts": {
@@ -7306,7 +7680,9 @@
       "load_tr_connection_settings": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "prepare_observation_archive": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "save_tr_connection_settings": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value')], kwonlyargs=[arg(arg='expected_revision')], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
-      "load_kind_trading_notices": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}"
+      "load_kind_trading_notices": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
+      "load_mock_news_position_snapshot": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref'), arg(arg='cut')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "load_strategy_material_inputs": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='dict', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     },
     "QueryStore": {
       "acquire_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -7436,7 +7812,9 @@
       "load_close_gap_observations": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='closing_start', annotation=Name(id='datetime', ctx=Load())), arg(arg='closing_end', annotation=Name(id='datetime', ctx=Load())), arg(arg='next_open', annotation=Name(id='datetime', ctx=Load())), arg(arg='as_of', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), Constant(value=Ellipsis)], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "load_tr_connection_settings": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "save_tr_connection_settings": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='expected_revision', annotation=Name(id='int', ctx=Load()))], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
-      "load_kind_trading_notices": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}"
+      "load_kind_trading_notices": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
+      "load_mock_news_position_snapshot": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Any', ctx=Load())], ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
+      "load_strategy_material_inputs": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='dict', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     },
     "SQLiteQueryStore": {
       "_connect": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Attribute(value=Name(id='sqlite3', ctx=Load()), attr='Connection', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -7582,7 +7960,11 @@
       "load_tr_connection_settings": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "prepare_observation_archive": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
       "save_tr_connection_settings": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value')], kwonlyargs=[arg(arg='expected_revision')], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
-      "load_kind_trading_notices": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}"
+      "load_kind_trading_notices": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
+      "load_mock_news_position_snapshot": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref'), arg(arg='cut')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "load_strategy_material_inputs": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='dict', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "read_after_close_observations": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='start', annotation=Name(id='datetime', ctx=Load())), arg(arg='end', annotation=Name(id='datetime', ctx=Load())), arg(arg='completed_at', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [\"Name(id='contextmanager', ctx=Load())\"], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "read_program_flow_archive": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='day', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [\"Name(id='contextmanager', ctx=Load())\"], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
     }
   },
   "incremental_reviews": [

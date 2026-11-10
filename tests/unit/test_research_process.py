@@ -1665,12 +1665,15 @@ class ResearchProcessTests(unittest.TestCase):
             report = repository.load_research_report(result["runs"][2]["run_id"])
             self.assertGreater(report["fold_reports"][0]["no_trade_reasons"]["breakout_market_turnover_unavailable"], 0)
 
-            from kiwoom_monitor.application.research_resources import ResearchResourceBlocked
+            from kiwoom_monitor.application.research_resources import ResearchResourceBlocked, ResearchResourceGuard
             request["resource_budget"] = {"memory_mb": 128}
             path.write_text(json.dumps(request), encoding="utf-8")
             with proxy_path.open("ab") as large_proxy:
                 large_proxy.truncate(16 * 1024 * 1024 + 1)
-            with self.assertRaisesRegex(ResearchResourceBlocked, "input_memory_estimate_exceeds_limit"):
+            # Exercise the input estimate regardless of the Windows worker's actual RSS.
+            with patch("kiwoom_monitor.research_process.ResearchResourceGuard",
+                       side_effect=lambda limits: ResearchResourceGuard(limits, rss=lambda: 32 * 1024 * 1024)), \
+                    self.assertRaisesRegex(ResearchResourceBlocked, "input_memory_estimate_exceeds_limit"):
                 execute_process_request(load_research_process_request(path))
 
     def test_section12_account_risk_request_compares_equal_capital_reservations(self) -> None:

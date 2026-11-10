@@ -2296,7 +2296,9 @@ class MainWindowTest(unittest.TestCase):
             ranked_codes=("005930", "000660"),
             _ranking_followup_revision=1, _started_followup_revision=-1,
             start_secondary_loading=lambda codes: started.append(codes),
+            ranking_now=lambda: datetime(2026, 10, 20, 10),
         )
+        owner._ranking_followups_due = lambda: AppController._ranking_followups_due(owner)
         codes = ("005930", "000660")
         AppController.start_realtime_followups(owner, codes)
         self.assertEqual([], started)

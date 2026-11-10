@@ -46,7 +46,16 @@ class QueryStoreConsumerAuditTests(unittest.TestCase):
              for owner, methods in reuse_delegates.items() for method in methods],
             [(site["owner"], site["receiver"], site["method"], site["reference_kind"]) for site in reuse_sites],
         )
-        self.assertEqual(8, result["counts"]["store_internal_delegate_sites"] - len(reuse_sites))
+        selected = {
+            (f"{backend}DocumentStoreMixin.{method}", "self", "mock_automation_read_scope", "direct_call")
+            for backend in ("Postgres", "SQLite")
+            for method in ("load_selected_management_fences", "load_selected_order_management_policy")
+        }
+        selected_sites = [site for site in delegates if any(site["owner"] == item[0] for item in selected)]
+        self.assertCountEqual(selected, [
+            (site["owner"], site["receiver"], site["method"], site["reference_kind"]) for site in selected_sites
+        ])
+        self.assertEqual(8, result["counts"]["store_internal_delegate_sites"] - len(reuse_sites) - len(selected_sites))
         # Two real legacy string adapters now delegate to their same native owner.
         self.assertEqual({
             ("PostgresNewsRevisionStoreMixin.save_news_body_revision", "PostgresNewsRevisionStoreMixin"),

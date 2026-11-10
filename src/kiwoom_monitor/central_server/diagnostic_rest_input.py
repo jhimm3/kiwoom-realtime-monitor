@@ -23,7 +23,7 @@ from .diagnostic_replay_contract import capture_owner, captured_workload_scope, 
 VERSION = "market-request-tape/v1"
 EVENT = "rest_input"
 MARKET_APIS = frozenset({"ka00198", "ka10016", "ka10001", "ka10100", "ka10080",
-    "ka10081", "ka10083", "ka10094", "ka10045", "ka90008", "ka20005", "ka20006"})
+    "ka10081", "ka10083", "ka10094", "ka10045", "ka90008", "ka20005", "ka20006", "ka10099"})
 MAX_LANES = 32768
 MAX_LANE_BYTES = 4 * 1024 * 1024
 MAX_SHARED_REQUESTS = 4096

@@ -25,7 +25,7 @@ from tests.top20_native_fixture import capture_native_top20_fixture
 
 
 ORIGIN = datetime.fromisoformat("2026-09-10T09:30:01+09:00")
-FIXTURE_SECONDS = 25  # Complete preparation plus a quiet tail, before the next ranking slot.
+FIXTURE_SECONDS = 28  # Complete catalog and entry preparation before the next ranking slot.
 
 
 class Top20ReplayExecutionTests(unittest.IsolatedAsyncioTestCase):

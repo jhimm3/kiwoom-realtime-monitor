@@ -283,8 +283,9 @@ class SelectedPlanBootstrapTests(unittest.IsolatedAsyncioTestCase):
             # before B or management acceptance. Original native rows stay intact.
             book.rows.clear()
             for order in original.orders:
-                book.rows[order.broker_order_id] = dict(number=order.broker_order_id, side=OrderSide(order.side),
-                    ordered=order.ordered_quantity, remaining=order.remaining_quantity, price=order.limit_price,
+                book.rows[order.broker_order_id] = dict(number=order.broker_order_id, symbol=order.symbol,
+                    side=OrderSide(order.side), venue=order.venue, ordered=order.ordered_quantity,
+                    remaining=order.remaining_quantity, price=order.limit_price,
                     fills=list(order.fills), parent=order.original_broker_order_id, state=OrderState(order.state))
             rest = FakeDatedREST(original.orders, book=book, clock=clock)
             captured['rest'] = rest

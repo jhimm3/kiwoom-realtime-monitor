@@ -3975,6 +3975,7 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
 
         reader = object.__new__(MarketFeedNewsCollector)
         reader._store = self.store
+        reader._now = lambda: datetime(2026, 9, 28, 10, tzinfo=KST)
         self.assertIn((code, "Diagnostic catalog row"), reader._catalog())
 
         calls = [
@@ -4882,6 +4883,9 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
 
         service = object.__new__(AutonomousTop20Service)
         service._store = self.store
+        service._now = lambda: datetime.fromisoformat(day).replace(hour=20, minute=5, tzinfo=KST)
+        service._program_snapshots = SimpleNamespace(flush=AsyncMock())
+        service._pending_program_gaps = {}
         asyncio.run(service._backfill_candidate_flows(code, day))
 
         calls = [
@@ -6939,6 +6943,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             desired_state=MockAutomationDesiredState.RUNNING,
             active_spec_id=spec.spec_id,
             execution_run_id=admission.execution_run_id, control_revision=1,
+            account_selection=None,
+            includes_spec=lambda spec_id: spec_id == spec.spec_id,
         )
 
         def decision(snapshot_id: str) -> StrategyDecision:
@@ -7425,6 +7431,8 @@ class PostgresAccessIntegrationTests(unittest.TestCase):
             unfilled_execution_policy=None,
             maximum_data_gap_seconds=60,
             session_profile="krx-regular/v1",
+            supported_venue="KRX",
+            execution_plan_mode=None,
         )
         candidate_package = SimpleNamespace(scientific_implementation_hash="a" * 64, candidate_spec={
             "family": BREAKOUT_FAMILY_ID,

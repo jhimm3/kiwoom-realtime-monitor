@@ -41,7 +41,7 @@ from kiwoom_monitor.application.order_lifecycle import (
     prepare_unfilled_management_preflight, validate_unfilled_management_preflight,
     UNFILLED_ATTEMPT_PLAN_VERSION, evaluate_unfilled_order_management_shadow,
     project_unfilled_native_attempts, seal_unfilled_attempt_plan, validate_unfilled_attempt_plan,
-    protective_cancel_recovery,
+    anchored_unfilled_policy, protective_cancel_recovery, unfilled_plan_intent,
     prepare_unfilled_reprice_evidence,
 )
 from kiwoom_monitor.application.mock_automation_recovery import (
@@ -4008,6 +4008,20 @@ class MockAutomationEpisode:
                 self._strategy_inputs.restore_universes(document.get("universes", ()))
                 self._episode_position.restore_seen_fill_ids(document.get("seen_fill_ids", ()))
                 self._status = dict(document.get("status", self._status))
+                if cue is not None and cue["state"] == "RETRY_READY":
+                    # A native cancel may have committed before its ACK and the
+                    # new checkpoint arrived. Restore the spent claim first.
+                    events = self._cancel_lineage_events()
+                    record = self._bundle.runtime.load_intent(cue["managed_intent_id"])
+                    if record is None:
+                        raise ValueError("protective_cancel_intent_missing")
+                    frozen = self._spec.unfilled_execution_policy
+                    original_policy = anchored_unfilled_policy(
+                        unfilled_plan_intent(attempt_plan["anchor"]["root_intent"]), frozen, policy["purpose"],
+                    )
+                    self._set_cancel_recovery(protective_cancel_recovery(
+                        record, events, original_policy, frozen, self._bundle.runtime.server_now(),
+                    ), events, original_policy)
                 if protection_exit is not None and self._status.get('first_protection_exit_state')=='LIQUIDATION_CONFIRMED':
                     self._status['first_protection_exit_state']='REVALIDATION_REQUIRED'
                     self._status.pop('protection_flat_risk_snapshot_id',None)
