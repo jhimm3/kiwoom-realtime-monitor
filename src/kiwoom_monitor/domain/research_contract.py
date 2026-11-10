@@ -25,6 +25,7 @@ REPORTED_RESEARCH_RESULT_COLLECTION = "reported_research_results"
 CLOSE_FINAL_CANDIDATE_VERSION = "final_research_candidate/v1"
 CLOSE_IPO_FINAL_CANDIDATE_FAMILIES = frozenset({'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'})
 MINUTE_FINAL_CANDIDATE_FAMILIES = CLOSE_IPO_FINAL_CANDIDATE_FAMILIES | {'panic_rebound/v1'}
+DISCOVERY_FAMILY = "discovered_minute_pattern/v1"
 SECTION12_EVIDENCE_EXPERIMENT_FORMAT = "kiwoom-monitor-evidence-experiment"
 SECTION12_EVIDENCE_EXPERIMENT_FAMILIES = {
     "micro_experiment": "micro_execution/v1",
@@ -37,11 +38,15 @@ MAX_REPORTED_RESEARCH_RESULT_BYTES = 256 * 1024
 # The historical scientific recipe is raw bytes, including their original line endings.
 # This metadata contract remains available on receivers without the research engine.
 RESEARCH_IMPLEMENTATION_RECIPE = "ordered-utf8-path-nul-raw-bytes-nul/sha256/v1"
+_DISCOVERY_IMPLEMENTATION_PATH = "src/kiwoom_monitor/application/research_discovery.py"
+_MARKET_ENTRY_IMPLEMENTATION_PATH = "src/kiwoom_monitor/application/market_entry.py"
 RESEARCH_IMPLEMENTATION_PATHS = (
     "src/kiwoom_monitor/application/market_session_schedule.py",
     "src/kiwoom_monitor/application/research_factors.py",
+    _DISCOVERY_IMPLEMENTATION_PATH,
     "src/kiwoom_monitor/application/research_replay.py",
     "src/kiwoom_monitor/application/market_research_features.py",
+    _MARKET_ENTRY_IMPLEMENTATION_PATH,
     "src/kiwoom_monitor/application/market_theme_shadow.py",
     "src/kiwoom_monitor/application/theme_leadership.py",
     "src/kiwoom_monitor/application/breakout_strategy.py",
@@ -67,6 +72,10 @@ RESEARCH_IMPLEMENTATION_PATHS = (
     "src/kiwoom_monitor/domain/strategy_contract.py",
     "src/kiwoom_monitor/domain/simulation_contract.py",
 )
+_PRE_MARKET_ENTRY_IMPLEMENTATION_PATHS = tuple(path for path in RESEARCH_IMPLEMENTATION_PATHS
+                                              if path != _MARKET_ENTRY_IMPLEMENTATION_PATH)
+_PRE_DISCOVERY_IMPLEMENTATION_PATHS = tuple(path for path in _PRE_MARKET_ENTRY_IMPLEMENTATION_PATHS
+                                            if path != _DISCOVERY_IMPLEMENTATION_PATH)
 
 
 def research_implementation_digest(read_bytes: Callable[[str], bytes]) -> str:
@@ -118,9 +127,11 @@ class SelectedResearchArtifact:
         if (not isinstance(profiles, list) or not profiles
                 or any(not isinstance(value, str) or not value or value != value.strip() for value in profiles)
                 or len(set(profiles)) != len(profiles)
-                or not isinstance(file_rows, list) or len(file_rows) != len(RESEARCH_IMPLEMENTATION_PATHS)
+                or not isinstance(file_rows, list)
                 or any(not isinstance(row, dict) or set(row) != {"path", "sha256"} for row in file_rows)
-                or tuple(row["path"] for row in file_rows) != RESEARCH_IMPLEMENTATION_PATHS):
+                or tuple(row["path"] for row in file_rows) not in (
+                    RESEARCH_IMPLEMENTATION_PATHS, _PRE_MARKET_ENTRY_IMPLEMENTATION_PATHS,
+                    _PRE_DISCOVERY_IMPLEMENTATION_PATHS)):
             raise ValueError("invalid selected research artifact profiles or ordered files")
         hashes = [document[key] for key in ("artifact_sha256", "implementation_hash", "metadata_hash")]
         hashes.extend(row["sha256"] for row in file_rows)

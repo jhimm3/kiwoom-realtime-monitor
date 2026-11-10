@@ -4,9 +4,124 @@
 
 기준: **2.1.0**, 2026-09-22 문서 정리. 이 문서는 현재 지원하는 요청 필드·예제·실행 경계를 보존하는 상세 계약이다.
 구현·배포·운영 확인 범위는 [현재 상태](CURRENT_STATUS.md), 미완료·보류 작업은 [남은 작업](OPEN_ITEMS.md)을 따른다.
-현재 PC 연구 DB는 **v23**이다. 아래 v10~v22 표기는 해당 기능을 도입한 마이그레이션 이력이며 현재 DB 버전을 뜻하지 않는다.
+현행 코드의 연구 DB 스키마는 **v27**이다. 아래 v10~v22 표기는 해당 기능을 도입한 마이그레이션 이력이며 현재 DB 버전을 뜻하지 않는다.
 지속 campaign·자동 가설·다기간 bundle·실제 RSS 확인과 CPU batch 양보는 구현되어 있다. 실제 NAS 전체 규모·PC 24시간 운전 검증과는 구분한다.
 최우선 자료 확보 계획은 [과거 자료 확보](HISTORICAL_BACKFILL_PLAN.md)에 있다. 새 원천의 봉·뉴스를 기존 관측 replay와 같은 의미로 자동 편입하지 않는다.
+
+<a id="new-strategy-discovery"></a>
+
+## 새 전략 발굴
+
+기존 전략 파라미터의 탐색과 별개로 `research_discovery`는 로컬 동결 KRX 분봉의 관측에서 두 조건의 조합을 만든다. 선택한 동결본에 담긴 종목만 대상으로 하며 TOP20 편입은 요구하지 않는다. 직전 1분과 현재 1분이 연속이고 해당 시점에 수락된 정규 접속매매 봉이면 수익률·거래량 비율·거래대금 비율·변동폭·KST 시간대를 구간으로 나눈다. 비율의 분모를 확인할 수 없으면 해당 조건만 제외한다.
+
+TRAIN에서만 같은 세션의 다음 진입 가능 1분봉을 대상으로 시가에서 종가까지의 비용 차감 수익을 집계한다. 이 집계는 후보를 줄이는 근사치다. 지정한 최소 표본을 채우고 평균 순수익이 양수이며 전체 관측 기준보다 높은 조합만 순위에 넣는다. 상위 `max_candidates`개에 기존 Paper 엔진을 적용해 TRAIN과 VALIDATION을 각각 초기 자금부터 다시 실행한다. 두 구간 모두 평가 적격이고 순손익이 양수인 후보를 독립 최종평가 대상으로 고정한다. 분봉으로 확인하기 어려운 체결 세부와 시장 전체 커버리지에 한계가 있다.
+
+1분 근사치와 정밀 보유기간의 차이를 검토할 때 `relative_shortlist: true`를 명시하면 1분 평균이 음수여도 전체 기준보다 나은 조합을 정밀 평가에 넣는다. 정밀 평가 이후 최종 후보를 고르는 기준은 같은 두 구간의 적격 여부와 양의 순손익이다. 과거 복원 동결본은 원 수집 시각과 가정한 봉 가용시각을 각각 보존하고 `completed_close_then_next_open/v1`과 `no_intrabar_fill/v1`을 함께 사용한다.
+
+```powershell
+$env:PYTHONPATH = 'src;.'
+python -m kiwoom_monitor.research_discovery discover discover.json
+python -m kiwoom_monitor.research_discovery final final.json
+```
+
+아래 날짜·자금·손절·목표는 요청 형식의 예다. 요청 파일 위치를 기준으로 입력과 출력 경로를 찾는다. `dataset`은 동결 export 또는 bundle 폴더이며 개발용 동결본은 `VALIDATION.end` 뒤의 관측을 담지 않아야 한다. `cost_model`에 기간만 적으면 기존 연구 기본 비용인 매수 0.015%, 매도 0.215%를 쓴다. 슬리피지나 비용 가정을 바꾸려면 기존 비용 명세 전체를 제공한다. 비용의 적용 기간에는 최종평가 구간까지 포함한다.
+
+`discover.json`
+
+```json
+{
+  "dataset": "development-export",
+  "output": "discovery-output",
+  "max_candidates": 12,
+  "minimum_samples": 20,
+  "max_seconds": 600,
+  "resource_budget": {"memory_mb": 1024, "cpu_duty_percent": 50},
+  "risk": {
+    "quantity": 10, "capital_won": 1000000, "stop_loss_bps": 150,
+    "target_bps": 200, "max_hold_minutes": 10, "signal_valid_seconds": 120,
+    "cooldown_seconds": 0, "session_exit_buffer_seconds": 300
+  },
+  "execution": {
+    "version": "next_tradable_bar_open/v1",
+    "same_bar_path_version": "conservative_with_optimistic_bound/v1",
+    "initial_cash_won": 1000000,
+    "cost_model": {"valid_from": "2026-09-01T00:00:00+09:00", "valid_to": "2026-10-01T00:00:00+09:00"}
+  },
+  "evaluation": {
+    "version": "chronological_holdout/v1",
+    "folds": [
+      {"name": "train", "role": "TRAIN", "start": "2026-09-01T09:03:00+09:00", "end": "2026-09-10T00:00:00+09:00"},
+      {"name": "validation", "role": "VALIDATION", "start": "2026-09-10T09:03:00+09:00", "end": "2026-09-19T00:00:00+09:00"}
+    ],
+    "warmup_seconds": 120, "gap_seconds": 120, "purge_seconds": 120,
+    "minimum_closed_trades": 10, "minimum_active_days": 3
+  }
+}
+```
+
+`final.json`은 개발 결과를 확인한 뒤 별도로 실행한다. 단일 export는 `manifest.json`의 자료 ID와 해시를 사용한다. bundle의 경우 `dataset_hash`에 동결 자료의 통합 `revision_ids_hash`를 지정한다. 후보와 비용은 저장된 개발 결과의 값으로 고정하고 OOS 결과에 따라 후보를 다시 고르지 않는다.
+
+```json
+{
+  "discovery_output": "discovery-output",
+  "dataset": "final-export",
+  "accessed_at": "2026-10-01T00:00:00+09:00",
+  "evaluation": {
+    "version": "chronological_holdout/v1",
+    "folds": [
+      {"name": "final", "role": "OOS", "start": "2026-09-21T09:03:00+09:00", "end": "2026-10-01T00:00:00+09:00"}
+    ],
+    "warmup_seconds": 120, "purge_seconds": 120,
+    "minimum_closed_trades": 10, "minimum_active_days": 3
+  }
+}
+```
+
+`screening.json`에서 관측·라벨 표본 수와 비용 차감 평균을 확인한다. `development.json`은 후보 조건, 구간별 거래 수·순손익·낙폭, 최종평가 대상 여부와 기존 연구 실행 ID를 담는다. `final-result.json` 및 로컬 `research.sqlite3`에는 기존 최종평가의 결과와 영수증이 남는다. 같은 요청은 완료 실행을 재사용하며 입력과 가설을 바꿀 때는 새 출력 폴더를 사용한다. 실행 중단은 `--cancel`에 지정한 파일로 요청할 수 있다. 후보는 연구 전용이며 자동매매 등록 경로에서 거부한다.
+
+<a id="market-entry-comparison"></a>
+
+## 시황 선행 판단 비교
+
+기존 `single_run` 분봉 Paper 요청에 `--market-entry-trial`을 붙이면 같은 동결 입력·전략·비용으로 두 번 실행한다. `baseline`은 원래 전략이고 `with_market`은 보유·미체결이 없는 상태에서 먼저 시황을 평가한다. 결과에는 각각의 진입 신호, 체결 시각·수량·체결금액·초기 자금 대비 비중, 구간별 순손익이 있다. 돌파 B0~B3·테마, 종가베팅, 신규주 종가·돌파, 낙주 Paper에 적용할 수 있다.
+
+```powershell
+$env:PYTHONPATH = 'src;.'
+python -m kiwoom_monitor.research_process --request paper.json --market-entry-trial market.json --result comparison.json
+```
+
+`market.json`은 `version: "market_entry_trial/v1"`, `strategy_policies`, `observations`를 받는다. `strategy_policies`의 키는 `paper.json`의 전략 ID다. 전략별로 허용할 장전 `directions`와 `ranges`를 명시한다. 각 구간은 양쪽을 포함하는 `[하한, 상한]`이며 한쪽을 `null`로 둘 수 있다. `match_bps`, `miss_bps`, `unknown_bps`는 각각 조건 충족, 불충족, 자료 미확인 시 기존 진입 수량에 곱하는 값이다. 0은 진입 보류이고 10,000은 원래 수량이다. 기본 전략 기준이나 기본 비중은 지정하지 않는다.
+
+관측에는 `revision_id`, `available_at`, `expires_at`, `premarket_direction`, `premarket_available_at`과 네 수치가 필요하다. `turnover_million_won`은 코스피·코스닥 누적 거래대금의 합계(백만원), `net_advancers`는 두 시장의 상승 종목 수에서 하락 종목 수를 뺀 값이다. `theme_concentration_ppm`은 관측 대상 TOP20 안의 선도 테마 대금 비중, `sustained_rise_ppm`은 결과 관찰이 끝난 돌파 사례의 후속 상승 비율이다. 두 비율의 단위는 ppm이고 확인되지 않은 값은 `null`로 둔다. 여러 원자료를 묶은 `available_at`은 마지막 원자료가 가용해진 시각이다. 장전 가설은 해당 거래일의 개장 전에 확보된 판본만 사용한다. 장중 정정은 새 판본과 가용시각으로 남긴다.
+
+### 돌파의 장세별 진입·비중·청산 비교
+
+같은 명령의 `market.json`에 `version: "market_entry_trial/v2"`를 쓰면 돌파 및 테마 돌파 Paper에서 장세별 진입 비중과 청산에 사용할 장세 변화를 직접 지정할 수 있다. 예시의 비중과 청산 조건은 요청 작성 예이며 운영 기본값으로 사용하지 않는다.
+
+```json
+{
+  "version": "market_entry_trial/v2",
+  "strategy_policies": {
+    "breakout_study/v1": {
+      "THEME_LED": {"size_bps": 10000, "exit_on_regimes": ["DISPERSED_ROTATION"]},
+      "DISPERSED_ROTATION": {"size_bps": 5000, "exit_on_regimes": []},
+      "UNKNOWN": {"size_bps": 10000, "exit_on_regimes": []}
+    }
+  },
+  "observations": [
+    {"revision_id": "market:1", "available_at": "2025-01-03T09:30:00+09:00",
+     "expires_at": "2025-01-03T09:35:00+09:00", "regime": "THEME_LED", "evidence_refs": ["source:1"]},
+    {"revision_id": "market:2", "available_at": "2025-01-03T09:35:00+09:00",
+     "expires_at": "2025-01-03T09:40:00+09:00", "regime": "DISPERSED_ROTATION", "evidence_refs": ["source:2"]}
+  ]
+}
+```
+
+`size_bps` 0은 신규 진입 보류다. 자료가 없거나 진입 규칙이 없는 장세에는 명시한 `UNKNOWN` 비중을 사용한다. 청산 대상 장세 목록은 진입 판단 때 고정한다. 실제 매수 체결 뒤 가용해진 새 관측이 그중 하나이고 돌파의 기존 판단이 보유일 때 청산을 제안한다. 가격 구조 손절·테마 의존 실패·세션 청산이 먼저 판단되며, 자료 만료·미확인 또는 경과 시간만으로는 장세 청산을 제안하지 않는다. 청산을 제안한 양쪽 관측과 원자료 참조를 결과에 남긴다. 비교 요약에는 양쪽 실제 모의 매도 체결 시각·수량·금액·비용이 추가된다.
+
+저항 가격에 따른 부분익절 비교는 같은 문서의 선택 항목 `profit_takes`에 넣는다. 각 행은 `symbol`, `available_at`, `revision_id`, `reference_price`(원), `quantity`(주), `reason_ref`를 받는다. 종목·거래일당 하나의 기준을 넣을 수 있고 진입 판단 전에 알려진 근거만 쓴다. 분봉 종가가 매입가보다 높은 지정 기준에 닿으면 기존 다음 시가 모의 체결로 일부를 판다. 실제 체결가와 비용을 손익에 반영하므로 지정 기준이 체결가나 이익을 보장하지 않는다. 이미 매도 체결된 수량은 반복해서 팔지 않으며 남은 물량은 원래 돌파 보호로 관리한다. 손절·장세 변화로 전량을 정리해야 하는 판단은 부분익절보다 우선한다. 기준 가격과 수량은 요청에 명시하며 이 기능은 후보를 자동 생성하지 않는다.
+
+모의 자동운용 화면은 기존 Shadow에서 유효한 장세 관측이 있을 때 테마 주도·분산 순환 등의 분류를 표시한다. 이 화면의 관측과 로컬 Paper에 지정한 주문 비교 정책은 별도다.
 
 ## MICRO 과거 VI 입력
 

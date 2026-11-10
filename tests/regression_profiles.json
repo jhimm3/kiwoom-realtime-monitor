@@ -337,8 +337,10 @@
     ],
     "source-integration-registration": [
       "tests.unit.test_diagnostic_scoped_window",
+      "tests.unit.test_market_entry_comparison",
       "tests.unit.test_prepare_nas_operator_update",
-      "tests.unit.test_prepare_nas_scoped_replay"
+      "tests.unit.test_prepare_nas_scoped_replay",
+      "tests.unit.test_research_discovery"
     ],
     "dependency-audit-p2-nas-capture-safety": [
       "tests.unit.test_catalog_capture_profile",

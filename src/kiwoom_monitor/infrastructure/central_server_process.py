@@ -109,6 +109,8 @@ class LocalCentralServerProcess:
                 "--parent-pid", str(os.getpid()),
             ]
         command.append("--local-mock-automation")
+        if os.name == "nt":
+            command.extend(["--local-chatgpt-config", str(self._api_config_path.with_name("naver_news.dat").resolve())])
         self._shutdown_event = WindowsShutdownEvent.create() if os.name == "nt" else None
         if self._shutdown_event is not None:
             command.extend(["--shutdown-event", self._shutdown_event.name])

@@ -21,6 +21,7 @@ from kiwoom_monitor.application.research_queue import (ResearchCampaignPolicy, b
     LeaderDecisionCampaignSpec, decode_campaign_spec, campaign_trial_count)
 from kiwoom_monitor.application.research_search import ExperimentSpec, generate_trials
 from kiwoom_monitor.application.research_splits import DevelopmentPartitionSpec, ResearchEvaluationSpec, FinalHoldoutBatchSpec
+from kiwoom_monitor.domain.research_contract import DISCOVERY_FAMILY
 from kiwoom_monitor.application.context_candidates import ContextHypothesis
 from kiwoom_monitor.application.research_evaluation import (
     OutcomeLabel,
@@ -1052,6 +1053,13 @@ class ResearchRepository:
                 raise ValueError('independent claim requires its scoped scientific run identity')
         with closing(self._connect()) as connection, connection:
             connection.execute('BEGIN IMMEDIATE')
+            if claim_independent and spec.get('family') == DISCOVERY_FAMILY:
+                captured = input_manifest['captured_range']
+                start, end = (datetime.fromisoformat(_normalized_timestamp(captured[key])).isoformat(timespec='microseconds')
+                              for key in ('start', 'end'))
+                if connection.execute('SELECT 1 FROM research_final_holdout_windows '
+                        'WHERE start < ? AND end > ? LIMIT 1', (end, start)).fetchone() is not None:
+                    raise ValueError('discovery development overlaps a registered final window')
             row = connection.execute(
                 "SELECT spec_json,input_manifest_json,status FROM research_runs WHERE run_id=?",
                 (normalized_id,),
@@ -1157,6 +1165,12 @@ class ResearchRepository:
         spec_json = _canonical_json(spec)
         with closing(self._connect()) as connection, connection:
             return _save_search_experiment(connection, normalized_id, spec_json)
+
+    def load_search_experiment(self, experiment_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute('SELECT spec_json FROM research_search_experiments WHERE experiment_id=?',
+                                     (experiment_id,)).fetchone()
+        return json.loads(row[0]) if row is not None else None
 
     def save_research_hypotheses(self, hypotheses: tuple[ResearchHypothesis, ...]) -> int:
         """Store an ordered lineage batch; repeated identical nodes are harmless."""

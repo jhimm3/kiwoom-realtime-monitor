@@ -1,7 +1,10 @@
 import os
+import json
+import tempfile
 import unittest
 from copy import deepcopy
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
@@ -50,6 +53,38 @@ class DialogTests(unittest.TestCase):
         self.dialog._model.setCurrentIndex(self.dialog._model.findData('unknown-model'))
         self.assertEqual(self.dialog._effort.count(),1)
         self.assertEqual(self.dialog._effort.currentData(),'')
+
+    def test_transfer_moves_only_saved_prompt_and_reservation_after_target_save(self):
+        source = self.client
+        source.settings.update(prompt=DEFAULT_PROMPT + '\n한국 시장 시황 문단', enabled=False, time='07:43')
+        self.dialog.load()
+        wait_until(lambda: self.dialog._worker is None)
+        self.dialog._prompt.setPlainText('저장하지 않은 편집')
+        target = Client()
+        target.is_local_server = True
+        target.settings.update(revision=4, ttl_minutes=180)
+        receiver = MorningMarketBriefDialog(target)
+        receiver.show()
+        wait_until(lambda: receiver._worker is None)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'morning.json'
+            dialog_module = 'kiwoom_monitor.presentation.morning_market_brief_dialog.QFileDialog'
+            with patch(dialog_module + '.getSaveFileName', return_value=(str(path), 'JSON')):
+                self.dialog._export_settings()
+            exported = json.loads(path.read_text(encoding='utf-8'))
+            self.assertEqual({key: source.settings[key] for key in ('enabled', 'time', 'prompt')}, exported)
+
+            with patch(dialog_module + '.getOpenFileName', return_value=(str(path), 'JSON')):
+                receiver._import_settings()
+            self.assertEqual([], target.saved)
+            receiver.save()
+            wait_until(lambda: receiver._worker is None)
+
+        self.assertEqual(exported, {key: target.settings[key] for key in exported})
+        self.assertEqual(4, target.saved[0]['expected_revision'])
+        self.assertEqual(180, target.settings['ttl_minutes'])
+        self.assertEqual([], source.saved)
+        self.assertEqual(0, source.runs + target.runs)
 
     def test_report_cutoff_converts_utc_to_kst_without_mutating_record(self):
         cutoff = '2026-10-14T22:55:00+00:00'
@@ -125,6 +160,20 @@ class DialogTests(unittest.TestCase):
         self.assertIn('https://example.test/market',self.dialog._report.toHtml())
         self.assertIn('판단엔진 연결 전',text)
         self.assertIn('무효화',text)
+
+    def test_current_server_renders_intraday_comparison_and_missing_market(self):
+        report = {'run': {'status': 'completed', 'result': result(), 'cutoff_at': NOW.isoformat(),
+                          'provider': 'chatgpt_plan', 'model': 'gpt-6.1-sol', 'reasoning_effort': 'high',
+                          'expires_at': (NOW + timedelta(hours=4)).timestamp()},
+                  'context': {'reason': 'ok'},
+                  'market_comparison': {'status': 'UNCONFIRMED',
+                                        'observations': {'kospi': {'up': 400, 'down': 300}}}}
+        self.dialog._show_report(report)
+        text = self.dialog._report.toPlainText()
+        self.assertIn('장중 대조 · 미확인', text)
+        self.assertIn('코스피 · 상승 400 · 하락 300', text)
+        self.assertIn('코스닥 · 미확인', text)
+        self.assertNotIn('판단엔진 연결 전', text)
 
     def test_legacy_report_remains_readable_and_is_labelled_excluded(self):
         self.dialog._show_report({'run':{'status':'completed','result':{

@@ -1087,6 +1087,19 @@ class MockAutomationDialogControlTests(unittest.TestCase):
                 self.assertEqual(desired, self.dialog._context["status"]["control"]["desired_state"])
                 self.assertEqual(runner, self.dialog._context["status"]["runner"])
 
+    def test_market_regime_is_displayed_as_an_observation(self):
+        self.context["status"].update(
+            runtime_mode=MockAccountRuntimeMode.AUTOMATIC.value,
+            control={"desired_state": "RUNNING", "active_spec_id": "ready"},
+            runner={"state": "READY", "entry_market_comparison": {
+                "as_of": "2026-11-10T09:40:00+09:00", "symbol": "005930", "status": "SUPPORTED",
+                "entry_context": {"observed_market_type": "THEME_LED"},
+            }},
+        )
+        self.dialog._completed("refresh", self.context)
+        self.assertIn("장전 가설 일치 · 장세 관찰 테마 주도", self.dialog._runtime.text())
+        self.assertTrue(self.dialog._stop.isEnabled())
+
     def test_ack_followup_failure_keeps_ack_message_and_closes_stale_controls(self):
         for operation, text in (("start", "시작 요청이 반영"), ("stop", "신규 자동 주문을 중지"),
                                 ("resume", "재개 요청이 반영"), ("publish_spec", "명세를 게시")):

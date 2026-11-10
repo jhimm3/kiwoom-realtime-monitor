@@ -94,6 +94,7 @@ class CentralServerSettings:
     account_identity_registry_enabled: bool = False
     credential_directory: str = ""
     local_mock_credential_directory: str = ""
+    local_chatgpt_config_path: str = field(default="", repr=False)
     credential_trusted_proxies: tuple[str, ...] = ()
     query_access_token: str = field(default="", repr=False)
     research_result_grants: tuple[ProducerGrant, ...] = field(default=(), repr=False)
@@ -107,6 +108,10 @@ class CentralServerSettings:
     program_flow_archive_source_stream: str = ""
 
     def __post_init__(self) -> None:
+        if self.local_chatgpt_config_path and (
+            self.host != "127.0.0.1" or self.credential_directory or not self.database_url.startswith("sqlite:///")
+        ):
+            raise ValueError("local ChatGPT credentials require a loopback server with local SQLite")
         if self.local_mock_credential_directory and (
             self.host != "127.0.0.1" or self.credential_directory
             or self.account_identity_registry_enabled or self.mock_account_monitor_enabled

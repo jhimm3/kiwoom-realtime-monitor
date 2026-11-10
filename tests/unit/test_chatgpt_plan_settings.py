@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import threading
 import unittest
@@ -147,6 +148,33 @@ class ChatGPTPlanSettingsTests(unittest.TestCase):
         settings = NewsAISettings(provider="chatgpt_plan", model="account-model", auto_analyze=True, chatgpt_storage_path=self.config.chatgpt_storage_path)
         self.assertTrue(automatic_ai_run_allowed(settings, manual_queue=False, central_client_available=False, used_requests=0))
         self.assertTrue(automatic_ai_run_allowed(settings, manual_queue=False, central_client_available=True, used_requests=0))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows local server login")
+    def test_local_server_login_uses_shared_server_connection_without_saving_news_policy(self):
+        owner = self
+
+        class LocalServer:
+            is_local_server = True
+            connections = []
+
+            def chatgpt_status(self):
+                return owner.auth.status()
+
+            def chatgpt_models(self):
+                return (("PC model", "pc-model"),)
+
+            def connect_local_chatgpt(self, account_id):
+                self.connections.append(account_id)
+
+        client = LocalServer()
+        dialog = self.dialog(section="connections", operational_client=client)
+        self.plan(dialog)
+        self.assertTrue(dialog._plan_connect.isEnabled())
+        dialog._plan_connect_account()
+        wait_until(lambda: dialog._plan_worker is None)
+        self.assertEqual([self.auth.active], client.connections)
+        self.assertEqual("pc-model", dialog._ai_model.currentData())
+        self.assertFalse(self.config._path.exists())
 
     def test_subscription_failure_pauses_pending_and_later_automatic_news(self):
         from kiwoom_monitor.presentation.stock_news_window import StockNewsWindow

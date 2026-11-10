@@ -65,7 +65,7 @@ class MockAutomationSupervisor:
     def __init__(self, store: Any, credential_owner: Any, *, poll_seconds: float = 1.0, price_source=None,
                  now_provider: Callable[[], datetime] | None = None, leader_context_source=None,
                  expected_implementation_hash=None, minute_candidate_current=None, close_calendar=None,
-                 nxt_price_source=None) -> None:
+                 nxt_price_source=None, market_comparison=None) -> None:
         self._now = (lambda: as_kst(now_provider())) if now_provider else (lambda: datetime.now(KST))
         self._store = store
         self._owner = credential_owner
@@ -74,6 +74,7 @@ class MockAutomationSupervisor:
         self._price_source = price_source
         self._nxt_price_source = nxt_price_source
         self._leader_context_source = leader_context_source
+        self._market_comparison = market_comparison
         self._expected_implementation_hash = expected_implementation_hash
         self._minute_candidate_options = ({} if minute_candidate_current is None else {
             "minute_candidate_current": minute_candidate_current,
@@ -414,6 +415,7 @@ class MockAutomationSupervisor:
                             proposed_selection=selection, price_source=self._price_source,
                             nxt_price_source=self._nxt_price_source,
                             leader_context_source=self._leader_context_source, now_provider=self._now,
+                            market_comparison=self._market_comparison,
                             **self._minute_candidate_options)
                         created.append(episode)
                         await drain_thread_call(episode.prepare_restore)
@@ -833,6 +835,7 @@ class MockAutomationSupervisor:
         episode_options = dict(price_source=self._price_source, now_provider=self._now,
                                nxt_price_source=self._nxt_price_source,
                                leader_context_source=self._leader_context_source,
+                               market_comparison=self._market_comparison,
                                **self._minute_candidate_options)
         if selection is None:
             episodes = (MockAutomationEpisode(self._store, bundle, spec, **episode_options),)

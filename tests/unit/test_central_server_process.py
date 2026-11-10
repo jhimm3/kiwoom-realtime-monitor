@@ -58,7 +58,8 @@ class LocalCentralServerProcessTests(unittest.TestCase):
         expected = ["python-test", "-m", "kiwoom_monitor.central_server", "--parent-pid", str(os.getpid()),
                     "--local-mock-automation"]
         if os.name == "nt":
-            expected += ["--shutdown-event", "owned-test-event"]
+            expected += ["--local-chatgpt-config", str((Path(directory) / "naver_news.dat").resolve()),
+                         "--shutdown-event", "owned-test-event"]
         self.assertEqual(expected, command)
         options = popen.call_args.kwargs
         environment = options["env"]

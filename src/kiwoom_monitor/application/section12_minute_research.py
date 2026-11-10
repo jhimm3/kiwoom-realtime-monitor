@@ -214,6 +214,7 @@ class MinuteExperimentRun:
         self.armed: dict[str, Any] = {}
         self.reduced: dict[str, int] = {}
         self._entry_cuts: dict[str, datetime] = {}
+        self._market_exit_rules: dict[str, dict] = {}
         self._panic_calendar_day = None
         self._panic_prior_session = None
 
@@ -225,6 +226,7 @@ class MinuteExperimentRun:
                     self.setups.pop(event.symbol, None)
                     self.reduced.pop(event.symbol, None)
                     self._entry_cuts.pop(event.symbol, None)
+                    self._market_exit_rules.pop(event.symbol, None)
                     closed = True
                 else:
                     self.reduced[event.symbol] = self.reduced.get(event.symbol, 0) + event.quantity
@@ -235,13 +237,21 @@ class MinuteExperimentRun:
             return self.setups[decision.symbol].failure_price
         return None
 
-    def evaluate(self, *, run_id, bar, bars, cursor, universe_ref, engine, just_closed) -> StrategyEvaluation:
+    def evaluate(self, *, run_id, bar, bars, cursor, universe_ref, engine, just_closed,
+                 market_entry_trial=None) -> StrategyEvaluation:
         position = engine.portfolio.position
         pending = engine.portfolio.pending_order
         if position is not None and position.symbol != bar.code:
             position = None
         setup = self.setups.get(bar.code) if position is not None else None
         cut = datetime.fromisoformat(bar.available_at)
+        market_context = None
+        if market_entry_trial is not None and engine.portfolio.position is None and pending is None and not just_closed:
+            market_context = market_entry_trial.assess(self.config.family, cut)
+            if market_context["size_bps"] == 0:
+                self.armed.pop(bar.code, None)
+                return build_minute_evaluation(self.config.family, run_id, bar, universe_ref, engine.strategy_state,
+                    "WAIT", f"market_entry_{market_context['status']}_blocked", 0, None, (), market_context=market_context)
         material = self.config.material_news if self.research_context else None
         quantity = 0
         refs = ()
@@ -310,6 +320,18 @@ class MinuteExperimentRun:
                                                research_context=self.research_context)
             action, reason, setup = decision.action, decision.reason, decision.setup
             quantity, refs = decision.quantity, decision.evidence_refs
+            pinned_market = self._market_exit_rules.get(bar.code)
+            if action == "HOLD" and holding is not None and pinned_market is not None and market_entry_trial is not None:
+                market_context = market_entry_trial.assess_breakout_exit(pinned_market, cut, holding.opened_at)
+                if market_context is not None:
+                    action, reason, quantity = "EXIT", "breakout_market_regime_changed", holding.quantity
+            if action == "HOLD" and holding is not None and market_entry_trial is not None:
+                step = market_entry_trial.profit_take_at(bar.code, setup.signal_available_at)
+                if step is not None and holding.entry_price < step.reference_price <= bar.close:
+                    remaining = min(holding.quantity - 1, step.quantity - self.reduced.get(bar.code, 0))
+                    if remaining > 0:
+                        action, reason, quantity = "REDUCE", "breakout_declared_profit_take", remaining
+                        refs = (*refs, step.step_id, step.reason_ref)
         else:
             from kiwoom_monitor.application.close_and_ipo import CloseIpoPosition, evaluate_close_and_ipo
 
@@ -325,10 +347,20 @@ class MinuteExperimentRun:
             action, reason, setup = decision.action, decision.reason, decision.setup
             quantity, refs = decision.quantity, decision.evidence_refs
         if action == "ENTER":
+            if market_context is not None:
+                quantity = quantity * market_context["size_bps"] // 10_000
+                if quantity == 0:
+                    action, reason = "WAIT", "market_entry_size_rounds_to_zero"
+                    self.armed.pop(bar.code, None)
+        if action == "ENTER":
             if engine.portfolio.position is None and pending is None:
                 self.setups[bar.code] = setup
                 if material is not None:
                     self._entry_cuts[bar.code] = cut
+                if market_context is not None and market_context.get("exit_on_regimes"):
+                    self._market_exit_rules[bar.code] = market_context
+                else:
+                    self._market_exit_rules.pop(bar.code, None)
             else:
                 action, reason, quantity = "WAIT", "paper_slot_in_use", 0
         elif position is not None and setup is not None:
@@ -340,11 +372,11 @@ class MinuteExperimentRun:
             )
         return build_minute_evaluation(self.config.family, run_id, bar, universe_ref,
                                        engine.strategy_state, action, reason, quantity, setup, refs,
-                                       material_context=material_context)
+                                       material_context=material_context, market_context=market_context)
 
 
 def build_minute_evaluation(family, run_id, bar, universe_ref, state, action, reason, quantity, setup, refs, *,
-                            material_context=None) -> StrategyEvaluation:
+                            material_context=None, market_context=None) -> StrategyEvaluation:
     at = datetime.fromisoformat(bar.available_at).astimezone(timezone.utc).isoformat()
     strategy_id, version = family.rsplit("/", 1)
     input_refs = tuple(dict.fromkeys(ref for ref in (bar.revision_id, universe_ref, *refs) if ref))
@@ -357,6 +389,12 @@ def build_minute_evaluation(family, run_id, bar, universe_ref, state, action, re
     }
     if material_context is not None:
         snapshot_body["feature_values"] += (material_context,)
+    if market_context is not None:
+        snapshot_body["feature_values"] += (market_context,)
+        market_refs = tuple(ref for context in (market_context["context"],
+                            market_context.get("entry_context", {}).get("context")) if context is not None
+                            for ref in (context["revision_id"], *context.get("evidence_refs", ())))
+        snapshot_body["input_revision_refs"] = tuple(dict.fromkeys((*input_refs, *market_refs)))
     snapshot = FeatureSnapshot(_id("snapshot", snapshot_body), **snapshot_body)
     final_action = "NO_TRADE" if action in {"WAIT", "ARM"} else action
     body = dict(run_id=run_id, snapshot_id=snapshot.snapshot_id, symbol=bar.code, proposal=action,

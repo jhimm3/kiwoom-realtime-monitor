@@ -80,6 +80,11 @@ class SourceRuntimeTests(unittest.TestCase):
         selected = SelectedResearchArtifact.from_document(document)
         self.assertEqual(oracle.hexdigest(), selected.expected_implementation_hash("krx-regular/v1"))
         self.assertIsNone(selected.expected_implementation_hash("krx-after/v1"))
+        for names in ({"market_entry.py"}, {"market_entry.py", "research_discovery.py"}):
+            previous = {**document, "files": [row for row in document["files"] if Path(row["path"]).name not in names],
+                        "implementation_hash": "a" * 64}
+            previous["metadata_hash"] = research_artifact_metadata_hash(previous)
+            self.assertEqual("a" * 64, SelectedResearchArtifact.from_document(previous).implementation_hash)
         for field in ("artifact_sha256", "source_ref", "profiles", "implementation_hash"):
             changed = deepcopy(document)
             changed[field] = ["krx-after/v1"] if field == "profiles" else "b" * 64

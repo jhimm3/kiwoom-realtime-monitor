@@ -10,8 +10,9 @@ from zoneinfo import ZoneInfo
 
 from kiwoom_monitor.application.morning_market_brief import (
     DEFAULT_SETTINGS, SETTINGS_COLLECTION, RUNS_COLLECTION, content_hash,
-    render_prompt, validate_output, context_from_run, output_schema, SCHEMA,
+    render_prompt, validate_output, context_from_run, compare_market_hypothesis, output_schema, SCHEMA,
 )
+from kiwoom_monitor.domain.time_basis import as_kst
 from kiwoom_monitor.infrastructure.chatgpt_plan import validate_reasoning
 
 KST = ZoneInfo("Asia/Seoul")
@@ -35,7 +36,8 @@ async def _join(task):
 class MorningMarketBrief:
     """Owns schedule, immutable run inputs, claim-before-POST and shutdown drain."""
     def __init__(self, store, ai_service, *, clock=None,
-                 workload_paused: Callable[[str], bool] | None = None):
+                 workload_paused: Callable[[str], bool] | None = None,
+                 market_breadth=None, top20_source=None, observation_max_age=None):
         self.store, self.ai = store, ai_service
         self.clock = clock or (lambda: datetime.now(KST))
         self._workload_paused = workload_paused or (lambda _workload: False)
@@ -45,6 +47,10 @@ class MorningMarketBrief:
         self._loop_task = None
         self._run_task = None
         self._closing = False
+        self._market_breadth = market_breadth
+        self._top20_source = top20_source
+        self._observation_max_age = observation_max_age
+        self._premarket_run = None
         self._diagnostics = {"attempts": 0, "completed": 0, "failed": 0,
                              "elapsed_seconds": 0.0, "last_status": "idle"}
 
@@ -80,6 +86,12 @@ class MorningMarketBrief:
     async def start(self):
         if self._loop_task is None:
             self._closing = False
+            if self._observation_max_age is not None:
+                try:
+                    self._premarket_run = await asyncio.to_thread(self._load_premarket_run, as_kst(self.clock()))
+                except Exception:
+                    self._premarket_run = None
+                    LOGGER.warning("장전 시장 가설을 복원하지 못했습니다", exc_info=True)
             self._loop_task = asyncio.create_task(self._loop(), name="morning-market-brief-schedule")
 
     async def close(self):
@@ -106,7 +118,50 @@ class MorningMarketBrief:
                 pass  # Malformed data remains a processing failure, with its original receipt.
             else:
                 latest = {**latest, "result": result, "result_recovered_from_raw_response": True}
-        return {"run": latest, "context": context_from_run(latest, self.clock()), "history": runs}
+        cut = self.clock()
+        result = {"run": latest, "context": context_from_run(latest, cut), "history": runs}
+        if self._observation_max_age is not None:
+            comparison = self.market_comparison_at(cut)
+            result["market_comparison"] = comparison
+            premarket = comparison["premarket"]
+            if premarket and result["context"].get("run_id") == premarket["run_id"]:
+                result["context"]["consumer_binding"] = "market_comparison_advisory"
+        return result
+
+    def _load_premarket_run(self, cut):
+        rows = self.store.load_documents(RUNS_COLLECTION, cut.date().isoformat(), 100)
+        runs = (row["document"] for row in rows)
+        return max((run for run in runs if compare_market_hypothesis(
+            run, cut, {}, None, max_age_seconds=0)["premarket"] is not None),
+            key=lambda run: run["available_at"], default=None)
+
+    def market_comparison_at(self, cut):
+        if self._premarket_run is None:
+            return compare_market_hypothesis(None, cut, {}, None, max_age_seconds=0)
+        return compare_market_hypothesis(self._premarket_run, cut,
+            self._market_breadth() if self._market_breadth is not None else {},
+            self._top20_source() if self._top20_source is not None else None,
+            max_age_seconds=self._observation_max_age())
+
+    def compare_recorded_market(self, cut):
+        cut = as_kst(cut)
+        run = self._load_premarket_run(cut)
+        if run is None or self._observation_max_age is None:
+            return compare_market_hypothesis(None, cut, {}, None, max_age_seconds=0)
+        at = cut.timestamp()
+        day = cut.date().isoformat()
+        breadth = {}
+        for market in ("kospi", "kosdaq"):
+            for row in self.store.load_dataset_snapshots("market_state", market, 5000):
+                payload = row["payload"]
+                if row["snapshot_key"][:10] == day and row["saved_at"] <= at:
+                    if payload.get("breadth_observed_at"):
+                        breadth[market] = {**payload["value"], "observed_at": payload["breadth_observed_at"]}
+                    break
+        top20 = next((row for row in self.store.load_dataset_snapshots("top20_membership", day, 5000)
+                      if row["saved_at"] <= at), None)
+        return compare_market_hypothesis(run, cut, breadth, top20,
+            max_age_seconds=self._observation_max_age())
 
     async def request(self, *, manual=False):
         async with self._lock:
@@ -192,6 +247,9 @@ class MorningMarketBrief:
             self._diagnostics.update(elapsed_seconds=run["elapsed_seconds"], last_status=run["status"])
             await asyncio.to_thread(self.store.upsert_documents, RUNS_COLLECTION,
                 [{"owner": owner, "key": key, "document": run}])
+            if (self._observation_max_age is not None
+                    and compare_market_hypothesis(run, self.clock(), {}, None, max_age_seconds=0)["premarket"]):
+                self._premarket_run = run
 
     async def _loop(self):
         while not self._closing:
@@ -237,6 +295,12 @@ def create_morning_market_brief_router(runtime, authorize):
     @router.get("/api/v1/market/morning-brief")
     async def latest():
         return await runtime.latest()
+
+    @router.get("/api/v1/research/morning-market-comparison")
+    async def compare_recorded(as_of: datetime):
+        if as_of.tzinfo is None:
+            raise HTTPException(422, "as_of requires a timezone")
+        return await asyncio.to_thread(runtime.compare_recorded_market, as_of)
 
     @router.post("/api/v1/market/morning-brief/run", status_code=202)
     async def run():

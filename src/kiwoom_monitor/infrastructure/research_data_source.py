@@ -204,7 +204,7 @@ def prepare_development_partition(dataset: FrozenResearchDataset, partition: Dev
 
 
 def prepare_final_holdout_partition(dataset: FrozenResearchDataset, batch: FinalHoldoutBatchSpec,
-                                   *, checkpoint=lambda: None) -> FrozenResearchDataset:
+                                   *, checkpoint=lambda: None, allow_historical_reconstruction: bool = False) -> FrozenResearchDataset:
     """Project a verified full source; this private preparation is not an execution permit."""
     if not isinstance(batch, FinalHoldoutBatchSpec):
         raise ValueError('a locked final batch is required')
@@ -214,7 +214,11 @@ def prepare_final_holdout_partition(dataset: FrozenResearchDataset, batch: Final
         dataset.manifest.get('research_session_profile'), batch.session_profile,
     ):
         raise ValueError('final source session profile differs from the locked batch')
-    if (dataset.manifest.get('runtime_input_version') not in (None, 'continuous_bundle_replay/v1')
+    source_version = dataset.manifest.get('runtime_input_version')
+    historical = (allow_historical_reconstruction and source_version == 'historical_reconstruction_strategy/v1'
+                  and dataset.manifest.get('source_availability_preserved_in_payload') is True
+                  and dataset.manifest.get('not_contemporaneous_top20') is True)
+    if (source_version not in (None, 'continuous_bundle_replay/v1') and not historical
             or 'development_partition' in dataset.manifest or 'final_holdout_partition' in dataset.manifest):
         raise ValueError('final preparation requires the full frozen source')
     # Full source/candidate bindings belong to the outer batch ledger, never to engine input identity.

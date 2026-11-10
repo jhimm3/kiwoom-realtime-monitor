@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import sys
 from threading import Event
 from urllib.parse import urlsplit
 
@@ -53,6 +54,7 @@ class NaverNewsSettingsDialog(QDialog):
         super().__init__(parent)
         self._config = config
         self._operational_client = operational_client
+        self._local_plan_login = sys.platform == "win32" and getattr(operational_client, "is_local_server", False) is True
         self._operational_error = ""
         self._operations_worker: SettingsRequestWorker | None = None
         self._operations_baseline: dict[str, object] = {}
@@ -223,7 +225,8 @@ class NaverNewsSettingsDialog(QDialog):
         self._plan_refresh = QPushButton("계정별 모델 새로고침")
         self._plan_refresh.clicked.connect(lambda: self._plan_run("status"))
         self._plan_stop = QPushButton("로그인 취소")
-        self._plan_stop.clicked.connect(lambda: self._plan_cancel.set())
+        self._plan_stop.setEnabled(False)
+        self._plan_stop.clicked.connect(self._cancel_plan_login)
         self._plan_usage = QPushButton("ChatGPT 사용량 관리")
         self._plan_usage.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(USAGE_URL)))
         self._plan_box = QGroupBox("ChatGPT 구독 연결 · Windows")
@@ -239,10 +242,11 @@ class NaverNewsSettingsDialog(QDialog):
             plan_layout.addRow(widget)
         ai_layout.addRow(self._plan_box)
         if operational_client is not None:
-            self._plan_connect.setEnabled(False)
-            self._plan_add.setEnabled(False)
-            self._plan_connect.setText("NAS 연결은 이 PC에서 로그인한 뒤 이전합니다")
-            resume = QPushButton("NAS 자동 분석 재개")
+            if not self._local_plan_login:
+                self._plan_connect.setEnabled(False)
+                self._plan_add.setEnabled(False)
+                self._plan_connect.setText("NAS 연결은 이 PC에서 로그인한 뒤 이전합니다")
+            resume = QPushButton("자동 분석 재개" if self._local_plan_login else "NAS 자동 분석 재개")
             resume.clicked.connect(lambda: self._plan_run("resume"))
             plan_layout.addRow(resume)
         if self._section != "connections":
@@ -431,7 +435,6 @@ class NaverNewsSettingsDialog(QDialog):
         selected = self._ai_provider.currentData() == "chatgpt_plan"
         self._plan_box.setVisible(selected)
         self._ai_key.setEnabled(not selected)
-        self._plan_stop.setEnabled(self._plan_worker is not None)
         if selected and self._plan_worker is None:
             self._plan_run("status")
 
@@ -441,6 +444,14 @@ class NaverNewsSettingsDialog(QDialog):
     def _plan_select_account(self, _index: int) -> None:
         self._plan_saved_model = ""
         self._plan_run("select", str(self._plan_account.currentData() or ""))
+
+    def _cancel_plan_login(self) -> None:
+        self._plan_cancel.set()
+        if self._local_plan_login and self._plan_stop.isEnabled():
+            self._plan_stop.setEnabled(False)
+            worker = SettingsRequestWorker(self._operational_client.cancel_local_chatgpt_login, self)
+            worker.failed.connect(self._plan_status.setText)
+            worker.start()
 
     def _plan_run(self, action: str, account_id: str = "") -> None:
         if self._closed or self._plan_worker is not None:
@@ -460,14 +471,16 @@ class NaverNewsSettingsDialog(QDialog):
             revoked = None
             if self._operational_client is not None:
                 client = self._operational_client
-                if action in {"select", "disconnect", "resume"}:
+                if action == "connect" and self._local_plan_login:
+                    client.connect_local_chatgpt(account_id)
+                elif action in {"select", "disconnect", "resume"}:
                     result = client.chatgpt_change(action, account_id)
                     revoked = result.get("revocation_confirmed") if action == "disconnect" else None
                 status = client.chatgpt_status()
                 active = next((item for item in status["accounts"] if item["id"] == status["active"]), {})
                 models = client.chatgpt_models() if active.get("connected") and active.get("permitted") else ()
                 return {"status": status, "models": models,
-                        "message": "NAS 자동 분석 중지 · 재개 버튼으로 다시 시작하세요." if status.get("paused") else "",
+                        "message": "자동 분석 중지 · 재개 버튼으로 다시 시작하세요." if status.get("paused") else "",
                         "first": False, "revoked": revoked}
             if action == "connect":
                 auth.connect(cancel, account_id=account_id)
@@ -501,7 +514,7 @@ class NaverNewsSettingsDialog(QDialog):
         self._plan_worker = None
         for widget in (self._plan_account, self._plan_connect, self._plan_add, self._plan_disconnect, self._plan_refresh):
             widget.setEnabled(True)
-        if self._operational_client is not None:
+        if self._operational_client is not None and not self._local_plan_login:
             self._plan_connect.setEnabled(False)
             self._plan_add.setEnabled(False)
         self._plan_stop.setEnabled(False)
@@ -818,7 +831,7 @@ class NaverNewsSettingsDialog(QDialog):
         self._closed = True
         errors: list[BaseException] = []
         try:
-            self._plan_cancel.set()
+            self._cancel_plan_login()
         except BaseException as error:
             errors.append(error)
         for worker in self.findChildren(SettingsRequestWorker, options=Qt.FindChildOption.FindDirectChildrenOnly):

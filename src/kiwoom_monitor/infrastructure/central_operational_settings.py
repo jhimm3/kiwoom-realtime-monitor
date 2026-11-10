@@ -21,6 +21,10 @@ class CentralOperationalSettingsClient:
         self._revision: int | None = None
         self._ram_shadow_revision: int | None = None
 
+    @property
+    def is_local_server(self) -> bool:
+        return self._source.mode == "local_server"
+
     def load(self) -> dict[str, object]:
         return self._request("GET")
 
@@ -63,6 +67,12 @@ class CentralOperationalSettingsClient:
         value = self._request("GET", path="/api/v1/news/chatgpt/models")
         return tuple((str(item["label"]), str(item["slug"])) for item in value["models"])
 
+    def connect_local_chatgpt(self, account_id: str):
+        return self._request("POST", {"account_id": account_id}, path="/api/v1/news/chatgpt/connect", timeout=300)
+
+    def cancel_local_chatgpt_login(self):
+        return self._request("POST", path="/api/v1/news/chatgpt/connect/cancel")
+
     def chatgpt_change(self, action: str, account_id: str = "") -> dict[str, object]:
         if action not in {"select", "disconnect", "resume"}:
             raise ValueError("지원하지 않는 ChatGPT 연결 작업입니다.")
@@ -70,7 +80,7 @@ class CentralOperationalSettingsClient:
                              path=f"/api/v1/news/chatgpt/{action}")
 
     def _request(self, method: str, body: dict[str, object] | None = None,
-                 *, path: str = "/api/v1/settings/operations") -> dict[str, object]:
+                 *, path: str = "/api/v1/settings/operations", timeout: float = 10) -> dict[str, object]:
         if not self._source.server_url or not self._source.access_token:
             raise ValueError("NAS 주소와 접속 토큰을 입력하세요.")
         request = Request(
@@ -83,13 +93,22 @@ class CentralOperationalSettingsClient:
             },
         )
         try:
-            with urlopen(request, timeout=10, context=system_ssl_context()) as response:
+            with urlopen(request, timeout=timeout, context=system_ssl_context()) as response:
                 result = json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
             if error.code == 404 and path.startswith("/api/v1/market/morning-brief"):
                 raise RuntimeError("현재 NAS에 아침 시황 기능이 아직 설치되지 않았습니다. 준비된 NAS 업데이트를 먼저 적용하세요.") from error
             if error.code == 409:
+                if path == "/api/v1/news/chatgpt/connect":
+                    raise RuntimeError("로컬 서버에서 ChatGPT 연결 작업이 진행 중입니다.") from error
                 raise RuntimeError("NAS 설정이 다른 화면에서 변경되었습니다. 다시 불러온 뒤 저장하세요.") from error
+            if error.code == 503 and path == "/api/v1/news/chatgpt/connect":
+                try:
+                    response = json.loads(error.read(4096))
+                except (OSError, ValueError):
+                    response = None
+                if isinstance(response, dict) and isinstance(response.get("detail"), str):
+                    raise RuntimeError(response["detail"]) from error
             raise RuntimeError(f"NAS 운영 설정을 처리하지 못했습니다: HTTP {error.code}") from error
         except (URLError, TimeoutError, OSError) as error:
             raise RuntimeError(f"NAS 운영 설정을 처리하지 못했습니다: {error}") from error

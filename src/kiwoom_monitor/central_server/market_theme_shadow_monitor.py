@@ -462,6 +462,20 @@ class MarketThemeShadowRuntime:
                               "coalesced": self._record_coalesced, "last_error": self._record_error,
                               "interval_seconds": self._record_interval}}
 
+    def entry_market_features(self, cut):
+        candidates = []
+        for monitor in self._monitors:
+            result = monitor._result
+            if result is None:
+                continue
+            context = result["context"] if monitor._stock_thesis is not None else result
+            market = context["market"]
+            if market.get("available_at") and market.get("expires_at"):
+                available = datetime.fromisoformat(market["available_at"])
+                if available <= cut < datetime.fromisoformat(market["expires_at"]):
+                    candidates.append((available, context["revision_id"], market))
+        return deepcopy(max(candidates, key=lambda row: row[:2])[2]) if candidates else None
+
     @property
     def latest_results(self):
         """Copied bounded live results; shared context appears once in the envelope."""

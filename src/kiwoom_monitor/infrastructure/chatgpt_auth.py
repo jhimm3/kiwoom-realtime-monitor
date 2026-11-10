@@ -18,6 +18,7 @@ import time
 import uuid
 import webbrowser
 from contextlib import contextmanager
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -27,12 +28,29 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, HTTPSHand
 from kiwoom_monitor.infrastructure.app_paths import AppPaths
 from kiwoom_monitor.infrastructure.kiwoom_rest.local_config import _protect, _unprotect
 from kiwoom_monitor.infrastructure.system_ssl import system_ssl_context
+from kiwoom_monitor.domain.time_basis import KST, as_kst
 
 ISSUER = "https://auth.openai.com"
 RESOURCE = "https://api.openai.com/v1"
 DIRECT_SCOPE = "chatgpt.tokens.use.direct"
 SCOPES = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
 USAGE_URL = "https://chatgpt.com/settings/usage"
+DAILY_USAGE_PAUSE = "subscription_sharing_usage_limit_exceeded"
+DAILY_RETRY_PAUSES = frozenset({DAILY_USAGE_PAUSE, "timeout"})
+
+
+def analysis_pause_for_day(code: str, paused_on: str | None, today: date) -> str:
+    if code not in DAILY_RETRY_PAUSES:
+        return code
+    if paused_on is None:
+        # An undated record from an older build gets one retry under the new policy.
+        return ""
+    try:
+        return code if date.fromisoformat(paused_on) >= today else ""
+    except (ValueError, TypeError):
+        return code
+
+
 _TERMINAL_REFRESH = frozenset({"invalid_grant", "invalid_refresh_token", "token_expired",
     "refresh_token_expired", "refresh_token_invalidated", "refresh_token_reused"})
 _ERROR_CODES = _TERMINAL_REFRESH | frozenset({"invalid_client", "access_denied",
@@ -319,8 +337,10 @@ def _token_record(tokens: dict, *, client_id: str, host_id: str, claims: dict, o
 
 
 class ChatGPTAuth:
-    def __init__(self, store: ChatGPTCredentialStore, *, opener=open_request, browser=webbrowser.open):
+    def __init__(self, store: ChatGPTCredentialStore, *, opener=open_request, browser=webbrowser.open,
+                 now_provider=None):
         self.store, self.opener, self.browser = store, opener, browser
+        self._now = now_provider or (lambda: datetime.now(KST))
 
     def _discovery(self) -> dict:
         value = _json_request(Request(ISSUER + "/.well-known/openid-configuration"), self.opener)
@@ -347,12 +367,17 @@ class ChatGPTAuth:
                 "permitted": DIRECT_SCOPE in account.get("scopes", [])})
         return {"active": value.get("active", ""), "accounts": accounts,
                 "generation": int(value.get("generation", 0)),
-                "pause_code": str(value.get("analysis_pause", ""))}
+                 "pause_code": analysis_pause_for_day(str(value.get("analysis_pause", "")),
+                     value.get("analysis_pause_day"), as_kst(self._now()).date())}
 
     def pause_analysis(self, code: str = "") -> None:
         with self.store.locked():
             value = self.store.load()
             value["analysis_pause"] = ChatGPTPlanError(code).code if code else ""
+            if value["analysis_pause"] in DAILY_RETRY_PAUSES:
+                value["analysis_pause_day"] = as_kst(self._now()).date().isoformat()
+            else:
+                value.pop("analysis_pause_day", None)
             self.store.save(value)
 
     def select(self, client_id: str) -> dict:
@@ -494,6 +519,7 @@ class ChatGPTAuth:
                 raise ChatGPTPlanError("cancelled")
             value["accounts"][issued] = _token_record(tokens, client_id=issued, host_id=value["host_id"], claims=claims, old=old or existing)
             value["active"] = issued
+            value["generation"] = time.time_ns()
             value.pop("pending_client_id", None)
             self.store.save(value)
             _ROTATION_UNSAVED.discard(self.store._key)

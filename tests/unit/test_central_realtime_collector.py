@@ -5,6 +5,7 @@ import asyncio
 import json
 import tempfile
 import time
+from contextlib import closing
 from copy import deepcopy
 from threading import Event
 from datetime import datetime, timedelta, timezone
@@ -1175,6 +1176,60 @@ class CentralRealtimeCollectorTests(unittest.TestCase):
         self.assertEqual(TradingVenue.KRX, metadata.venue)
         self.assertEqual(ObservationOrigin.REALTIME, metadata.origin)
         self.assertEqual(CandidateUniverse.MARKET_ALL, metadata.candidate_universe)
+
+    def test_market_state_keeps_same_day_counts_in_either_message_order(self) -> None:
+        markets = {"001": ("kospi", 340, 530, 42), "101": ("kosdaq", 958, 698, 0)}
+        count_fields = ("advancing_count", "declining_count", "flat_count")
+        for order in (("0U", "0J"), ("0J", "0U")):
+            with (
+                self.subTest(order=order), tempfile.TemporaryDirectory() as directory,
+                closing(SQLiteQueryStore(Path(directory) / "monitor.sqlite3")) as store,
+            ):
+                store.initialize()
+                now = datetime(2026, 9, 10, 10, 15, 30, tzinfo=timezone(timedelta(hours=9)))
+                collector = CentralRealtimeCollector(lambda: "token", "real", RealtimeHub(), lambda: now, store)
+
+                def receive(kind: str) -> None:
+                    rows = []
+                    for code, (_, up, down, flat) in markets.items():
+                        values = {"20": now.strftime("%H%M%S"), "10": "+2800.00", "12": "+1.25"}
+                        if kind == "0U":
+                            values.update({"252": str(up), "255": str(down), "253": str(flat)})
+                        else:
+                            values["14"] = "100000" if code == "001" else "200000"
+                        rows.append({"type": kind, "item": code, "values": values})
+                    collector._publish_parsed({"trnm": "REAL", "data": rows})
+
+                def assert_saved_counts(*, counts_available: bool) -> None:
+                    initial = {
+                        event["payload"]["market"]: event["payload"]
+                        for event in collector.initial_realtime_snapshots([], [])
+                    }
+                    for market, up, down, flat in markets.values():
+                        with self.subTest(market=market, minute=now.isoformat()):
+                            expected = (up, down, flat) if counts_available else (None, None, None)
+                            latest = store.load_dataset_snapshots("market_state", market, limit=1)[0]
+                            self.assertEqual(now.strftime("%Y-%m-%dT%H:%M"), latest["snapshot_key"])
+                            self.assertEqual(expected, tuple(latest["payload"]["value"][key] for key in count_fields))
+                            self.assertEqual(expected, tuple(initial[market][key] for key in count_fields))
+
+                for kind in order:
+                    receive(kind)
+                self.assertEqual({market: {"cumulative_trade_value_million_won": amount, "observed_at": now.isoformat()}
+                                  for market, amount in (("kospi", 100_000), ("kosdaq", 200_000))},
+                                 collector.market_turnover_snapshot())
+                asyncio.run(collector._flush_snapshots())
+                assert_saved_counts(counts_available=True)
+
+                now += timedelta(minutes=1)
+                receive("0J")
+                asyncio.run(collector._flush_snapshots())
+                assert_saved_counts(counts_available=True)
+
+                now += timedelta(days=1)
+                receive("0J")
+                asyncio.run(collector._flush_snapshots())
+                assert_saved_counts(counts_available=False)
 
     def test_0g_reference_is_published_and_saved_as_latest_basis(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

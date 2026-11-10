@@ -409,6 +409,7 @@ async def assemble_parallel_runtime(case, data, *, admit):
         price_source=lambda symbol: data.quotes.get(symbol),
         nxt_price_source=lambda symbol: data.nxt_quotes.get(symbol),
         leader_context_source=lambda spec_id=None: data.live if spec_id in (None, data.specs[0].spec_id) else None,
+        market_comparison=getattr(data, 'market_comparison', None),
         now_provider=lambda: data.clock[0]) for spec, admission in zip(data.specs, admissions, strict=True))
     for episode in episodes:
         episode.prepare_restore()
@@ -892,6 +893,21 @@ async def verify_parallel_late_fill_restart_resume(case, factory=None):
 
 
 class ParallelStrategyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_market_comparison_is_visible_on_both_actual_entry_paths_without_changing_orders(self):
+        data = parallel_ready_inputs(self, close_symbol='000660')
+        data.market_comparison = lambda cut: {
+            'status': 'CONTRADICTED', 'as_of': cut.isoformat(), 'advisory_only': True}
+        await assemble_parallel_runtime(self, data, admit=True)
+        data.clock[0] = max(data.clock[0], datetime.fromisoformat(data.example.signal.bar_end) + timedelta(minutes=1))
+        await deliver_price(data, 990)
+        publish_current_close_minute(data)
+        await deliver_price(data, 1001)
+        for index, (symbol, quantity) in enumerate((('005930', 2), ('000660', 4))):
+            entry, = member_records(data, index, side='BUY')
+            self.assertEqual((symbol, quantity), (entry.intent.symbol, entry.intent.quantity))
+            evidence = data.episodes[index].status['entry_market_comparison']
+            self.assertEqual((symbol, 'CONTRADICTED'), (evidence['symbol'], evidence['status']))
+
     async def test_sor_amends_the_physical_nxt_and_krx_orders_after_reopening(self):
         from kiwoom_monitor.infrastructure.persistence.execution_repository import execution_broker_legs, execution_broker_venue
 

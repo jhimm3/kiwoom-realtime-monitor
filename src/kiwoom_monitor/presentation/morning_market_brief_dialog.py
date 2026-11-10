@@ -1,14 +1,16 @@
-"""Non-modal NAS morning brief reader and prompt editor."""
+"""Non-modal morning brief reader and prompt editor."""
 from __future__ import annotations
 
+import json
 from html import escape
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import QTime, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel,
+    QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
     QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QTextBrowser,
     QTimeEdit, QVBoxLayout, QWidget,
 )
@@ -17,6 +19,8 @@ from kiwoom_monitor.infrastructure.chatgpt_plan import reasoning_choices
 from kiwoom_monitor.domain.news_ai_contract import MODEL_OPTIONS
 from kiwoom_monitor.presentation.settings_request_worker import SettingsRequestWorker
 from kiwoom_monitor.infrastructure.time_display import format_kst_time
+
+_PORTABLE_SETTINGS = ("enabled", "time", "prompt")
 
 
 class MorningMarketBriefDialog(QDialog):
@@ -30,7 +34,9 @@ class MorningMarketBriefDialog(QDialog):
         self._models = ()
         self._loading = False
         self._settings = dict(DEFAULT_SETTINGS)
-        self._status = QLabel("NAS 설정을 불러옵니다.")
+        local_server = getattr(client, "is_local_server", False) is True
+        self._server_label = "로컬 서버" if local_server else "NAS"
+        self._status = QLabel(f"{self._server_label} 설정을 불러옵니다.")
         self._tabs = QTabWidget()
         self._report = QTextBrowser()
         self._rendered_report = None
@@ -50,7 +56,10 @@ class MorningMarketBriefDialog(QDialog):
 
         panel = QWidget()
         form = QFormLayout(panel)
-        guide = QLabel("매일 정한 한국 시각에 AI가 직접 웹 검색·분석합니다. NAS에 결과를 한 번 저장하고 앱이 공유합니다.\n프롬프트를 바꿔도 결과의 기준 시각·출처·유효기간은 함께 저장합니다.")
+        guide = QLabel(f"매일 정한 한국 시각에 AI가 직접 웹 검색·분석하고 {self._server_label}에 결과를 저장합니다.\n"
+                       "프롬프트를 바꿔도 결과의 기준 시각·출처·유효기간은 함께 저장합니다.")
+        if local_server:
+            guide.setText(guide.text() + "\nChatGPT 구독 로그인은 뉴스 API 연결 화면에서 할 수 있습니다.")
         guide.setWordWrap(True)
         form.addRow(guide)
         self._enabled = QCheckBox("매일 자동 생성")
@@ -83,6 +92,13 @@ class MorningMarketBriefDialog(QDialog):
         self._save = QPushButton("설정 저장")
         self._save.clicked.connect(self.save)
         form.addRow(reset, self._save)
+        export = QPushButton("저장된 프롬프트·예약 내보내기")
+        export.clicked.connect(self._export_settings)
+        form.addRow(export)
+        if local_server:
+            restore = QPushButton("프롬프트·예약 가져오기")
+            restore.clicked.connect(self._import_settings)
+            form.addRow(restore)
         self._tabs.addTab(panel, "프롬프트·모델·예약")
         layout = QVBoxLayout(self)
         layout.addWidget(self._tabs)
@@ -104,7 +120,7 @@ class MorningMarketBriefDialog(QDialog):
             return
         self._run.setEnabled(False)
         self._save.setEnabled(False)
-        self._status.setText("NAS 처리 중…")
+        self._status.setText(f"{self._server_label} 처리 중…")
         worker = SettingsRequestWorker(operation)
         self._worker = worker
         worker.succeeded.connect(success)
@@ -125,7 +141,7 @@ class MorningMarketBriefDialog(QDialog):
                 models = self._client.chatgpt_models()
                 model_error = ""
             except Exception:
-                models, model_error = (), "ChatGPT 모델 조회 전 · 뉴스 AI 설정에서 NAS 연결을 확인하세요."
+                models, model_error = (), "ChatGPT 모델 조회 전 · 뉴스 API 연결에서 ChatGPT 연결을 확인하세요."
             return settings, models, model_error, self._client.morning_brief()
         self._request(get, self._loaded)
 
@@ -146,7 +162,7 @@ class MorningMarketBriefDialog(QDialog):
         self._prompt.setPlainText(settings["prompt"])
         self._loading = False
         self._show_report(report)
-        self._status.setText(model_error or "NAS 설정을 불러왔습니다.")
+        self._status.setText(model_error or f"{self._server_label} 설정을 불러왔습니다.")
 
     def _populate_models(self, *_):
         self._model.clear()
@@ -168,6 +184,46 @@ class MorningMarketBriefDialog(QDialog):
         for effort in reasoning_choices(str(self._model.currentData() or "")):
             self._effort.addItem(effort, effort)
         self._effort.setCurrentIndex(max(0, self._effort.findData(previous)))
+
+    def _export_settings(self):
+        if self._revision is None or self._worker is not None:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "시황 설정 내보내기", "morning-brief-settings.json", "JSON (*.json)")
+        if not path:
+            return
+        values = {key: self._settings[key] for key in _PORTABLE_SETTINGS}
+        try:
+            Path(path).write_text(json.dumps(values, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            self._status.setText("시황 설정 파일을 저장하지 못했습니다.")
+        else:
+            self._status.setText("저장된 프롬프트와 예약을 내보냈습니다.")
+
+    def _import_settings(self):
+        if (getattr(self._client, "is_local_server", False) is not True
+                or self._revision is None or self._worker is not None):
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "시황 설정 가져오기", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            values = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+            if not isinstance(values, dict) or values.keys() != set(_PORTABLE_SETTINGS):
+                raise ValueError()
+            time, prompt = values["time"], values["prompt"]
+            if (type(values["enabled"]) is not bool or not isinstance(time, str)
+                    or not isinstance(prompt, str) or len(prompt.strip()) < 50 or len(prompt) > 30_000):
+                raise ValueError()
+            schedule = QTime.fromString(time, "HH:mm")
+            if not schedule.isValid() or schedule.toString("HH:mm") != time:
+                raise ValueError()
+        except (OSError, ValueError):
+            self._status.setText("시황 설정 파일의 프롬프트와 예약을 확인하세요.")
+            return
+        self._enabled.setChecked(values["enabled"])
+        self._time.setTime(schedule)
+        self._prompt.setPlainText(prompt)
+        self._status.setText("가져온 프롬프트와 예약을 확인한 뒤 설정 저장을 누르세요.")
 
     def save(self):
         if self._revision is None:
@@ -211,13 +267,26 @@ class MorningMarketBriefDialog(QDialog):
             lines.append(f"<p>{label}: {escape(status)} · {escape(error)}</p>")
             if status == "running":
                 lines.append("<p>재시작 뒤에도 이 상태라면 이전 요청의 완료 여부가 미확인입니다. 자동 재요청하지 않습니다.</p>")
+        comparison = report.get("market_comparison")
+        if isinstance(comparison, dict):
+            label = {"SUPPORTED": "장전 방향과 일치", "CONTRADICTED": "장전 방향과 반대"}.get(
+                comparison.get("status"), "미확인")
+            lines.append(f"<p>장중 대조 · {label}</p>")
+            for key, name in (("kospi", "코스피"), ("kosdaq", "코스닥"), ("top20", "TOP20")):
+                row = comparison["observations"].get(key)
+                counts = (f"상승 {row['up']} · 하락 {row['down']}" if row else "미확인")
+                lines.append(f"<p>{name} · {counts}</p>")
         if run.get("result"):
             result = run["result"]
             if run.get("result_recovered_from_raw_response"):
                 lines.append("<p>보존된 응답을 연구 자료로 조회했습니다. 원래 실패 기록은 유지하며 새 AI 호출은 없습니다.</p>")
             current = result.get("schema") in {"morning-market-brief-v3", "morning-market-brief-v4"}
             lines.append("<p>아래 수치·사실·열람 표기는 모델이 반환한 연구 자료입니다. 확인 부족·상충 사항은 누락·미확인 정보에 함께 표시합니다.</p>")
-            lines.append("<p>장전 초기 가설 · 장중 검증 전 · 판단엔진 연결 전</p>" if result.get("schema") == "morning-market-brief-v4" else "<p>이전 계약 보고서 · 현재 엔진 입력에서 제외</p>")
+            if result.get("schema") == "morning-market-brief-v4":
+                binding = "" if isinstance(comparison, dict) else " · 이 서버는 판단엔진 연결 전"
+                lines.append(f"<p>장전 초기 가설{binding}</p>")
+            else:
+                lines.append("<p>이전 계약 보고서 · 현재 엔진 입력에서 제외</p>")
             lines.append("<p>" + escape(result["evidence_summary"] if current else result.get("summary", "")).replace("\n", "<br>") + "</p>")
             evidence = {item["evidence_id"]: item for item in result.get("evidence", [])}
             def links_for(refs):
@@ -299,7 +368,7 @@ class MorningMarketBriefDialog(QDialog):
 
     def closeEvent(self, event):
         if self._worker is not None:
-            self._status.setText("진행 중인 NAS 요청이 끝나면 닫을 수 있습니다.")
+            self._status.setText(f"진행 중인 {self._server_label} 요청이 끝나면 닫을 수 있습니다.")
             event.ignore()
             return
         self._timer.stop()

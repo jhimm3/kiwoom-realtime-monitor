@@ -25,19 +25,26 @@ def main() -> None:
     parser.add_argument("--parent-pid", type=int, default=0)
     parser.add_argument("--shutdown-event", default="")
     parser.add_argument("--local-mock-automation", action="store_true")
+    parser.add_argument("--local-chatgpt-config", default="")
     arguments, _ = parser.parse_known_args()
     if arguments.shutdown_event and (os.name != "nt" or arguments.parent_pid <= 0):
         parser.error("--shutdown-event requires an owned Windows child")
     settings = CentralServerSettings.from_environment()
-    if arguments.local_mock_automation:
+    if arguments.local_mock_automation or arguments.local_chatgpt_config:
         if arguments.parent_pid <= 0 or settings.host != "127.0.0.1" or not settings.database_url.startswith("sqlite:///"):
-            parser.error("--local-mock-automation requires an owned loopback server with local SQLite")
+            parser.error("local desktop features require an owned loopback server with local SQLite")
         database_path = Path(settings.database_url.removeprefix("sqlite:///"))
         if not database_path.is_absolute():
-            parser.error("--local-mock-automation requires an absolute SQLite path")
+            parser.error("local desktop features require an absolute SQLite path")
+    if arguments.local_mock_automation:
         settings = replace(settings, local_mock_credential_directory=str(
             database_path.with_name(database_path.name + ".mock-credentials"),
         ))
+    if arguments.local_chatgpt_config:
+        config_path = Path(arguments.local_chatgpt_config)
+        if os.name != "nt" or not config_path.is_absolute():
+            parser.error("--local-chatgpt-config requires an absolute Windows configuration path")
+        settings = replace(settings, local_chatgpt_config_path=str(config_path))
     configure_server_logging(
         Path(os.environ.get("CENTRAL_SERVER_LOG_DIR", "data/logs")),
         retention_days=_log_retention_days(),

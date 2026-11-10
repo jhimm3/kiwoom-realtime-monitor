@@ -261,7 +261,7 @@ class ResearchReplayCursor:
         return (tuple(sorted(self.latest.values(), key=lambda row: (row.bar_start, row.code, row.revision_id))),
                 tuple(self.universe))
 
-    def advance_for_observation(self, observation):
+    def advance_for_observation(self, observation, *, recent_first=False):
         """Return the current bar and only same-code, same-day factor history."""
         self._advance_state(_revision_order(observation))
         key = (str(observation.get('subject', '')), str(observation.get('observation_key', '')))
@@ -269,6 +269,8 @@ class ResearchReplayCursor:
         if current is None or current.revision_id != str(observation.get('revision_id', '')):
             return None, (), tuple(self.universe)
         group = self._bar_group(current)
+        if recent_first:
+            return current, reversed(self.latest_by_code_day[group].values()), tuple(self.universe)
         return current, self.bars_for_date(*group), tuple(self.universe)
 
     def bars_for_date(self, code: str, trading_date: date) -> tuple[KrxMinuteBarFrame, ...]:

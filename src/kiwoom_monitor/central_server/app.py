@@ -664,8 +664,9 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                 roll_confirmations=int(operational["external_market_roll_confirmations"]),
                 **diagnostic_inputs.get("external_market", {}),
             )
-        from .chatgpt_sessions import nas_chatgpt_auth
-        chatgpt_auth = nas_chatgpt_auth(active.credential_directory)
+        from .chatgpt_sessions import server_chatgpt_auth
+        chatgpt_auth = server_chatgpt_auth(active.credential_directory,
+                                           local_config_path=active.local_chatgpt_config_path, now_provider=server_now)
         if active.ai_configured or (credential_runtime is not None and not local_mock) or chatgpt_auth is not None:
             from .ai_service import CentralAIService
             ai_service = CentralAIService(active, store, chatgpt_auth=chatgpt_auth, now_provider=server_now)
@@ -680,6 +681,10 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                     credential_runtime.register(provider, owner.hooks())
         from .morning_market_brief import MorningMarketBrief, create_morning_market_brief_router
         morning_brief = MorningMarketBrief(store, ai_service, clock=server_now,
+                                          market_breadth=collector.market_breadth_snapshot if collector is not None else None,
+                                          top20_source=top20_service.latest_membership_snapshot if top20_service is not None else None,
+                                          observation_max_age=lambda: int(operational_state.settings[
+                                              "shadow_candidate_universe_max_age_seconds"]),
                                           **diagnostic_inputs.get("morning_brief", {}))
         if bool(operational["shadow_candidate_enabled"]):
             from .candidate_monitor import CandidateMonitor
@@ -766,14 +771,27 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             news_job_runner.set_ai_service(ai_service)
         if mock_owner is not None:
             from .mock_automation_supervisor import MockAutomationSupervisor
+            from kiwoom_monitor.application.market_entry import market_entry_context
             from kiwoom_monitor.domain.strategy_contract import shadow_candidate_config_for_spec
             def leader_context_source(spec_id=None):
                 return {"policy": shadow_candidate_config_for_spec(operational_state.settings, spec_id),
                     "enabled": operational_state.settings.get('shadow_candidate_enabled') is True,
                     "revision": operational_state.applied_revision}
+
+            def entry_market_comparison(cut):
+                comparison = morning_brief.market_comparison_at(cut)
+                shadow = ram_shadow_session.runtime
+                context = market_entry_context(cut, comparison,
+                    collector.market_turnover_snapshot() if collector is not None else {},
+                    shadow.entry_market_features(cut) if shadow is not None else None,
+                    market_breadth=collector.market_breadth_snapshot() if collector is not None else {},
+                    max_age_seconds=int(operational_state.settings["shadow_candidate_universe_max_age_seconds"]))
+                return {**comparison, "entry_context": context}
+
             mock_automation_supervisor = MockAutomationSupervisor(store, mock_owner,
                 now_provider=server_now,
                 leader_context_source=leader_context_source,
+                market_comparison=entry_market_comparison,
                 minute_candidate_current=minute_candidate_current,
                 close_calendar=close_calendar_for_management,
                 expected_implementation_hash=(selected_research_artifact.expected_implementation_hash
@@ -1327,7 +1345,8 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
 
         app.include_router(create_news_analysis_router(ai_service, authorize))
         from .chatgpt_sessions import create_chatgpt_session_router
-        app.include_router(create_chatgpt_session_router(ai_service, authorize))
+        app.include_router(create_chatgpt_session_router(
+            ai_service, authorize, local_login=bool(active.local_chatgpt_config_path and chatgpt_auth is not None)))
 
         from .historical_news_processing_routes import create_historical_news_processing_router
 

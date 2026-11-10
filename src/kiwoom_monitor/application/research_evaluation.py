@@ -2458,6 +2458,7 @@ def build_research_report(
     spec: ResearchEvaluationSpec,
     logical_result_hash: str,
     evaluated_final_holdout: bool = False,
+    require_candidate_universe: bool = True,
 ) -> ResearchReport:
     """한 불변 run을 시간순 fold별로 평가하며 경계 표본을 명시적으로 제외한다."""
     if type(evaluated_final_holdout) is not bool:
@@ -2476,7 +2477,8 @@ def build_research_report(
     decision_rows = tuple(dict(row) for row in decisions)
     event_rows = tuple(_document(row) for row in execution_events)
     label_rows = tuple(_document(row) for row in outcome_labels)
-    quality = _data_quality(input_manifest, observation_rows, spec, logical_result_hash)
+    quality = _data_quality(input_manifest, observation_rows, spec, logical_result_hash,
+                            require_candidate_universe=require_candidate_universe)
     if evaluated_final_holdout:
         quality["evaluation_scope"] = "independent_final_holdout/v1"
     cost_reasons = _cost_model_reasons(cost_model, spec)
@@ -2993,7 +2995,7 @@ def _maximum_drawdown(
 
 def _data_quality(
     manifest: Mapping[str, Any], observations: tuple[Mapping[str, Any], ...],
-    spec: ResearchEvaluationSpec, logical_result_hash: str,
+    spec: ResearchEvaluationSpec, logical_result_hash: str, *, require_candidate_universe: bool = True,
 ) -> Mapping[str, Any]:
     minute = tuple(row for row in observations if row.get("kind") == "minute_bar")
     historical_reconstruction = _historical_reconstruction_input(manifest)
@@ -3010,7 +3012,7 @@ def _data_quality(
     reasons: list[str] = []
     if not strict:
         reasons.append("strict_krx_minute_bars_missing")
-    if not universe:
+    if require_candidate_universe and not universe:
         reasons.append("candidate_universe_missing")
     if historical_reconstruction and manifest.get("not_contemporaneous_top20") is not True:
         reasons.append("historical_population_boundary_missing")
@@ -3028,7 +3030,8 @@ def _data_quality(
         for row in observations if row.get("available_at")
     ]
     warmup_covered = bool(available_times) and min(available_times) <= warmup_start(spec)
-    if manifest.get('development_partition') is not None:
+    if (manifest.get('development_partition') is not None
+            or not require_candidate_universe and manifest.get('final_holdout_partition') is not None):
         # Universe seeds and backfills received after active start cannot prove bar warmup.
         lower = warmup_start(spec)
         active = _aware_datetime(spec.folds[0].start).astimezone(timezone.utc)
@@ -3047,6 +3050,7 @@ def _data_quality(
         "strict_krx_minute_bar_revision_count": len(strict),
         "excluded_minute_bar_revision_count": len(minute) - len(strict),
         "candidate_universe_revision_count": len(universe),
+        **({} if require_candidate_universe else {"candidate_population": "frozen_krx_minute_coverage"}),
         "reproducibility": "VERIFIED" if reproducible else "UNVERIFIED",
     }
 

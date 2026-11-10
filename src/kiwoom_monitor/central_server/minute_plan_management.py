@@ -21,13 +21,16 @@ class MinutePlanManagement:
     """Own the Shadow cursor and retained plan inputs, without a worker or order authority."""
 
     def __init__(self, store, bundle, spec, repository, *, parameters, price_source, now_provider,
-                 family='close_betting/v1', candidate_current=None, close_calendar=None, nxt_price_source=None):
+                 family='close_betting/v1', candidate_current=None, close_calendar=None, nxt_price_source=None,
+                 observe_entry_market=None, prepare_entry_market=None):
         self._store, self._bundle, self._spec, self._repository = store, bundle, spec, repository
         self._parameters, self._price, self._now = parameters, price_source, now_provider
         self._nxt_price = nxt_price_source
         self._family = family
         self._candidate_current = candidate_current if family in {'close_betting/v1', 'ipo_close/v1', 'ipo_breakout/v1'} else None
         self._close_calendar = close_calendar
+        self._observe_entry_market = observe_entry_market
+        self._prepare_entry_market = prepare_entry_market
         self._panic = family == 'panic_rebound/v1'
         if self._panic:
             import kiwoom_monitor.application.panic_mock_execution as adapter
@@ -415,6 +418,8 @@ class MinutePlanManagement:
             return 0
         self.status = {'state': 'RUNNING', 'reason': f'awaiting_new_{self._tag}_shadow', 'orders_enabled': False}
         page = await drain_thread_call(self._store.load_shadow_candidates, self._cursor, limit)
+        entry_market = (self._prepare_entry_market(self._now())
+                        if self._prepare_entry_market is not None and page['events'] else None)
         consumed = 0
         for event in page['events']:
             try:
@@ -435,6 +440,8 @@ class MinutePlanManagement:
                                 self._cursor = event['accepted_sequence']
                                 consumed += 1
                                 continue
+                            if self._observe_entry_market is not None:
+                                self._observe_entry_market(event["symbol"], entry_market)
                             with self._state_lock: self._pending_entry = frozen_minute_candidate(event)
                             try:
                                 dispatch = self._adapter.dispatch_panic_entry if self._panic else self._adapter.dispatch_close_entry

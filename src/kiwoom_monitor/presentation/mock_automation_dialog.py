@@ -1382,6 +1382,29 @@ class MockAutomationDialog(QDialog):
             runner_state = ("계좌 공통 실행" if isinstance(runner, dict)
                             and runner.get("version") == "mock_automation_account_runner_status/v1" else
                             runner.get("state") if isinstance(runner, dict) else "없음")
+            market_text = ""
+            if isinstance(runner, dict):
+                comparisons = [member.get("entry_market_comparison")
+                               for member in runner.get("members", (runner,))]
+                latest_market = max((row for row in comparisons if isinstance(row, dict)),
+                                    key=lambda row: row["as_of"], default=None)
+                if latest_market is not None:
+                    label = {"SUPPORTED": "일치", "CONTRADICTED": "반대"}.get(
+                        latest_market.get("status"), "미확인")
+                    market_text = f" · 최근 진입 검토 {latest_market['symbol']} 장전 가설 {label}"
+                    context = latest_market.get("entry_context") or {}
+                    if context:
+                        values = (context.get("turnover_million_won"), context.get("net_advancers"),
+                                  context.get("theme_concentration_ppm"), context.get("sustained_rise_ppm"))
+                        turnover = f"{values[0] / 100:,.0f}억" if values[0] is not None else "미확인"
+                        breadth = f"{values[1]:+,}" if values[1] is not None else "미확인"
+                        theme = f"{values[2] / 10_000:.1f}%" if values[2] is not None else "미확인"
+                        rise = f"{values[3] / 10_000:.1f}%" if values[3] is not None else "미확인"
+                        regime = {"SINGLE_LEADER": "단일 대장주", "THEME_LED": "테마 주도",
+                                  "DISPERSED_ROTATION": "분산 순환", "NORMAL_LEADER": "주도주 지속"}.get(
+                                      context.get("observed_market_type"), "미확인")
+                        market_text += (f" · 장세 관찰 {regime} · 시장 대금 {turnover} · 상승−하락 {breadth}"
+                                        f" · 테마 쏠림 {theme} · 돌파 후속 상승 {rise}")
             error = str(status.get("restore_error", ""))
             latency = runner.get("latency") if isinstance(runner, dict) else None
             latency_text = ""
@@ -1443,6 +1466,7 @@ class MockAutomationDialog(QDialog):
                 + (f" · 복원 오류 {error}" if error else "")
                 + latency_text
                 + protection_text
+                + market_text
                 + ("\n" + "\n".join(close_material_lines) if close_material_lines else "")
             )
         else:

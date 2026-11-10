@@ -14,7 +14,7 @@ from collections import deque
 from itertools import chain
 from uuid import uuid4
 from dataclasses import asdict
-from datetime import datetime, time as clock_time, timedelta, timezone
+from datetime import date, datetime, time as clock_time, timedelta, timezone
 from typing import Any, Awaitable, Callable, ContextManager, Protocol
 
 from websockets.asyncio.client import connect
@@ -205,6 +205,8 @@ class CentralRealtimeCollector:
         self._snapshot_task: asyncio.Task[None] | None = None
         self._pending_snapshots: dict[tuple[str, str], dict[str, Any]] = {}
         self._latest_snapshots: dict[tuple[str, str], dict[str, Any]] = {}
+        self._market_breadth: dict[str, tuple[date, dict[str, int], datetime | None]] = {}
+        self._market_turnover: dict[str, tuple[int, datetime]] = {}
         self._automation_venue_trades: dict[tuple[str, str], dict[str, Any]] = {}
         self._pending_account_entry_symbols: dict[tuple[str, str], dict[str, Any]] = {}
         self._pending_stock_references: dict[str, dict[str, Any]] = {}
@@ -1177,9 +1179,31 @@ class CentralRealtimeCollector:
                 self._hub.publish(delivered, code)
                 if name in {"trade", "market_state", "program_trade"}:
                     item_key = code or str(payload.get("market", ""))
+                    snapshot_at = self._now_provider()
+                    if name == "market_state":
+                        snapshot_at = as_kst(snapshot_at)
+                        trading_date = snapshot_at.date()
+                        previous_date, previous_counts, breadth_at = self._market_breadth.get(
+                            item_key, (trading_date, {}, None))
+                        counts = dict(previous_counts)
+                        if previous_date != trading_date:
+                            counts = {}
+                            breadth_at = None
+                        for field in ("advancing_count", "declining_count", "flat_count"):
+                            if payload[field] is not None:
+                                counts[field] = payload[field]
+                        up, down = payload["advancing_count"], payload["declining_count"]
+                        if up is not None or down is not None:
+                            breadth_at = snapshot_at if up is not None and down is not None else None
+                        self._market_breadth[item_key] = (trading_date, counts, breadth_at)
+                        turnover = payload.get("cumulative_trade_value_million_won")
+                        if type(turnover) is int and turnover >= 0:
+                            self._market_turnover[item_key] = (turnover, snapshot_at)
+                        payload = {**payload, **counts}
+                        event = {"type": name, "payload": payload}
                     snapshot = {
                         "event_type": name, "item_key": item_key,
-                        "received_at": self._now_provider().timestamp(), "event": event,
+                        "received_at": snapshot_at.timestamp(), "event": event,
                     }
                     self._pending_snapshots[(name, item_key)] = snapshot
                     self._latest_snapshots[(name, item_key)] = snapshot
@@ -1232,10 +1256,12 @@ class CentralRealtimeCollector:
                     self._observe_ram_trade(value, now, received_at)
                 elif name == "market_state":
                     market = str(payload.get("market", ""))
-                    now = self._now_provider()
+                    now = snapshot_at
                     trade_time = _market_history_trade_time(payload.get("trade_time"), now)
                     minute_key = f"{now.date().isoformat()}T{trade_time[:2]}:{trade_time[2:4]}"
                     history_value = {"market": market, "value": payload}
+                    if breadth_at is not None:
+                        history_value["breadth_observed_at"] = breadth_at.isoformat()
                     self._pending_market_history[market] = (
                         market,
                         minute_key,
@@ -1298,6 +1324,14 @@ class CentralRealtimeCollector:
                 'input_ref': f'collector-trade:{self._ram_source_id}:{self._ram_observation_generation}:{subject}:{row["received_at"]}',
                 'market_status': 'TRADABLE', 'durable': False,
                 **({'venue': venue} if venue != 'KRX' else {})}
+
+    def market_breadth_snapshot(self) -> dict[str, dict[str, Any]]:
+        return {market: {**counts, "observed_at": at.isoformat()}
+                for market, (_, counts, at) in self._market_breadth.copy().items() if at is not None}
+
+    def market_turnover_snapshot(self) -> dict[str, dict[str, Any]]:
+        return {market: {"cumulative_trade_value_million_won": value, "observed_at": at.isoformat()}
+                for market, (value, at) in self._market_turnover.copy().items()}
 
     def initial_realtime_snapshots(
         self, persisted: list[dict[str, Any]], codes: list[str],

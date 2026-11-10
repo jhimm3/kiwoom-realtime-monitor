@@ -21,7 +21,7 @@ from kiwoom_monitor.infrastructure.news_ai import AINewsAnalysis, AIRequestUsage
 from tests.unit.test_central_ai_service import _Store
 
 
-async def request(app, method, path, body=None, *, authorized=True):
+async def request(app, method, path, body=None, *, authorized=True, host="test"):
     messages = []
     headers = [(b"content-type", b"application/json")]
     if authorized: headers.append((b"authorization", b"Bearer test"))
@@ -30,7 +30,7 @@ async def request(app, method, path, body=None, *, authorized=True):
     async def send(value): messages.append(value)
     await app({"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "scheme": "http",
                "method": method, "path": path, "raw_path": path.encode(), "query_string": b"",
-               "headers": headers, "client": ("127.0.0.1", 1), "server": ("test", 80)}, receive, send)
+               "headers": headers, "client": ("127.0.0.1", 1), "server": (host, 80)}, receive, send)
     status = next(item["status"] for item in messages if item["type"] == "http.response.start")
     return status, json.loads(b"".join(item.get("body", b"") for item in messages if item["type"] == "http.response.body"))
 
@@ -158,11 +158,38 @@ class NASChatGPTServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(value["paused"])
         self.assertFalse(any("token" in name for name in value))
         self.assertEqual((await request(app, "POST", "/api/v1/news/chatgpt/import", {}))[0], 404)
+        self.assertEqual((await request(app, "POST", "/api/v1/news/chatgpt/connect", {}))[0], 404)
         with patch("kiwoom_monitor.central_server.chatgpt_sessions.ChatGPTPlanClient.models", return_value=(("Test", "catalog-model"),)):
             self.assertEqual((await request(app, "POST", "/api/v1/news/chatgpt/resume"))[0], 200)
         self.assertEqual(self.service._plan_failure, "")
         # Extra token fields and unknown registrations cannot select an account.
         self.assertEqual((await request(app, "POST", "/api/v1/news/chatgpt/select", {"account_id": "account", "token": "test"}))[0], 422)
+
+    async def test_local_login_cancellation_releases_credential_owner(self):
+        def authorize(authorization: str = Header(default="")):
+            if authorization != "Bearer test":
+                raise HTTPException(401)
+
+        app = FastAPI()
+        app.include_router(create_chatgpt_session_router(self.service, authorize, local_login=True))
+        started = threading.Event()
+
+        def connect(cancel, *, account_id):
+            self.assertEqual("", account_id)
+            started.set()
+            self.assertTrue(cancel.wait(3))
+            raise ChatGPTPlanError("cancelled")
+
+        url = "/api/v1/news/chatgpt/connect"
+        with patch.object(self.auth, "connect", side_effect=connect, create=True):
+            pending = asyncio.create_task(request(app, "POST", url, {}, host="127.0.0.1"))
+            self.assertTrue(await asyncio.to_thread(started.wait, 3))
+            self.assertIn("chatgpt_plan", self.service._credential_paused)
+            self.assertEqual(409, (await request(app, "POST", url, {}, host="127.0.0.1"))[0])
+            self.assertEqual((200, {"cancel_requested": True}),
+                             await request(app, "POST", url + "/cancel", host="127.0.0.1"))
+            self.assertEqual(503, (await asyncio.wait_for(pending, 3))[0])
+        self.assertNotIn("chatgpt_plan", self.service._credential_paused)
 
     async def test_account_selection_has_resolved_openapi_body_and_rejects_invalid_fields(self):
         def authorize(authorization: str = Header(default="")):

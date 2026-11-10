@@ -16,6 +16,7 @@ from kiwoom_monitor.application.market_session_schedule import (
     KRX_REGULAR_RESEARCH_PROFILE, research_session_profile_document, research_session_profile_contract_matches,
 )
 from kiwoom_monitor.application.research_factors import FACTOR_VERSION, compute_market_regime
+from kiwoom_monitor.application.research_discovery import DiscoveryStrategy, evaluate_discovered_pattern
 from kiwoom_monitor.application.research_families import family_for_config
 from kiwoom_monitor.application.leader_breakout import (
     LeaderBreakoutConfig, leader_research_rows, evaluate_leader_breakout_bar_step,
@@ -91,9 +92,15 @@ def execute_research(
     strategy_references: FrozenStrategyReferences | None = None,
     shadow_only: bool = False,
     reconstructed_market_proxy: FrozenReconstructedMarketProxy | None = None,
+    market_entry_trial=None,
 ) -> ResearchRunResult:
     leader = isinstance(config, LeaderBreakoutConfig)
     section12 = isinstance(config, MinuteExperiment)
+    if market_entry_trial is not None:
+        if not section12 or execution_scope is not None or shadow_only:
+            raise ValueError("market entry comparison is limited to ordinary minute Paper research")
+        market_entry_trial.validate_family(config.family)
+    discovery = isinstance(config, DiscoveryStrategy)
     final_scope = execution_scope == 'independent_final_holdout/v1'
     from kiwoom_monitor.domain.research_contract import MINUTE_FINAL_CANDIDATE_FAMILIES
     final_minute = final_scope and section12 and config.family in MINUTE_FINAL_CANDIDATE_FAMILIES
@@ -103,12 +110,19 @@ def execute_research(
                            and research_session_profile_contract_matches(dataset.manifest.get("research_session_profile"), session_profile))
     if shadow_only and not section12:
         raise ValueError("shadow replay requires a Section 12 minute experiment")
+    if discovery and (session_profile != KRX_REGULAR_RESEARCH_PROFILE or strategy_references is not None
+                      or position_target_plan is not None or unfilled_action_plan is not None
+                      or position_action_study is not None):
+        raise ValueError("discovered patterns require plain KRX regular Paper research")
     if section12 and config.panic_allow_unresolved_news and (shadow_only or execution_scope is not None and not final_minute):
         raise ValueError("unresolved PANIC news is supported only in Paper research")
     if section12 and config.panic_previous_session_news is not None and (shadow_only or execution_scope is not None):
         raise ValueError("PANIC prior-session news is supported only in ordinary Paper comparisons")
-    if section12 != (execution_config.version == COMPLETED_CLOSE_EXECUTION_VERSION):
+    completed_close = execution_config.version == COMPLETED_CLOSE_EXECUTION_VERSION
+    if not discovery and section12 != completed_close:
         raise ValueError("completed-close execution and a Section 12 minute experiment must be selected together")
+    if discovery and historical_reconstruction and not completed_close:
+        raise ValueError("reconstructed discovery requires completed-close execution")
     if section12 and (session_profile != KRX_REGULAR_RESEARCH_PROFILE or (strategy_references is None and not historical_breakout)
                       or position_target_plan is not None or unfilled_action_plan is not None or position_action_study is not None):
         raise ValueError("minute experiments require pinned references and their own KRX regular execution")
@@ -198,7 +212,7 @@ def execute_research(
                 checkpoint=checkpoint,
                 calendar_evidence=calendar_evidence,
                 universe_kinds=(
-                    ("historical_candidate_population",)
+                    () if discovery else ("historical_candidate_population",)
                     if historical_reconstruction else ("top20_membership",)
                 ),
             )
@@ -210,14 +224,15 @@ def execute_research(
     leader_frames = replay_krx_minute_bars(leader_rows, strict=False, session_profile=session_profile) if leader else ()
     leader_frames_by_revision = {bar.revision_id: bar for bar in leader_frames}
     leader_minute_states = {}
-    family = family_for_config(config) if not section12 else None
+    family = family_for_config(config) if not (section12 or discovery) else None
     run_id, spec = research_run_identity(dataset, config, execution_config, evaluation_spec,
                                         session_profile=session_profile, execution_scope=execution_scope,
                                         position_target_plan=position_target_plan,unfilled_action_plan=unfilled_action_plan,
                                         position_action_study=position_action_study,position_study_case=position_study_case,
                                         position_study_cohort=position_study_cohort,position_study_context=position_study_context,
                                         strategy_references=strategy_references, shadow_only=shadow_only,
-                                        reconstructed_market_proxy=reconstructed_market_proxy)
+                                        reconstructed_market_proxy=reconstructed_market_proxy,
+                                        market_entry_trial=market_entry_trial)
     if expected_code_hash is not None and spec['code_hash'] != expected_code_hash:
         raise ValueError('research implementation changed during locked validation')
     if final_scope:
@@ -244,6 +259,7 @@ def execute_research(
     candidate_events = []
     decision_rows: list[dict[str, Any]] = []
     processed_execution_bars: set[tuple[str, str]] = set()
+    discovery_last_start: dict[str, datetime] = {}
     candidate_count = 0
     leader_position_context = None
     decision_count = 0
@@ -283,7 +299,10 @@ def execute_research(
                 bars = (evaluation_bar,) if evaluation_bar is not None else ()
                 universe = ()
             elif cursor is not None:
-                evaluation_bar, bars, universe = cursor.advance_for_observation(observation)
+                evaluation_bar, bars, universe = (
+                    cursor.advance_for_observation(observation, recent_first=True) if discovery
+                    else cursor.advance_for_observation(observation)
+                )
             else:
                 bars = replay_krx_minute_bars(dataset.observations, as_of=cutoff, strict=True,
                                             session_profile=session_profile or "krx-regular/v1")
@@ -307,6 +326,11 @@ def execute_research(
             # Keep the full as-of universe, with same-code/day bar history for each admitted target.
             if target_partition is not None and not target_partition.allows(evaluation_bar.code):
                 continue
+            if discovery:
+                bar_start = _aware_datetime(evaluation_bar.bar_start)
+                if evaluation_bar.code in discovery_last_start and bar_start <= discovery_last_start[evaluation_bar.code]:
+                    continue
+                discovery_last_start[evaluation_bar.code] = bar_start
             latest_codes = universe[-1].codes if universe else ()
             if (position_action_study is not None and position_action_study.version=='position-action-study/v4'
                     and evaluation_bar.research_session!=spec['native_study_episode_session']):
@@ -338,7 +362,7 @@ def execute_research(
                 and engine.portfolio.pending_order.symbol == evaluation_bar.code
             )
             listing_population = experiment is not None and config.family in {IPO_CLOSE_FAMILY, IPO_BREAKOUT_FAMILY}
-            if not leader and not listing_population and evaluation_bar.code not in latest_codes and not managed_symbol and not just_closed and (cutoff_utc,evaluation_bar.code) not in unfilled_plan:
+            if not (leader or discovery or listing_population) and evaluation_bar.code not in latest_codes and not managed_symbol and not just_closed and (cutoff_utc,evaluation_bar.code) not in unfilled_plan:
                 continue
             if leader:
                 evaluation, leader_minute_states[evaluation_bar.code] = evaluate_leader_breakout_bar_step(
@@ -346,11 +370,12 @@ def execute_research(
                     minute_state=leader_minute_states.get(evaluation_bar.code),
                     position_context=leader_position_context, original_observation=observation)
             elif experiment is not None:
-                evaluation = experiment.evaluate(
-                    run_id=run_id, bar=evaluation_bar, bars=bars, cursor=cursor,
-                    universe_ref=universe[-1].revision_id if universe else "", engine=engine,
-                    just_closed=just_closed,
-                )
+                kwargs = {"market_entry_trial": market_entry_trial} if market_entry_trial is not None else {}
+                evaluation = experiment.evaluate(run_id=run_id, bar=evaluation_bar, bars=bars, cursor=cursor,
+                    universe_ref=universe[-1].revision_id if universe else "", engine=engine, just_closed=just_closed, **kwargs)
+            elif discovery:
+                evaluation = evaluate_discovered_pattern(run_id=run_id, bar=evaluation_bar, history=bars,
+                    config=config, state=engine.strategy_state)
             else:
                 evaluation = family.evaluate_bar(
                 run_id=run_id,
@@ -486,6 +511,7 @@ def execute_research(
                 spec=evaluation_spec,
                 logical_result_hash=core_logical_hash,
                 evaluated_final_holdout=final_scope,
+                require_candidate_universe=not discovery,
             )
             repository.save_research_report(report)
             checkpoint()
@@ -671,7 +697,8 @@ def research_run_identity(dataset, config, execution_config, evaluation_spec, *,
                           position_target_plan=None, unfilled_action_plan=None,
                           position_action_study=None,position_study_case=None,position_study_cohort=None,position_study_context=None,
                           strategy_references: FrozenStrategyReferences | None = None, shadow_only: bool = False,
-                          reconstructed_market_proxy: FrozenReconstructedMarketProxy | None = None):
+                          reconstructed_market_proxy: FrozenReconstructedMarketProxy | None = None,
+                          market_entry_trial=None):
     """Shared scientific identity; default legacy run identity is unchanged."""
     if execution_scope not in (None, 'independent_development_validation/v1', 'independent_final_holdout/v1'):
         raise ValueError('unsupported research execution scope')
@@ -684,6 +711,8 @@ def research_run_identity(dataset, config, execution_config, evaluation_spec, *,
         spec['strategy_references'] = {'version': 'strategy-reference/v1', 'sha256': strategy_references.sha256}
     if reconstructed_market_proxy is not None:
         spec["reconstructed_market_proxy"] = reconstructed_market_proxy.identity()
+    if market_entry_trial is not None:
+        spec["market_entry_trial"] = {"version": market_entry_trial.version, "sha256": market_entry_trial.sha256}
     if shadow_only:
         spec['observation_mode'] = 'shadow-replay/v1'
     if execution_scope is not None:
@@ -772,7 +801,7 @@ def _run_spec(
     session_profile: str | None = None,
 ) -> dict[str, Any]:
     experiment = isinstance(config, MinuteExperiment)
-    family = family_for_config(config) if not experiment else None
+    family = family_for_config(config) if not (experiment or isinstance(config, DiscoveryStrategy)) else None
     factor_versions = {
         factor_id.split("/", 1)[0]: (
             config.rank_factor_version
@@ -784,8 +813,9 @@ def _run_spec(
         for factor_id in (family.factor_ids if family is not None else (config.family,))
     }
     factor_versions["market_regime"] = FACTOR_VERSION
+    reconstructed_strategy = experiment or isinstance(config, DiscoveryStrategy)
     historical_reconstruction = (input_manifest.get('runtime_input_version') == 'historical_reconstruction_strategy/v1'
-                                 or experiment and _is_historical_reconstruction(input_manifest))
+                                 or reconstructed_strategy and _is_historical_reconstruction(input_manifest))
     document = {
         "mode": "historical_reconstruction" if historical_reconstruction else "historical_replay",
         "data_manifest_hash": hashlib.sha256(
@@ -810,7 +840,7 @@ def _run_spec(
         document["evaluation_spec"] = evaluation_spec.to_dict()
     if session_profile is not None:
         document["session_profile"] = research_session_profile_document(session_profile)
-    if experiment and historical_reconstruction:
+    if reconstructed_strategy and historical_reconstruction:
         document["observation_clock_basis"] = "reconstructed_completed_bar_end_proxy"
     return document
 

@@ -20,6 +20,7 @@ from kiwoom_monitor.domain.news_observation import (
     NEWS_ANALYSIS_SCHEMA_VERSION, stable_document_hash,
 )
 from kiwoom_monitor.infrastructure.article_text import fetch_article_text
+from kiwoom_monitor.infrastructure.chatgpt_auth import analysis_pause_for_day
 from .market_observations import KST, as_kst
 from kiwoom_monitor.domain.news_ai_contract import (
     decode_news_ai_provenance, news_ai_source_member, freeze_news_ai_input,
@@ -105,15 +106,19 @@ class CentralAIService:
         self._closing = False
         self.chatgpt_auth = chatgpt_auth
         self._plan_failure = ""
+        self._plan_failure_day = None
         if chatgpt_auth is not None:
             self._accepted["chatgpt_plan"] = set()
             self._credential_revisions["chatgpt_plan"] = 0
             self._credential_validation["chatgpt_plan"] = "UNVERIFIED"
 
-    async def pause_credentials(self, provider: str) -> None:
+    async def pause_credentials(self, provider: str, *, require_idle: bool = False) -> None:
         async with self._lock:
-            self._credential_paused.add(provider)
             tasks = tuple(self._accepted[provider])
+            if require_idle and (tasks or self._closing):
+                from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError
+                raise ChatGPTPlanError("storage_busy")
+            self._credential_paused.add(provider)
         if tasks:
             await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
 
@@ -143,6 +148,15 @@ class CentralAIService:
     def resume_chatgpt(self) -> None:
         """Explicit operator action; failures never trigger paid fallback/retry."""
         self._plan_failure = ""
+        self._plan_failure_day = None
+
+    @property
+    def chatgpt_failure(self) -> str:
+        return analysis_pause_for_day(self._plan_failure, self._plan_failure_day, self._now().date())
+
+    def _remember_chatgpt_failure(self, code: str) -> None:
+        self._plan_failure = code
+        self._plan_failure_day = self._now().date().isoformat()
 
     def job_processing_version(self, provider: str, model: str) -> str:
         selected = (self._provider if self._provider != "none" else provider).casefold()
@@ -170,12 +184,11 @@ class CentralAIService:
                 from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError
                 if self.chatgpt_auth is None:
                     raise ChatGPTPlanError("not_connected")
-                if self._plan_failure:
-                    raise ChatGPTPlanError(self._plan_failure)
+                if failure := self.chatgpt_failure:
+                    raise ChatGPTPlanError(failure)
                 status = await asyncio.to_thread(self.chatgpt_auth.status)
-                if status.get("pause_code"):
-                    self._plan_failure = str(status["pause_code"])
-                    raise ChatGPTPlanError(self._plan_failure)
+                if failure := status.get("pause_code"):
+                    raise ChatGPTPlanError(failure)
                 account = next((item for item in status["accounts"] if item["id"] == status["active"]), {})
                 if not account.get("connected") or not account.get("permitted") or not selected_model:
                     raise ChatGPTPlanError("permission_required" if account.get("connected") else "not_connected")
@@ -224,8 +237,8 @@ class CentralAIService:
                 if self.chatgpt_auth is None:
                     raise ChatGPTPlanError("not_connected")
                 status = await asyncio.to_thread(self.chatgpt_auth.status)
-                if self._plan_failure or status.get("pause_code"):
-                    raise ChatGPTPlanError(self._plan_failure or status["pause_code"])
+                if failure := self.chatgpt_failure or status.get("pause_code"):
+                    raise ChatGPTPlanError(failure)
                 selected = next((a for a in status["accounts"] if a["id"] == status["active"]), {})
                 if not selected.get("connected") or not selected.get("permitted"):
                     raise ChatGPTPlanError("not_connected")
@@ -248,8 +261,8 @@ class CentralAIService:
             provider = credential.provider
             if provider == "chatgpt_plan":
                 status = await asyncio.to_thread(self.chatgpt_auth.status)
-                if self._plan_failure or status.get("pause_code"):
-                    raise ChatGPTPlanError(self._plan_failure or status["pause_code"])
+                if failure := self.chatgpt_failure or status.get("pause_code"):
+                    raise ChatGPTPlanError(failure)
                 if int(status.get("generation", 0)) != credential.revision:
                     raise ChatGPTPlanError("not_connected")
             owner = as_kst(self._now()).date().isoformat()
@@ -262,7 +275,8 @@ class CentralAIService:
                     chatgpt_auth=self.chatgpt_auth, reasoning_effort=effort)
             except Exception as error:
                 if provider == "chatgpt_plan":
-                    self._plan_failure = error.code if isinstance(error, ChatGPTPlanError) else "response_invalid"
+                    self._remember_chatgpt_failure(
+                        error.code if isinstance(error, ChatGPTPlanError) else "response_invalid")
                     await asyncio.to_thread(self.chatgpt_auth.pause_analysis, self._plan_failure)
                 if provider != "chatgpt_plan" or getattr(error, "inference_attempted", False):
                     await asyncio.to_thread(self._store.upsert_documents, "news_request_usage", [{
@@ -570,9 +584,9 @@ class CentralAIService:
         if missing:
             # 공급자 RPM과 일일 상한은 모든 PC를 합친 중앙 기준으로 적용한다.
             async with self._execution_lock:
-                if provider == "chatgpt_plan" and self._plan_failure:
+                if provider == "chatgpt_plan" and (failure := self.chatgpt_failure):
                     from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTPlanError
-                    raise ChatGPTPlanError(self._plan_failure)
+                    raise ChatGPTPlanError(failure)
                 usage_owner = as_kst(self._now()).date().isoformat()
                 if self._daily_limit > 0:
                     used = await asyncio.to_thread(
@@ -651,7 +665,8 @@ class CentralAIService:
                     if provider == "chatgpt_plan":
                         # Also pause invalid news JSON. Already accepted tasks check
                         # this fence again after acquiring the shared execution lock.
-                        self._plan_failure = error.code if isinstance(error, ChatGPTPlanError) else "response_invalid"
+                        self._remember_chatgpt_failure(
+                            error.code if isinstance(error, ChatGPTPlanError) else "response_invalid")
                         await asyncio.to_thread(self.chatgpt_auth.pause_analysis, self._plan_failure)
                         if (isinstance(error, ChatGPTPlanError) and error.inference_attempted) or isinstance(error, ValueError):
                             await self._save_usage({

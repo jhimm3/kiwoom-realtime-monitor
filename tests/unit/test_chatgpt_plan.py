@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError
@@ -26,7 +27,7 @@ from kiwoom_monitor.infrastructure.chatgpt_auth import (
 )
 from kiwoom_monitor.infrastructure.chatgpt_plan import ChatGPTPlanClient, GroundedResponse, _completed_response
 from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig, NaverNewsCredentials, NewsAISettings
-from kiwoom_monitor.infrastructure.news_ai import analyze_articles, analysis_body_hash
+from kiwoom_monitor.infrastructure.news_ai import analyze_articles, analysis_body_hash, research_market
 from kiwoom_monitor.infrastructure.central_ai_client import CentralAIClient
 
 
@@ -79,6 +80,24 @@ class StreamDeadlineTests(unittest.TestCase):
             client.research("model-b", "prompt", stream_timeout=None)
             self.assertIsNone(respond.call_args.kwargs["stream_timeout"])
             self.assertTrue(respond.call_args.kwargs["web_search"])
+
+    def test_morning_market_accepts_late_completion_until_forty_minutes(self):
+        payload = {"status": "completed", "output": [{"type": "message", "status": "completed",
+            "role": "assistant", "content": [{"type": "output_text", "text": "morning brief"}]}],
+            "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}}
+        auth = SimpleNamespace(
+            session=lambda: nullcontext({"access_token": "test-token"}),
+            opener=lambda request: Response(event("response.completed", response=payload), stream=True),
+        )
+        settings = NewsAISettings("chatgpt_plan", "", "model-b")
+        clock = "kiwoom_monitor.infrastructure.chatgpt_plan.time.monotonic"
+        with patch.object(ChatGPTPlanClient, "_models", return_value=(("Model B", "model-b"),)):
+            with patch(clock, side_effect=[0, 2399, 2399, 2399]):
+                self.assertEqual(research_market(settings, "prompt", chatgpt_auth=auth).text, "morning brief")
+            with patch(clock, side_effect=[0, 2400]):
+                with self.assertRaises(ChatGPTPlanError) as caught:
+                    research_market(settings, "prompt", chatgpt_auth=auth)
+            self.assertEqual(caught.exception.code, "timeout")
 
 
 class ChatGPTPlanTests(unittest.TestCase):

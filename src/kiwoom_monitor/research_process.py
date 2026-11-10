@@ -43,6 +43,8 @@ from kiwoom_monitor.application.research_hypotheses import (
     build_development_evidence_snapshot,
     generate_followup_hypotheses,
 )
+from kiwoom_monitor.application.research_discovery import DiscoveryStrategy
+from kiwoom_monitor.application.market_entry import REGIME_TRIAL, MarketEntryTrial
 from kiwoom_monitor.application.research_splits import (
     DevelopmentPartitionSpec,
     DevelopmentSymbolPartitionSpec,
@@ -73,6 +75,7 @@ from kiwoom_monitor.infrastructure.research_data_source import FrozenStrategyRef
 from kiwoom_monitor.application.section12_minute_research import BREAKOUT_STUDY_FAMILY, MINUTE_EXPERIMENT_LABELS, MinuteExperiment
 from kiwoom_monitor.domain.research_contract import (
     CLOSE_FINAL_CANDIDATE_VERSION,
+    DISCOVERY_FAMILY,
     MINUTE_FINAL_CANDIDATE_FAMILIES,
     SECTION12_EVIDENCE_EXPERIMENT_FAMILIES as EVIDENCE_EXPERIMENT_FAMILIES,
     SECTION12_EVIDENCE_EXPERIMENT_FORMAT,
@@ -171,6 +174,7 @@ def final_candidate_spec_document(
             or any(char not in '0123456789abcdef' for char in implementation_hash)):
         raise ValueError('final candidate requires a scientific implementation SHA256')
     close = isinstance(request.strategy, MinuteExperiment) and request.strategy.family in MINUTE_FINAL_CANDIDATE_FAMILIES
+    discovery = isinstance(request.strategy, DiscoveryStrategy)
     references = request.strategy_references
     if close:
         if (request.family != request.strategy.family or request.session_profile != 'krx-regular/v1'
@@ -180,6 +184,10 @@ def final_candidate_spec_document(
                 or any(char not in '0123456789abcdef' for char in references[1])):
             raise ValueError('final CLOSE candidate requires its pinned KRX calendar reference')
         parameters = MinuteExperiment.from_document(request.family, request.strategy.to_dict(), paper_request=True).to_dict()
+    elif discovery:
+        if request.family != DISCOVERY_FAMILY or request.session_profile != 'krx-regular/v1' or references is not None:
+            raise ValueError('discovery final evaluation requires its KRX research-only rule')
+        parameters = request.strategy.to_dict()
     else:
         if references is not None or isinstance(request.strategy, MinuteExperiment):
             raise ValueError('final candidate requires a fixed registered single-run strategy')
@@ -190,7 +198,7 @@ def final_candidate_spec_document(
     execution = request.execution
     if not isinstance(execution, SimulationExecutionConfig) or type(execution.initial_cash_won) is not int:
         raise ValueError('final candidate requires a typed execution model and integer capital')
-    if close != (execution.version == COMPLETED_CLOSE_EXECUTION_VERSION):
+    if not discovery and close != (execution.version == COMPLETED_CLOSE_EXECUTION_VERSION):
         raise ValueError('final CLOSE candidate and completed-close execution must be selected together')
     costs = execution.cost_model
     if (not isinstance(costs, SimulationCostModel) or costs.rate_basis == 'unspecified'
@@ -206,7 +214,8 @@ def final_candidate_spec_document(
         if missing:
             raise ValueError("leader candidate execution blocked:" + ",".join(missing))
         parameters = {**parameters, "contexts": []}
-    document = {'version': 'final_candidate/v2' if leader else 'final_candidate/v1', 'family': request.family, 'parameters': parameters,
+    version = 'discovery_final_candidate/v1' if discovery else 'final_candidate/v2' if leader else 'final_candidate/v1'
+    document = {'version': version, 'family': request.family, 'parameters': parameters,
             'execution_model': execution.to_dict(),
             'session_profile': research_session_profile_document(request.session_profile),
             'implementation_hash': implementation_hash}
@@ -234,6 +243,8 @@ def prepare_mock_automation_candidate_publication(
     eligibility_policy: Any,
 ) -> dict[str, Any]:
     """Build the bounded publication documents; this performs no network or order call."""
+    if isinstance(request.strategy, DiscoveryStrategy):
+        raise ValueError('discovered patterns are research-only and cannot be published for automation')
     from kiwoom_monitor.application.mock_automation_candidate import (
         build_candidate_package,
         evaluate_candidate_eligibility,
@@ -548,7 +559,10 @@ def prepare_final_holdout_evaluation(batch: FinalHoldoutBatchSpec, candidates: t
         candidate_references.append(loaded_references.get(reference))
     checked()
     source = load_research_input(paths[0], session_profile=batch.session_profile, checkpoint=checked)
-    dataset = prepare_final_holdout_partition(source, batch, checkpoint=checked)
+    historical_discovery = all(isinstance(request.strategy, DiscoveryStrategy)
+                               and request.execution.version == COMPLETED_CLOSE_EXECUTION_VERSION for _, request in keyed)
+    dataset = prepare_final_holdout_partition(source, batch, checkpoint=checked,
+                                              allow_historical_reconstruction=historical_discovery)
     prepared = PreparedFinalHoldoutEvaluation(batch,
         tuple(request for _, request in keyed), dataset,
         tuple(str(path) for path in paths), implementation_hash, tuple(candidate_references))
@@ -790,11 +804,15 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
     database = _request_path(root, document.get("database"), "database")
     runs_dir = _request_path(root, document.get("runs_dir"), "runs_dir")
     minute_experiment = family in MINUTE_EXPERIMENT_LABELS
+    discovery = family == DISCOVERY_FAMILY
+    if discovery and (mode != "single_run" or session_profile != "krx-regular/v1"):
+        raise ValueError("discovered patterns require fixed KRX regular Paper research")
     if minute_experiment and (mode not in {"single_run", BREAKOUT_COMPARISON_MODE} or session_profile != "krx-regular/v1"):
         raise ValueError("Section 12 minute experiments require an explicit KRX regular research mode")
     if mode == BREAKOUT_COMPARISON_MODE and family != BREAKOUT_STUDY_FAMILY:
         raise ValueError("breakout comparison requires the breakout study family")
-    strategy = (MinuteExperiment.from_document(family, strategy_raw, paper_request=document.get("shadow_only") is not True)
+    strategy = (DiscoveryStrategy.from_dict(strategy_raw) if discovery
+                else MinuteExperiment.from_document(family, strategy_raw, paper_request=document.get("shadow_only") is not True)
                 if minute_experiment
                 else parse_strategy_config(family, strategy_raw))
     evaluation = ResearchEvaluationSpec.from_dict(evaluation_raw)
@@ -806,7 +824,7 @@ def research_process_request_from_document(document: Mapping[str, Any], root: Pa
         initial_cash_won=int(execution_raw.get("initial_cash_won", 0)),
         cost_model=cost,
     )
-    if minute_experiment != (execution.version == COMPLETED_CLOSE_EXECUTION_VERSION):
+    if not discovery and minute_experiment != (execution.version == COMPLETED_CLOSE_EXECUTION_VERSION):
         raise ValueError("completed-close execution and a Section 12 minute experiment must be selected together")
     partition_raw = document.get('development_partition')
     partition = DevelopmentPartitionSpec.from_dict(_mapping(partition_raw, 'development_partition')) if partition_raw is not None else None
@@ -1228,7 +1246,15 @@ def execute_process_request(
     cancel_requested: Callable[[], bool] | None = None,
     campaign_cycle: Mapping[str, Any] | None = None,
     reported_result_target=None,
+    market_entry_trial: MarketEntryTrial | None = None,
 ) -> dict[str, Any]:
+    if market_entry_trial is not None:
+        if (not isinstance(request, ResearchProcessRequest) or request.mode != "single_run"
+                or not isinstance(request.strategy, MinuteExperiment) or request.shadow_only
+                or request.development_partition is not None or campaign_cycle is not None or reported_result_target is not None
+                or any(fold.role == "OOS" for fold in request.evaluation.folds)):
+            raise ValueError("market entry comparison requires an ordinary local minute Paper request")
+        market_entry_trial.validate_family(request.family)
     if reported_result_target is not None and (
             not _supports_reported_result(request) or campaign_cycle is not None):
         raise ValueError("reported result delivery supports ordinary single_run or a Section 12 evidence experiment only")
@@ -1300,6 +1326,29 @@ def execute_process_request(
         if request.search is None or request.search.to_dict() != campaign_cycle.get('request') or build_research_job_identity(request.search).job_id != campaign_cycle.get('job_id'):
             raise ValueError('stored campaign identity does not match its execution request')
     repository = ResearchRepository(request.database)
+    if market_entry_trial is not None:
+        runs = {}
+        for key, trial in (("baseline", None), ("with_market", market_entry_trial)):
+            run = execute_research(dataset, repository, request.runs_dir, request.strategy, request.execution,
+                request.evaluation, cancelled, request.session_profile, resource_guard,
+                strategy_references=strategy_references, market_entry_trial=trial)
+            events = repository.load_execution_events(run.run_id)
+            entries = [dict(symbol=row["symbol"], at=row["occurred_at"], quantity=row["quantity"],
+                            notional_won=row["notional_won"],
+                            portfolio_bps=row["notional_won"] * 10_000 // request.execution.initial_cash_won)
+                       for row in events if row["event_type"] == "FILL" and row["side"] == "BUY"]
+            report = repository.load_research_report(run.run_id)
+            runs[key] = {"run_id": run.run_id, "manifest": str(run.output_manifest), "entry_signals": run.candidate_count,
+                         "entries": entries, "folds": report["fold_reports"], "report_status": report["status"]}
+            if market_entry_trial.version == REGIME_TRIAL:
+                runs[key]["exits"] = [dict(symbol=row["symbol"], at=row["occurred_at"], quantity=row["quantity"],
+                                           notional_won=row["notional_won"], cost_won=row["total_cost_won"],
+                                           position_quantity_after=row["position_quantity_after"])
+                                      for row in events if row["event_type"] == "FILL" and row["side"] == "SELL"]
+        kind = "market_entry_comparison/v2" if market_entry_trial.version == REGIME_TRIAL else "market_entry_comparison/v1"
+        return {"status": "ok", "kind": kind, "family": request.family,
+                "trial_sha256": market_entry_trial.sha256, "dataset_id": dataset.manifest["dataset_id"],
+                "order_authorized": False, **runs}
     if request.mode == "limited_search":
         assert request.search is not None
         _validate_search_input(request, dataset)
@@ -2459,7 +2508,8 @@ class _ValidationTimeBudgetExpired(ResearchRunCancelled):
 
 def execute_development_validation(batch: DevelopmentValidationRequest, *, cancel_path: Path | None = None,
                                    result_path: Path | None = None,
-                                   owner_token: str | None = None) -> dict[str, Any]:
+                                   owner_token: str | None = None,
+                                   loaded_dataset: FrozenResearchDataset | None = None) -> dict[str, Any]:
     """One frozen strategy, sequential fresh engines, scoped atomic claims and completed cache."""
     request = batch.request
     implementation_hash = research_implementation_hash(request.session_profile)
@@ -2522,8 +2572,10 @@ def execute_development_validation(batch: DevelopmentValidationRequest, *, cance
         guard.checkpoint()
     try:
         checkpoint()
-        guard.preflight(research_input_encoded_bytes(request.dataset))
-        dataset = load_research_input(request.dataset, session_profile=request.session_profile, checkpoint=checkpoint)
+        dataset = loaded_dataset
+        if dataset is None:
+            guard.preflight(research_input_encoded_bytes(request.dataset))
+            dataset = load_research_input(request.dataset, session_profile=request.session_profile, checkpoint=checkpoint)
         if (dataset.manifest.get('dataset_id'), dataset.manifest.get('revision_ids_hash')) != (batch.dataset_id, batch.dataset_hash):
             raise ValueError('development validation does not match locked source dataset identity')
         checkpoint()
@@ -2668,7 +2720,11 @@ def _run_research_process(argv: list[str] | None = None) -> int:
     parser.add_argument("--cancel", type=Path)
     parser.add_argument('--result-connection', type=Path)
     parser.add_argument('--result-owner')
+    parser.add_argument('--market-entry-trial', type=Path, help='Compare market entry policies on one local Paper request')
     args = parser.parse_args(argv)
+    if args.market_entry_trial and (not args.request or args.register_campaign or args.result_connection
+            or args.market_entry_trial.resolve() in (args.result.resolve(), args.cancel.resolve() if args.cancel else None)):
+        parser.error('--market-entry-trial requires a separate local --request and result path')
     if bool(args.result_connection) != (args.result_owner is not None):
         parser.error('--result-connection and --result-owner must be supplied together')
     if args.result_connection:
@@ -2848,7 +2904,15 @@ def _run_research_process(argv: list[str] | None = None) -> int:
                         raise ValueError('explicit result connection is invalid') from None
                     result = execute_process_request(request, cancel_path=args.cancel, reported_result_target=target)
                 else:
-                    result = execute_process_request(request, cancel_path=args.cancel)
+                    trial = None
+                    if args.market_entry_trial:
+                        with args.market_entry_trial.open('rb') as stream:
+                            encoded = stream.read(4 * 1024 * 1024 + 1)
+                        if len(encoded) > 4 * 1024 * 1024:
+                            raise ValueError('market entry trial exceeds the 4 MiB local request limit')
+                        trial = MarketEntryTrial(json.loads(encoded.decode('utf-8-sig')))
+                    result = execute_process_request(request, cancel_path=args.cancel, market_entry_trial=trial) if trial else (
+                        execute_process_request(request, cancel_path=args.cancel))
         exit_code = (4 if result.get('delivery', {}).get('status') in {'pending', 'not_prepared'} else
                      2 if result.get('status') == 'cancelled' else 3 if result.get('status') == 'resource_blocked' else 0)
     except ResearchRunCancelled as exc:

@@ -201,6 +201,7 @@ def evaluate_factor_entry_bar(
     signal_key: str,
     negative_reason: str,
     positive_reason: str,
+    require_universe: bool = True,
 ) -> StrategyEvaluation:
     """동일 체결 정책을 쓰는 등록 Family의 공통 Snapshot·Decision 계약."""
     if not str(run_id).strip():
@@ -247,6 +248,7 @@ def evaluate_factor_entry_bar(
         signal_key=signal_key,
         negative_reason=negative_reason,
         positive_reason=positive_reason,
+        require_universe=require_universe,
     )
     decision_body = {
         "run_id": run_id,
@@ -307,6 +309,7 @@ def _decide(
     signal_key: str,
     negative_reason: str,
     positive_reason: str,
+    require_universe: bool,
 ) -> tuple[str, str, tuple[str, ...], tuple[str, ...], StrategyState, tuple[str, str] | None]:
     constraints = ("KRX", "single_strategy", "max_one_position", "buy_then_sell", "no_pyramiding")
     if state.status == "open":
@@ -326,9 +329,9 @@ def _decide(
     if not bool(entry_factor.value.get(signal_key)):
         after = _flat_preserving_seen(state)
         return "NO_TRADE", "NO_TRADE", (negative_reason,), constraints, after, None
-    if universe is None:
+    if require_universe and universe is None:
         return "NO_TRADE", "NO_TRADE", ("candidate_universe_missing",), constraints, state, None
-    if code not in universe.codes:
+    if require_universe and universe is not None and code not in universe.codes:
         return "NO_TRADE", "NO_TRADE", ("outside_contemporaneous_universe",), constraints, state, None
 
     reasons = [positive_reason]

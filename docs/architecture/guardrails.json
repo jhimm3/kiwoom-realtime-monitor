@@ -3431,6 +3431,17 @@
         "db|src/kiwoom_monitor/central_server/database_news_revisions.py|_read_kind_trading_notices|cursor.execute": 1
       },
       "evidence": ["tests/unit/test_news_jobs.py", "tests/unit/test_close_order_management.py"]
+    },
+    {
+      "id": "research-discovery-local-20261110",
+      "reason": "Separate recorded discovery development inputs from final holdout windows and verify the saved candidate shortlist before final access.",
+      "connection": "The local research repository checks overlapping windows within the existing independent run claim transaction. Final CLI reads the existing immutable search experiment record by key before using the existing final evaluator.",
+      "validation": "One overlap SELECT per discovery development claim and one receipt SELECT per final request. Screening itself performs no per-observation SQL. The synthetic test checks a missing receipt cannot be recreated by retrying final evaluation.",
+      "limits": {
+        "db|src/kiwoom_monitor/infrastructure/persistence/research_repository.py|ResearchRepository.start_run|connection.execute": 12,
+        "db|src/kiwoom_monitor/infrastructure/persistence/research_repository.py|ResearchRepository.load_search_experiment|connection.execute": 1
+      },
+      "evidence": ["tests/unit/test_research_discovery.py", "docs/RESEARCH_REQUEST_FORMAT.md#new-strategy-discovery"]
     }
   ]
 }

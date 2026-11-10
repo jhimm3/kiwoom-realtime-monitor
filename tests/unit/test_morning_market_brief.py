@@ -1,5 +1,7 @@
 import asyncio
+import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -7,6 +9,7 @@ import json
 import threading
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Header, HTTPException
@@ -24,7 +27,7 @@ NOW = datetime(2026, 10, 15, 7, 55, tzinfo=KST)
 URL = "https://example.test/market"
 
 
-async def request(app, method, path, body=None, *, authorized=True):
+async def request(app, method, path, body=None, *, authorized=True, query=None):
     messages = []
     completed = asyncio.Event()
     received = False
@@ -42,7 +45,7 @@ async def request(app, method, path, body=None, *, authorized=True):
     if authorized: headers.append((b"authorization",b"Bearer test"))
     await asyncio.wait_for(app({"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
         "scheme": "http", "method": method, "path": path, "raw_path": path.encode(),
-        "query_string": b"", "headers": headers, "client": ("127.0.0.1",1), "server": ("test",80)}, receive, send), 5)
+        "query_string": urlencode(query or {}).encode(), "headers": headers, "client": ("127.0.0.1",1), "server": ("test",80)}, receive, send), 5)
     status = next(m["status"] for m in messages if m["type"] == "http.response.start")
     return status,json.loads(b"".join(m.get("body",b"") for m in messages if m["type"] == "http.response.body"))
 
@@ -432,6 +435,22 @@ class ContractTests(unittest.TestCase):
             bad=deepcopy(value); bad['stock_contexts'][0].update(change)
             with self.assertRaises(ValueError): validate_output(json.dumps(bad),self.inputs())
 
+    def test_hypothesis_conditions_can_reference_only_their_linked_events(self):
+        value = result()
+        hypothesis = value['hypotheses'][0]
+        groups = ('confirming_signals', 'contradicting_signals', 'invalidation_conditions')
+        for group in groups:
+            hypothesis[group][0]['target_ref'] = 'evt1'
+
+        checked = validate_output(json.dumps(value), self.inputs())['hypotheses'][0]
+        for group in groups:
+            self.assertEqual(hypothesis[group], checked[group])
+
+        value['events'].append({**value['events'][0], 'event_key': 'evt2'})
+        hypothesis['event_keys'] = ['evt2']
+        with self.assertRaisesRegex(ValueError, '가설에 연결되지 않은 관찰 대상'):
+            validate_output(json.dumps(value), self.inputs())
+
     def test_review_time_is_future_plan_not_future_fact_and_no_previous_state_is_invented(self):
         value=result(); value['events'][0]['persistence']['review_due_at']=(NOW+timedelta(hours=2)).isoformat()
         checked=validate_output(json.dumps(value),self.inputs())
@@ -615,6 +634,66 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         value = await self.runtime.request()
         if self.runtime._run_task: await self.runtime._run_task
         return value
+
+    async def test_premarket_direction_uses_same_available_inputs_live_and_in_research(self):
+        from kiwoom_monitor.central_server.realtime_collector import CentralRealtimeCollector
+        from kiwoom_monitor.central_server.realtime_hub import RealtimeHub
+
+        cut = NOW.replace(hour=10, minute=0)
+        observed = cut - timedelta(seconds=30)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            closing(SQLiteQueryStore(Path(directory) / "market.sqlite3", now_provider=lambda: observed)) as store,
+        ):
+            store.initialize()
+            report = result()
+            report["market_assessment"]["state"] = "bullish"
+            run = {"status": "completed", "result": report, "run_id": "morning-fixture",
+                   "cutoff_at": NOW.isoformat(), "available_at": (NOW + timedelta(minutes=2)).timestamp(),
+                   "expires_at": (NOW + timedelta(hours=4)).timestamp()}
+            store.upsert_documents(RUNS_COLLECTION, [{"owner": cut.date().isoformat(),
+                                                       "key": "scheduled", "document": run}])
+            collector = CentralRealtimeCollector(lambda: "", "mock", RealtimeHub(), lambda: observed, store)
+            collector._publish_parsed({"trnm": "REAL", "data": [
+                {"type": "0U", "item": code, "values": {"20": "095930", "252": "500", "255": "300", "253": "5"}}
+                for code in ("001", "101")]})
+            # A subsequent 0J updates the index without refreshing the age of the 0U counts.
+            observed += timedelta(seconds=10)
+            collector._publish_parsed({"trnm": "REAL", "data": [
+                {"type": "0J", "item": code, "values": {"20": "095940", "10": "1000"}}
+                for code in ("001", "101")]})
+            top20 = {"snapshot_key": observed.isoformat(), "saved_at": observed.timestamp(),
+                     "payload": {"items": [{"flu_rt": "+1.2" if i < 14 else "-0.6"} for i in range(20)]}}
+            await collector._flush_snapshots()
+            store.save_dataset_snapshot("top20_membership", cut.date().isoformat(),
+                                        top20["snapshot_key"], top20["payload"])
+            runtime = MorningMarketBrief(store, None, clock=lambda: cut,
+                market_breadth=collector.market_breadth_snapshot, top20_source=lambda: top20,
+                observation_max_age=lambda: 90)
+            await runtime.start()
+            try:
+                live = runtime.market_comparison_at(cut)
+                self.assertEqual("SUPPORTED", live["status"])
+                self.assertEqual(14, live["observations"]["top20"]["up"])
+                self.assertEqual((cut - timedelta(seconds=30)).isoformat(),
+                                 live["observations"]["kosdaq"]["observed_at"])
+                self.assertEqual(live, runtime.compare_recorded_market(cut))
+                app = FastAPI()
+                app.include_router(create_morning_market_brief_router(runtime, lambda: None))
+                status, historical = await request(app, "GET", "/api/v1/research/morning-market-comparison",
+                                                   query={"as_of": cut.isoformat()})
+                self.assertEqual((200, live), (status, historical))
+                self.assertEqual("UNCONFIRMED", runtime.compare_recorded_market(cut - timedelta(seconds=25))["status"])
+                self.assertEqual("UNCONFIRMED", runtime.market_comparison_at(cut + timedelta(minutes=2))["status"])
+                for item in top20["payload"]["items"]:
+                    item["flu_rt"] = "-1.0"
+                self.assertEqual("mixed_intraday_observations", runtime.market_comparison_at(cut)["reason"])
+                collector._publish_parsed({"trnm": "REAL", "data": [
+                    {"type": "0U", "item": code, "values": {"20": "095940", "252": "300", "255": "500"}}
+                    for code in ("001", "101")]})
+                self.assertEqual("CONTRADICTED", runtime.market_comparison_at(cut)["status"])
+            finally:
+                await runtime.close()
 
     async def test_exact_kst_daily_once_and_restart_no_second_search(self):
         self.now -= timedelta(seconds=1)
@@ -880,3 +959,98 @@ class NativeMorningBriefLifetimeTests(unittest.IsolatedAsyncioTestCase):
                     if reopened is not None:
                         reopened.close()
                     store.close()
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows protected credential store")
+class WindowsLocalMorningBriefTests(unittest.TestCase):
+    def test_local_subscription_runs_on_imported_schedule_after_timeout_and_restart(self):
+        from fastapi.testclient import TestClient
+        from kiwoom_monitor.central_server.app import create_app
+        from kiwoom_monitor.central_server.config import CentralServerSettings
+        from kiwoom_monitor.infrastructure.app_paths import AppPaths
+        from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTAuth, ChatGPTPlanError, DIRECT_SCOPE
+        from kiwoom_monitor.infrastructure.chatgpt_plan import ChatGPTPlanClient
+        from kiwoom_monitor.infrastructure.naver_news import LocalNaverNewsConfig
+
+        slot = NOW.replace(hour=7, minute=50)
+        now = slot - timedelta(minutes=2)
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+
+        def connect(auth, cancel, *, account_id):
+            self.assertEqual("", account_id)
+            self.assertFalse(cancel.is_set())
+            with auth.store.locked():
+                auth.store.save({"active": "test-account", "generation": 1, "accounts": {"test-account": {
+                    "access_token": "isolated-fake-token", "scopes": [DIRECT_SCOPE]}}})
+            return auth.status()
+
+        settings_url = "/api/v1/market/morning-brief/settings"
+        report_url = "/api/v1/market/morning-brief"
+        chatgpt_url = "/api/v1/news/chatgpt"
+        headers = {"Authorization": "Bearer test"}
+        imported = {"enabled": True, "time": "07:50", "prompt": DEFAULT_PROMPT + "\n이전 프롬프트 문단"}
+        value = result(slot + timedelta(days=1))
+        value["hypotheses"][0]["invalidation_conditions"][0]["target_ref"] = "evt1"
+        reply = GroundedResponse(json.dumps(value), {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                                 ({"url": URL},), 1)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "naver_news.dat"
+            config = CentralServerSettings(f"sqlite:///{(root / 'local.sqlite3').as_posix()}", "test",
+                host="127.0.0.1", local_chatgpt_config_path=str(config_path),
+                autonomous_top20_enabled=False, market_event_collection_enabled=False,
+                news_naver_market_enabled=False, news_history_jobs_enabled=False)
+            with (patch.object(AppPaths, "user_state_root", return_value=root / "protected"),
+                  patch("kiwoom_monitor.central_server.app.datetime", Clock),
+                  patch.object(ChatGPTAuth, "connect", autospec=True, side_effect=connect) as login,
+                  patch.object(ChatGPTPlanClient, "research", side_effect=[
+                      ChatGPTPlanError("timeout", inference_attempted=True), reply]) as research):
+                app = create_app(config)
+                with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 12345)) as client:
+                    self.assertEqual(401, client.post(chatgpt_url + "/connect", json={}).status_code)
+                    bad_host = client.post(chatgpt_url + "/connect", headers={**headers, "Host": "nas.test"}, json={})
+                    self.assertEqual(403, bad_host.status_code)
+                    response = client.post(chatgpt_url + "/connect", headers=headers, json={})
+                    self.assertEqual(200, response.status_code, response.text)
+                    login.assert_called_once()
+                    protected = LocalNaverNewsConfig(config_path).chatgpt_storage_path
+                    self.assertTrue(protected.is_file())
+                    self.assertNotIn(b"isolated-fake-token", protected.read_bytes())
+                    status = client.get(chatgpt_url + "/status", headers=headers).json()
+                    self.assertEqual("local", status["connection_method"])
+                    self.assertTrue(status["accounts"][0]["permitted"])
+                    settings = client.get(settings_url, headers=headers).json()
+                    fields = ("enabled", "time", "provider", "model", "reasoning_effort", "ttl_minutes", "prompt", "watchlist")
+                    changes = {field: settings[field] for field in fields} | imported | {"expected_revision": settings["revision"]}
+                    response = client.put(settings_url, headers=headers, json=changes)
+                    self.assertEqual(200, response.status_code, response.text)
+
+                    runtime = app.state.morning_market_brief
+                    now = slot
+                    async def run_scheduled():
+                        started = await runtime.request()
+                        self.assertEqual("running", started["status"])
+                        await runtime._run_task
+                    client.portal.call(run_scheduled)
+                    self.assertEqual("timeout", client.get(report_url, headers=headers).json()["run"]["error"])
+                    self.assertEqual("timeout", client.get(chatgpt_url + "/status", headers=headers).json()["pause_code"])
+
+                now = slot + timedelta(days=1, minutes=-2)
+                app = create_app(config)
+                with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 12345)) as client:
+                    self.assertFalse(client.get(chatgpt_url + "/status", headers=headers).json()["paused"])
+                    settings = client.get(settings_url, headers=headers).json()
+                    self.assertEqual(imported, {field: settings[field] for field in imported})
+                    runtime = app.state.morning_market_brief
+                    now = slot + timedelta(days=1)
+                    client.portal.call(run_scheduled)
+                    report = client.get(report_url, headers=headers).json()
+                    self.assertEqual("completed", report["run"]["status"])
+                    self.assertEqual("evt1", report["run"]["result"]["hypotheses"][0]["invalidation_conditions"][0]["target_ref"])
+                    self.assertEqual(9, len(report["run"]["result"]["market_data"]))
+                    self.assertEqual(2, len(report["history"]))
+                self.assertEqual([2400, 2400], [call.kwargs["stream_timeout"] for call in research.call_args_list])

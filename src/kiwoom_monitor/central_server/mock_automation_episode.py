@@ -463,6 +463,7 @@ class MockAutomationEpisode:
         member_admission: MockAutomationAdmission | None = None,
         proposed_selection=None,
         minute_candidate_current=None, close_calendar=None,
+        market_comparison=None,
     ) -> None:
         context = bundle.automation_context
         if (
@@ -517,6 +518,8 @@ class MockAutomationEpisode:
         self._config = None
         self._leader = False
         self._leader_context_source = leader_context_source
+        self._market_comparison = market_comparison
+        self._entry_market_comparison = None
         self._strategy_inputs = None
         self._leader_position_proof = None
         self._leader_plan_mode = self._spec.execution_plan_mode == LEADER_NATIVE_PLAN_MODE
@@ -963,7 +966,8 @@ class MockAutomationEpisode:
         self._minute_management = MinutePlanManagement(self._store, self._bundle, self._spec, self._repository,
             parameters=candidate['parameters'], price_source=self._price_source, now_provider=self._now,
             family=candidate['family'], candidate_current=self._minute_candidate_current, close_calendar=self._close_calendar,
-            nxt_price_source=self._nxt_price_source)
+            nxt_price_source=self._nxt_price_source, observe_entry_market=self._observe_entry_market,
+            prepare_entry_market=self._prepare_entry_market)
         self._episode_position.set_plan_fill_listener(self._minute_management.observe_fill)
         document = self._checkpoint_document('execution_mock_automation_runner_current')
         matching = isinstance(document, Mapping) and (
@@ -1045,6 +1049,21 @@ class MockAutomationEpisode:
             return ()
         return self._minute_management.held_close_decisions()
 
+    def _prepare_entry_market(self, cut):
+        if self._market_comparison is None:
+            return
+        try:
+            comparison = self._market_comparison(cut)
+        except Exception:
+            logger.warning("아침 시황의 장중 대조 근거를 읽지 못했습니다", exc_info=True)
+            comparison = {"status": "UNCONFIRMED", "as_of": cut.isoformat(),
+                          "reason": "comparison_unavailable", "advisory_only": True}
+        return comparison
+
+    def _observe_entry_market(self, symbol, comparison):
+        if comparison is not None:
+            self._entry_market_comparison = {**comparison, "symbol": symbol}
+
     @property
     def status(self) -> dict[str, Any]:
         value = {
@@ -1058,6 +1077,8 @@ class MockAutomationEpisode:
             **self._status,
             "latency": dict(self._latency) if self._latency is not None else None,
         }
+        if self._entry_market_comparison is not None:
+            value["entry_market_comparison"] = deepcopy(self._entry_market_comparison)
         if self._input_progress.recovering:
             value["input_recovery"] = self._input_progress.recovery_receipt()
             if self._status.get("state") not in ("BLOCKED", "STOPPED", "ERROR"):
@@ -1399,6 +1420,8 @@ class MockAutomationEpisode:
             await drain_thread_call(self._save_checkpoint)
             return 0
         consumed = 0
+        entry_market = None
+        market_prepared = False
         while consumed < min(limit, 1000):
             envelope = self._strategy_inputs.take()
             if envelope is None:
@@ -1407,6 +1430,9 @@ class MockAutomationEpisode:
             consumed += 1
             now = self._now()
             try:
+                if not market_prepared and self._episode_position.state.status != "open":
+                    entry_market = self._prepare_entry_market(now)
+                    market_prepared = True
                 current = self._current_leader_context()
                 config = self._strategy_inputs.resolve_config(self._config, current,
                     position_open=self._episode_position.state.status == "open")
@@ -1453,6 +1479,7 @@ class MockAutomationEpisode:
                 if await self._pause_for_protection_review():
                     break
                 if decision.final_action == "ENTER":
+                    self._observe_entry_market(decision.symbol, entry_market)
                     proof = leader_position_proof(config, spec_id=self._spec.spec_id, package_hash=self._spec.candidate_package_hash,
                         account_ref=self._bundle.account_ref, run_id=self._bundle.run_id, decision=decision, context=context)
                     validate_leader_position_proof(proof, self._config, self._spec, self._bundle.run_id)
@@ -1464,6 +1491,8 @@ class MockAutomationEpisode:
                     [{"owner": self._bundle.account_ref, "key": self._leader_evidence_key(decision.decision_id), "document": {
                         "snapshot": evaluation.snapshot.to_dict(), "decision": decision.to_dict(),
                         "observation": {"payload": payload, "received_at": received_at.isoformat(), "source": source, "approved": True},
+                         **({"market_comparison": self._entry_market_comparison}
+                            if decision.final_action == "ENTER" and self._entry_market_comparison is not None else {}),
                         "operational_revision": current.get("revision") if isinstance(current, Mapping) else None,
                         "policy_hash": config.policy.fingerprint,
                         "policy": config.policy.to_dict(), "position_proof": self._leader_position_proof}}])
@@ -3811,6 +3840,8 @@ class MockAutomationEpisode:
             return
         if await self._pause_for_protection_review():
             return False
+        entry_market = (self._prepare_entry_market(datetime.fromisoformat(evaluation_bar.available_at))
+                        if self._episode_position.state.status != "open" else None)
         evaluation = self._strategy_inputs.evaluate_bar(
             family=self._family, run_id=self._bundle.run_id, evaluation_bar=evaluation_bar,
             config=self._config, state=self._episode_position.state,
@@ -3825,6 +3856,8 @@ class MockAutomationEpisode:
             }
             return
 
+        if decision.final_action == "ENTER":
+            self._observe_entry_market(decision.symbol, entry_market)
         recovery, risk = await self._refresh_recovery_risk()
         if risk is None:
             raise RuntimeError("MOCK_AUTOMATION_RISK_MISSING")

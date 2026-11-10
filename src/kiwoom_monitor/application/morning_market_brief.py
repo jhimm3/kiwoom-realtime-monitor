@@ -10,6 +10,10 @@ from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
+from kiwoom_monitor.application.market_session_schedule import (
+    KRX_REGULAR_RESEARCH_PROFILE, krx_regular_session_hours, research_session_key,
+)
+from kiwoom_monitor.domain.time_basis import as_kst
 
 SCHEMA = "morning-market-brief-v4"
 RESEARCH_SCHEMA = "news-market-research-v1"
@@ -655,10 +659,11 @@ def validate_output(text: str, inputs: dict, *, research: bool = False) -> dict:
             raise ValueError("종목 가설의 대상 참조가 없습니다.")
         if hypothesis["scope"] == "sector" and not hypothesis["theme_keys"]:
             raise ValueError("업종 가설의 대상 참조가 없습니다.")
+        condition_targets = {"market", *hypothesis["event_keys"], *hypothesis["theme_keys"], *hypothesis["stock_keys"]}
         for name in ("confirming_signals", "contradicting_signals", "invalidation_conditions"):
             for signal in hypothesis[name]:
                 refs(signal["evidence_ids"], evidence)
-                if signal["target_ref"] not in {"market", *hypothesis["theme_keys"], *hypothesis["stock_keys"]}:
+                if signal["target_ref"] not in condition_targets:
                     raise ValueError("가설에 연결되지 않은 관찰 대상입니다.")
         unknown(hypothesis["hypothesis_key"], "장중 검증 전 초기 가설", "needs_intraday_confirmation")
     if research:
@@ -750,3 +755,66 @@ def context_from_run(run: dict | None, now: datetime) -> dict:
             "input_freshness": {metric["id"]: metric["status"] for metric in run["result"]["market_data"]},
             "provider": run["provider"], "model": run["model"],
             "reasoning_effort": run["reasoning_effort"]}
+
+
+def compare_market_hypothesis(run, cut, breadth, top20, *, max_age_seconds):
+    """Compare the pre-open direction with the two markets and the TOP20 cohort."""
+    cut = as_kst(cut)
+    session = research_session_key(cut, session_profile=KRX_REGULAR_RESEARCH_PROFILE)
+    result = {"status": "UNCONFIRMED", "as_of": cut.isoformat(), "premarket": None,
+              "observations": {}, "reason": "missing_premarket_brief", "advisory_only": True}
+    if not run or run.get("status") != "completed" or (run.get("result") or {}).get("schema") != SCHEMA:
+        return result
+    report = run["result"]
+    cutoff = as_kst(datetime.fromisoformat(run["cutoff_at"]))
+    available = run.get("available_at")
+    opens_at = datetime.combine(cut.date(), krx_regular_session_hours(cut.date())[0], cut.tzinfo)
+    if (available is None or cutoff.date() != cut.date()
+            or not cutoff.timestamp() <= available <= cut.timestamp() or available >= opens_at.timestamp()):
+        return {**result, "reason": "brief_not_available_before_open"}
+    assessment = report["market_assessment"]
+    result["premarket"] = {"run_id": run["run_id"], "direction": assessment["state"],
+                           "reason": assessment["reason"], "cutoff_at": cutoff.isoformat(),
+                           "available_at": datetime.fromtimestamp(available, cut.tzinfo).isoformat()}
+    if cut.timestamp() >= run["expires_at"]:
+        return {**result, "reason": "premarket_brief_expired"}
+    if session is None:
+        return {**result, "reason": "outside_regular_session"}
+
+    def fresh(observed_at):
+        return (research_session_key(observed_at, session_profile=KRX_REGULAR_RESEARCH_PROFILE) == session
+                and 0 <= (cut - observed_at).total_seconds() <= max_age_seconds)
+
+    observations = result["observations"]
+    for market in ("kospi", "kosdaq"):
+        row = breadth.get(market)
+        if row is None:
+            continue
+        observed_at = as_kst(datetime.fromisoformat(row["observed_at"]))
+        up, down = row.get("advancing_count"), row.get("declining_count")
+        if fresh(observed_at) and type(up) is int and type(down) is int and up + down > 0:
+            observations[market] = {"observed_at": observed_at.isoformat(), "up": up, "down": down,
+                                    "flat": row.get("flat_count")}
+    if top20 is not None and top20["saved_at"] <= cut.timestamp():
+        observed_at = as_kst(datetime.fromisoformat(top20["snapshot_key"]))
+        items = top20["payload"]["items"]
+        try:
+            changes = [float(str(item.get("flu_rt")).replace(",", "")) for item in items]
+        except (ValueError, TypeError):
+            changes = []
+        if fresh(observed_at) and len(changes) == 20 and all(math.isfinite(change) for change in changes):
+            observations["top20"] = {"observed_at": observed_at.isoformat(),
+                                     "up": sum(change > 0 for change in changes),
+                                     "down": sum(change < 0 for change in changes),
+                                     "flat": sum(change == 0 for change in changes)}
+    expected = {"bullish": 1, "bearish": -1}.get(assessment["state"])
+    if expected is None or not assessment["evidence_ids"]:
+        return {**result, "reason": "no_directional_premarket_evidence"}
+    if len(observations) != 3:
+        return {**result, "reason": "missing_fresh_market_observations"}
+    differences = [row["up"] - row["down"] for row in observations.values()]
+    if all(delta * expected > 0 for delta in differences):
+        return {**result, "status": "SUPPORTED", "reason": "three_cohorts_agree"}
+    if all(delta * expected < 0 for delta in differences):
+        return {**result, "status": "CONTRADICTED", "reason": "three_cohorts_disagree"}
+    return {**result, "reason": "mixed_intraday_observations"}

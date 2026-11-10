@@ -165,7 +165,7 @@ def research_market(settings: NewsAISettings, prompt: str, *, chatgpt_auth=None,
     validate_reasoning(settings.model, reasoning_effort)
     if settings.provider == "chatgpt_plan":
         return ChatGPTPlanClient(chatgpt_auth).research(
-            settings.model, prompt, reasoning_effort=reasoning_effort)
+            settings.model, prompt, reasoning_effort=reasoning_effort, stream_timeout=40 * 60)
     if settings.provider != "openai" or not settings.api_key:
         raise ValueError("시황 웹 검색용 ChatGPT 구독 또는 OpenAI 연결을 먼저 설정하세요.")
     body = {"model": settings.model, "input": prompt, "store": False,

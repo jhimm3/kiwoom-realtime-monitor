@@ -65,6 +65,68 @@ class ResearchServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows),1)
         self.assertFalse(rows[0]["document"]["usage_measured"])
 
+    async def test_retryable_pauses_reopen_at_kst_midnight_even_after_restart(self):
+        from copy import deepcopy
+        from datetime import datetime, timedelta, timezone
+        from threading import RLock
+        from types import SimpleNamespace
+        from kiwoom_monitor.infrastructure.chatgpt_auth import ChatGPTAuth, DAILY_USAGE_PAUSE, DIRECT_SCOPE
+
+        now = datetime(2035, 1, 2, 14, 59, tzinfo=timezone.utc)
+        document = {"active": "selected", "accounts": {"selected": {
+            "access_token": "test-token", "scopes": [DIRECT_SCOPE]}}}
+        lock = RLock()
+        def save(value):
+            document.clear()
+            document.update(deepcopy(value))
+
+        store = SimpleNamespace(path=Path("private/session.enc"), _lock=lock, locked=lambda: lock,
+                                load=lambda: deepcopy(document), save=save)
+        def new_service():
+            auth = ChatGPTAuth(store, now_provider=lambda: now)
+            service = CentralAIService(CentralServerSettings("sqlite:///:memory:", "test"),
+                                       self.store, chatgpt_auth=auth, now_provider=lambda: now)
+            self.addAsyncCleanup(service.close)
+            return service
+
+        def request(service):
+            return service.research_market("prompt", "chatgpt_plan", "gpt-6.1-sol", "high")
+
+        first = new_service()
+        quota_error = ChatGPTPlanError(DAILY_USAGE_PAUSE, 429, inference_attempted=True)
+        timeout = ChatGPTPlanError("timeout", inference_attempted=True)
+        with patch("kiwoom_monitor.infrastructure.news_ai.research_market",
+                   side_effect=[quota_error, self.reply, timeout, self.reply]) as transport:
+            with self.assertRaises(ChatGPTPlanError):
+                await request(first)
+            self.assertEqual("2035-01-02", document["analysis_pause_day"])
+            self.assertEqual(DAILY_USAGE_PAUSE, first.chatgpt_failure)
+            restarted = new_service()
+            with self.assertRaises(ChatGPTPlanError):
+                await request(restarted)
+            self.assertEqual(1, transport.call_count)
+
+            now += timedelta(minutes=2)
+            self.assertEqual("", first.chatgpt_failure)
+            self.assertEqual("", restarted.chatgpt_auth.status()["pause_code"])
+            self.assertIs(self.reply, await request(restarted))
+            with self.assertRaises(ChatGPTPlanError):
+                await request(restarted)
+            self.assertEqual("2035-01-03", document["analysis_pause_day"])
+            self.assertEqual("timeout", restarted.chatgpt_auth.status()["pause_code"])
+            with self.assertRaises(ChatGPTPlanError):
+                await request(restarted)
+            self.assertEqual(3, transport.call_count)
+
+            now += timedelta(days=1)
+            self.assertEqual("", restarted.chatgpt_failure)
+            self.assertIs(self.reply, await request(new_service()))
+            self.assertEqual(4, transport.call_count)
+
+        restarted.chatgpt_auth.pause_analysis("not_connected")
+        now += timedelta(days=1)
+        self.assertEqual("not_connected", restarted.chatgpt_auth.status()["pause_code"])
+
     async def test_shared_daily_limit_blocks_before_external_request(self):
         from datetime import datetime, timedelta
         from kiwoom_monitor.domain.time_basis import KST
