@@ -6260,6 +6260,17 @@
       "",
       "",
       "unresolved_candidate"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/pc_history_reads.py",
+      "display_minute_history",
+      "store",
+      "load_market_data_metadata_range",
+      "direct_call",
+      "store.load_market_data_metadata_range",
+      "",
+      "",
+      "reviewed_store_binding"
     ]
   ],
   "forwarding_identities": [
@@ -7527,6 +7538,94 @@
       "",
       "",
       "execution-repository"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/app.py",
+      "create_app",
+      "hasattr",
+      "store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-app-store-closure"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/market_dataset_read_routes.py",
+      "create_market_dataset_read_router.dataset_snapshots",
+      "display_snapshot_history",
+      "store",
+      "1",
+      "asyncio.to_thread",
+      "GET",
+      "/api/v1/market/snapshots/{kind}",
+      "central-market-dataset-read-router-store"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/market_query_routes.py",
+      "_archived_chart_response",
+      "display_daily_history",
+      "store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-app-archived-chart"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/market_query_routes.py",
+      "_archived_chart_response",
+      "display_minute_history",
+      "store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-app-archived-chart"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/market_read_routes.py",
+      "create_market_archive_read_router.daily_bars",
+      "display_daily_history",
+      "store",
+      "1",
+      "asyncio.to_thread",
+      "GET",
+      "/api/v1/market/daily-bars",
+      "central-market-archive-read-store"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/market_read_routes.py",
+      "create_market_live_read_router.load_display_minute_bars",
+      "display_minute_history",
+      "store",
+      "1",
+      "asyncio.to_thread",
+      "",
+      "",
+      "central-market-live-read-store"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/market_read_routes.py",
+      "create_market_live_read_router.recent_minute_bars",
+      "display_minute_history",
+      "store",
+      "1",
+      "asyncio.to_thread",
+      "GET",
+      "/api/v1/market/recent-minute-bars",
+      "central-market-live-read-store"
+    ],
+    [
+      "src/kiwoom_monitor/central_server/pc_history_reads.py",
+      "display_minute_history",
+      "_history",
+      "store",
+      "0",
+      "direct_call",
+      "",
+      "",
+      "central-pc-history-minute-read-store"
     ]
   ],
   "contracts": {
@@ -7682,7 +7781,8 @@
       "save_tr_connection_settings": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='value')], kwonlyargs=[arg(arg='expected_revision')], kw_defaults=[None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "load_kind_trading_notices": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"BinOp(left=Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load()), op=BitOr(), right=Constant(value=None))\", \"type_comment\": null, \"type_params\": []}",
       "load_mock_news_position_snapshot": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref'), arg(arg='cut')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
-      "load_strategy_material_inputs": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='dict', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+      "load_strategy_material_inputs": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='dict', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "load_pc_archive_history": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source_stream', annotation=Name(id='str', ctx=Load())), arg(arg='source', annotation=Name(id='str', ctx=Load())), arg(arg='subject', annotation=Name(id='str', ctx=Load())), arg(arg='first', annotation=Name(id='str', ctx=Load())), arg(arg='last', annotation=Name(id='str', ctx=Load())), arg(arg='limit', annotation=Name(id='int', ctx=Load())), arg(arg='batch_id', annotation=Name(id='str', ctx=Load()))], defaults=[Constant(value='')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
     },
     "QueryStore": {
       "acquire_execution_runtime": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='owner_key', annotation=Name(id='str', ctx=Load())), arg(arg='owner_token', annotation=Name(id='str', ctx=Load())), arg(arg='now', annotation=Name(id='str', ctx=Load())), arg(arg='lease_expires_at', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
@@ -7964,7 +8064,21 @@
       "load_mock_news_position_snapshot": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='account_ref'), arg(arg='cut')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
       "load_strategy_material_inputs": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='symbol', annotation=Name(id='str', ctx=Load())), arg(arg='cut', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='dict', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
       "read_after_close_observations": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='start', annotation=Name(id='datetime', ctx=Load())), arg(arg='end', annotation=Name(id='datetime', ctx=Load())), arg(arg='completed_at', annotation=Name(id='datetime', ctx=Load()))])\", \"decorators\": [\"Name(id='contextmanager', ctx=Load())\"], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
-      "read_program_flow_archive": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='day', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [\"Name(id='contextmanager', ctx=Load())\"], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+      "read_program_flow_archive": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='day', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [\"Name(id='contextmanager', ctx=Load())\"], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "acknowledge_pc_history": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source', annotation=Name(id='HistorySource', ctx=Load())), arg(arg='rows', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='target', annotation=Name(id='str', ctx=Load())), arg(arg='batch_id', annotation=Name(id='str', ctx=Load())), arg(arg='compact_before', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='int', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "discover_pc_history_archive": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "load_pc_archive_history": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source_stream', annotation=Name(id='str', ctx=Load())), arg(arg='source', annotation=Name(id='str', ctx=Load())), arg(arg='subject', annotation=Name(id='str', ctx=Load())), arg(arg='first', annotation=Name(id='str', ctx=Load())), arg(arg='last', annotation=Name(id='str', ctx=Load())), arg(arg='limit', annotation=Name(id='int', ctx=Load())), arg(arg='batch_id', annotation=Name(id='str', ctx=Load()))], defaults=[Constant(value='')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "pc_history_inventory": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='set', ctx=Load()), slice=Name(id='str', ctx=Load()), ctx=Load()), Subscript(value=Name(id='set', ctx=Load()), slice=Name(id='str', ctx=Load()), ctx=Load()), Subscript(value=Name(id='set', ctx=Load()), slice=Name(id='str', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "pc_history_record_verified": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source', annotation=Name(id='str', ctx=Load())), arg(arg='row', annotation=Name(id='dict', ctx=Load())), arg(arg='target', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "prepare_pc_history_archive": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "read_news_archive_records": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='cutoff', annotation=Name(id='float', ctx=Load()))], kwonlyargs=[arg(arg='after_sequence', annotation=Name(id='int', ctx=Load())), arg(arg='limit', annotation=Name(id='int', ctx=Load()))], kw_defaults=[None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "read_pc_history": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source', annotation=Name(id='str', ctx=Load()))], kwarg=arg(arg='filters'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "require_pc_history_target": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='target', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "restore_archived_news_body": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='body', annotation=Name(id='dict', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='dict', ctx=Load())\", \"type_comment\": null, \"type_params\": []}",
+      "retain_news_archive_reference": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='record', annotation=Name(id='dict', ctx=Load())), arg(arg='reference', annotation=Name(id='dict', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "scan_pc_history_page": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source', annotation=Name(id='HistorySource', ctx=Load())), arg(arg='source_paths', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Path', ctx=Load())], ctx=Load()), ctx=Load())), arg(arg='rowid', annotation=Name(id='int', ctx=Load()))], kwonlyargs=[arg(arg='compact_before', annotation=Name(id='str', ctx=Load())), arg(arg='target', annotation=Name(id='str', ctx=Load())), arg(arg='limit', annotation=Name(id='int', ctx=Load()))], kw_defaults=[None, None, Constant(value=128)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}",
+      "set_news_archive_reader": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='reader')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}",
+      "set_pc_history_reader": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='reader')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}"
     }
   },
   "incremental_reviews": [
@@ -9462,6 +9576,182 @@
         "tmp/s12-held-close-20261109/current-final.log"
       ],
       "execution_scope": "로컬 SQLite와 가짜 브로커 검증. PostgreSQL 구현과 소비 경계는 정적 확인."
+    },
+    {
+      "id": "2026-11-11-pc-history-archive-query-store-boundary",
+      "added": [
+        [
+          "src/kiwoom_monitor/central_server/pc_history_reads.py",
+          "display_minute_history",
+          "store",
+          "load_market_data_metadata_range",
+          "direct_call",
+          "store.load_market_data_metadata_range",
+          "",
+          "",
+          "reviewed_store_binding"
+        ]
+      ],
+      "removed": [],
+      "forwarding_added": [
+        [
+          "src/kiwoom_monitor/central_server/app.py",
+          "create_app",
+          "hasattr",
+          "store",
+          "0",
+          "direct_call",
+          "",
+          "",
+          "central-app-store-closure"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/market_dataset_read_routes.py",
+          "create_market_dataset_read_router.dataset_snapshots",
+          "display_snapshot_history",
+          "store",
+          "1",
+          "asyncio.to_thread",
+          "GET",
+          "/api/v1/market/snapshots/{kind}",
+          "central-market-dataset-read-router-store"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/market_query_routes.py",
+          "_archived_chart_response",
+          "display_daily_history",
+          "store",
+          "0",
+          "direct_call",
+          "",
+          "",
+          "central-app-archived-chart"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/market_query_routes.py",
+          "_archived_chart_response",
+          "display_minute_history",
+          "store",
+          "0",
+          "direct_call",
+          "",
+          "",
+          "central-app-archived-chart"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/market_read_routes.py",
+          "create_market_archive_read_router.daily_bars",
+          "display_daily_history",
+          "store",
+          "1",
+          "asyncio.to_thread",
+          "GET",
+          "/api/v1/market/daily-bars",
+          "central-market-archive-read-store"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/market_read_routes.py",
+          "create_market_live_read_router.load_display_minute_bars",
+          "display_minute_history",
+          "store",
+          "1",
+          "asyncio.to_thread",
+          "",
+          "",
+          "central-market-live-read-store"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/market_read_routes.py",
+          "create_market_live_read_router.recent_minute_bars",
+          "display_minute_history",
+          "store",
+          "1",
+          "asyncio.to_thread",
+          "GET",
+          "/api/v1/market/recent-minute-bars",
+          "central-market-live-read-store"
+        ],
+        [
+          "src/kiwoom_monitor/central_server/pc_history_reads.py",
+          "display_minute_history",
+          "_history",
+          "store",
+          "0",
+          "direct_call",
+          "",
+          "",
+          "central-pc-history-minute-read-store"
+        ]
+      ],
+      "forwarding_removed": [],
+      "contract_delta": {
+        "PostgresQueryStore": {
+          "load_pc_archive_history": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source_stream', annotation=Name(id='str', ctx=Load())), arg(arg='source', annotation=Name(id='str', ctx=Load())), arg(arg='subject', annotation=Name(id='str', ctx=Load())), arg(arg='first', annotation=Name(id='str', ctx=Load())), arg(arg='last', annotation=Name(id='str', ctx=Load())), arg(arg='limit', annotation=Name(id='int', ctx=Load())), arg(arg='batch_id', annotation=Name(id='str', ctx=Load()))], defaults=[Constant(value='')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          }
+        },
+        "SQLiteQueryStore": {
+          "acknowledge_pc_history": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source', annotation=Name(id='HistorySource', ctx=Load())), arg(arg='rows', annotation=Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load()))], kwonlyargs=[arg(arg='target', annotation=Name(id='str', ctx=Load())), arg(arg='batch_id', annotation=Name(id='str', ctx=Load())), arg(arg='compact_before', annotation=Name(id='str', ctx=Load()))], kw_defaults=[None, None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='int', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "discover_pc_history_archive": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "load_pc_archive_history": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source_stream', annotation=Name(id='str', ctx=Load())), arg(arg='source', annotation=Name(id='str', ctx=Load())), arg(arg='subject', annotation=Name(id='str', ctx=Load())), arg(arg='first', annotation=Name(id='str', ctx=Load())), arg(arg='last', annotation=Name(id='str', ctx=Load())), arg(arg='limit', annotation=Name(id='int', ctx=Load())), arg(arg='batch_id', annotation=Name(id='str', ctx=Load()))], defaults=[Constant(value='')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "pc_history_inventory": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='tuple', ctx=Load()), slice=Tuple(elts=[Subscript(value=Name(id='set', ctx=Load()), slice=Name(id='str', ctx=Load()), ctx=Load()), Subscript(value=Name(id='set', ctx=Load()), slice=Name(id='str', ctx=Load()), ctx=Load()), Subscript(value=Name(id='set', ctx=Load()), slice=Name(id='str', ctx=Load()), ctx=Load())], ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "pc_history_record_verified": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source', annotation=Name(id='str', ctx=Load())), arg(arg='row', annotation=Name(id='dict', ctx=Load())), arg(arg='target', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='bool', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "prepare_pc_history_archive": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "read_news_archive_records": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='cutoff', annotation=Name(id='float', ctx=Load()))], kwonlyargs=[arg(arg='after_sequence', annotation=Name(id='int', ctx=Load())), arg(arg='limit', annotation=Name(id='int', ctx=Load()))], kw_defaults=[None, None])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "read_pc_history": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source', annotation=Name(id='str', ctx=Load()))], kwarg=arg(arg='filters'))\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Subscript(value=Name(id='list', ctx=Load()), slice=Name(id='dict', ctx=Load()), ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "require_pc_history_target": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='target', annotation=Name(id='str', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "restore_archived_news_body": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='body', annotation=Name(id='dict', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Name(id='dict', ctx=Load())\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "retain_news_archive_reference": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='record', annotation=Name(id='dict', ctx=Load())), arg(arg='reference', annotation=Name(id='dict', ctx=Load()))])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "scan_pc_history_page": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='source', annotation=Name(id='HistorySource', ctx=Load())), arg(arg='source_paths', annotation=Subscript(value=Name(id='dict', ctx=Load()), slice=Tuple(elts=[Name(id='str', ctx=Load()), Name(id='Path', ctx=Load())], ctx=Load()), ctx=Load())), arg(arg='rowid', annotation=Name(id='int', ctx=Load()))], kwonlyargs=[arg(arg='compact_before', annotation=Name(id='str', ctx=Load())), arg(arg='target', annotation=Name(id='str', ctx=Load())), arg(arg='limit', annotation=Name(id='int', ctx=Load()))], kw_defaults=[None, None, Constant(value=128)])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": null, \"type_comment\": null, \"type_params\": []}"
+          },
+          "set_news_archive_reader": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='reader')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}"
+          },
+          "set_pc_history_reader": {
+            "before": null,
+            "after": "{\"arguments\": \"arguments(args=[arg(arg='self'), arg(arg='reader')])\", \"decorators\": [], \"kind\": \"sync\", \"returns\": \"Constant(value=None)\", \"type_comment\": null, \"type_params\": []}"
+          }
+        }
+      },
+      "reason": "PC history archive only adds the enumerated read and lifecycle paths. The existing reader obtains archived minute provenance through the same store. Retained methods and earlier reviewed bindings remain unchanged.",
+      "evidence": "tests/unit/test_observation_archive.py; GitHub Actions run 42953616492; docs/architecture/canonical-offline-followup-20261107.md#pc-history-archive-coverage"
     }
   ]
 }

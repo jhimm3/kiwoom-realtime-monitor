@@ -56,9 +56,12 @@ def display_daily_history(store, values: list[dict], code: str, market: str, lim
     archived = _history(store, "central_daily_bars", subject=code, last=last, limit=min(limit * 3, 10000))
     if not archived:
         return values
-    merged = {(row["trading_date"], row["market"]): row for row in
-              [*(entry["data"] for entry in archived), *values]
-              if (not market or row["market"] == market) and (not last or row["trading_date"] < last)}
+    merged = {}
+    for row in [*(entry["data"] for entry in archived), *values]:
+        day = row["trading_date"]
+        venue = row.get("market", market)
+        if (not market or venue == market) and (not last or day < last):
+            merged[day, venue] = row
     return [row for _, row in sorted(merged.items(), reverse=True)][:limit]
 
 

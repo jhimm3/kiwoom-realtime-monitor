@@ -116,6 +116,7 @@ from kiwoom_monitor.central_server.database_market_events import (
     SQLiteMarketEventStoreMixin,
 )
 from kiwoom_monitor.central_server.database_pc_history import SQLitePCHistoryStoreMixin
+from kiwoom_monitor.central_server.database_news_archive import SQLiteNewsArchiveStoreMixin
 from kiwoom_monitor.central_server.database_research_export import (
     PostgresResearchExportStoreMixin,
     SQLiteResearchExportStoreMixin,
@@ -532,6 +533,7 @@ from .database_top20_reconciliation import SQLiteTop20ReconciliationStoreMixin, 
 
 class SQLiteQueryStore(
     SQLitePCHistoryStoreMixin,
+    SQLiteNewsArchiveStoreMixin,
     SQLiteTop20ReconciliationStoreMixin,
     SQLiteHistoricalNewsStoreMixin,
     SQLiteNewsSourceStoreMixin,

@@ -24,7 +24,7 @@ from kiwoom_monitor.domain.news_observation import (
     news_article_content_hash, news_projection_article_hash, NewsBodyConflict,
 )
 from .database_codec import bounded_limit, document_value_rows, json_mapping
-from .database_news_archive import SQLiteNewsArchiveStoreMixin, has_news_archive_reference
+from .database_news_archive import has_news_archive_reference
 from kiwoom_monitor.domain.news_ai_contract import (
     decode_news_ai_provenance, decode_news_input_source, native_news_source_sequence,
     news_ai_source_version_status, news_ai_shared_applies, validate_news_ai_input,
@@ -66,7 +66,7 @@ def _news_ai_has_source_binding(reference: object) -> bool:
     return isinstance(binding, dict) and binding.get("status") != "UNKNOWN"
 
 
-class SQLiteNewsRevisionStoreMixin(SQLiteNewsArchiveStoreMixin):
+class SQLiteNewsRevisionStoreMixin:
     def claim_news_body_job(self, owner: str, *, now: float):
         with self._lock, self._connection() as db:
             db.execute('BEGIN IMMEDIATE')

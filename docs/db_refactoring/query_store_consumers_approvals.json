@@ -596,6 +596,15 @@
       "backend_scope": "Same Episode-injected native QueryStore, borrowed by the existing serialized Gateway command. No new connection, transaction, worker, public method or account authority.",
       "reason": "Read the original pinned leader proof, original decision or saved protection workflow and original stop Risk before preparing an accepted-order claim. The existing native AMEND/CANCEL transaction independently rechecks these sources, current settings, plan revision, physical remainder and latest Risk. The same-input acknowledged cut is reused rather than loading per0B or polling independently.",
       "evidence": "tests/unit/test_leader_order_management.py; tests/integration/test_leader_order_management_postgres.py; tmp/s12-05-leader-current"
+    },
+    {
+      "id": "central-pc-history-minute-read-store",
+      "file": "src/kiwoom_monitor/central_server/pc_history_reads.py",
+      "owner": "display_minute_history",
+      "receiver": "store",
+      "backend_scope": "Same read-router QueryStore passed to the archive merge. Metadata read occurs only when the existing PC SQLite store returns a compacted history slice.",
+      "reason": "Match each restored minute to its original availability and completeness metadata by trade date and venue. Existing local rows win and a live writer or order loop gains no read.",
+      "evidence": "tests/unit/test_observation_archive.py; docs/architecture/canonical-offline-followup-20261107.md#pc-history-archive-coverage"
     }
   ]
 }
