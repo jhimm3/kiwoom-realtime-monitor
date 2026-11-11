@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from kiwoom_monitor.infrastructure.time_display import format_kst_time
+from kiwoom_monitor.infrastructure.research_archive_ownership import record_app_research_artifact
 
 import getpass
 import json
@@ -489,6 +490,7 @@ class HistoricalNewsReviewDialog(QDialog):
                 self._status.setText(f"같은 불변 검토 결과가 이미 있습니다: {output.name}")
                 return
             write_historical_news_review_decisions(dataset, output)
+            record_app_research_artifact(output / "manifest.json", state_dir=self._research_dir, bundle=True)
         except (OSError, ValueError) as error:
             QMessageBox.warning(self, "검토 결과 동결", str(error))
             return
@@ -561,6 +563,7 @@ class HistoricalNewsReviewDialog(QDialog):
                 self._status.setText(f"같은 사건 분할 계획이 이미 있습니다: {output.name}")
                 return
             write_historical_news_event_split(plan, output)
+            record_app_research_artifact(output, state_dir=self._research_dir)
         except (OSError, ValueError) as error:
             QMessageBox.warning(self, "사건 분할 계획", str(error))
             return
@@ -589,6 +592,7 @@ class HistoricalNewsReviewDialog(QDialog):
                 self._status.setText(f"같은 공통 개발 입력이 이미 있습니다: {output.name}")
                 return
             write_historical_news_development_inputs(dataset, output)
+            record_app_research_artifact(output / "manifest.json", state_dir=self._research_dir, bundle=True)
         except (OSError, ValueError) as error:
             QMessageBox.information(self, "개발 입력 생성", str(error))
             return

@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from kiwoom_monitor.domain.news_observation import NewsArchiveUnavailable
 
 
 class NewsReadStore(Protocol):
@@ -59,10 +60,13 @@ def create_news_read_router(
         if kind not in {"article", "body", "ai", "event", "membership"}:
             raise HTTPException(status_code=404, detail="지원하지 않는 뉴스 이력 종류입니다.")
         cursor = {"before_revision_id": before_revision_id} if before_revision_id else {}
-        values = await asyncio.to_thread(
-            store.load_news_history, kind, target=target, identity=identity,
-            available_at=as_of, limit=limit, **cursor,
-        )
+        try:
+            values = await asyncio.to_thread(
+                store.load_news_history, kind, target=target, identity=identity,
+                available_at=as_of, limit=limit, **cursor,
+            )
+        except NewsArchiveUnavailable as error:
+            raise HTTPException(status_code=503, detail="보관된 뉴스 본문을 읽을 수 없습니다.") from error
         result = {"kind": kind, "target": target, "as_of": as_of,
                   "known": bool(values), "revisions": values}
         if kind == "body" and target and stock_code and as_of is None:

@@ -45,6 +45,7 @@ from kiwoom_monitor.application.research_hypotheses import (
     generate_research_hypotheses,
 )
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
+from kiwoom_monitor.infrastructure.research_archive_ownership import APP_RESEARCH_ARCHIVE_ROOT
 from kiwoom_monitor.infrastructure.time_display import format_kst_time
 
 
@@ -60,7 +61,7 @@ _SECTION12_MINUTE_COLUMNS = ("구간·역할", "평가 상태", "순손익", "�
 _BREAKOUT_COMPARISON_COLUMNS = ("변형·구간", "평가 상태", "기준 손익", "필터 손익", "차이", "회피 손실", "놓친 이익")
 
 
-def _research_process_environment(environment: Mapping[str, str]) -> dict[str, str]:
+def _research_process_environment(environment: Mapping[str, str], state_dir: Path | None = None) -> dict[str, str]:
     """Keep runtime/isolation values; research uses explicit input/result connections."""
     unused_credentials = {
         'KIWOOM_APP_KEY', 'KIWOOM_SECRET_KEY', 'KIWOOM_MOCK_APP_KEY', 'KIWOOM_MOCK_SECRET_KEY',
@@ -69,14 +70,20 @@ def _research_process_environment(environment: Mapping[str, str]) -> dict[str, s
         'MONITOR_SERVER_RESEARCH_INPUT_GRANTS_JSON', 'MONITOR_SERVER_RESEARCH_RESULT_GRANTS_JSON',
         'MONITOR_SERVER_NEWS_BODY_GRANTS_JSON', 'MONITOR_SERVER_OBSERVATION_ARCHIVE_GRANTS_JSON',
         'MONITOR_SERVER_PROGRAM_ARCHIVE_TARGET_FILE', 'MONITOR_SERVER_PROGRAM_ARCHIVE_SOURCE_STREAM',
+        'MONITOR_SERVER_NEWS_BODY_ARCHIVE_ENABLED',
+        'MONITOR_SERVER_PC_HISTORY_ARCHIVE_ENABLED', 'MONITOR_SERVER_PC_HISTORY_COMPACT_BEFORE',
+        APP_RESEARCH_ARCHIVE_ROOT,
         'KIWOOM_SERVER_DATABASE_URL', 'KIWOOM_SERVER_SECRET_DIR',
         'CREDENTIAL_TRUSTED_PROXIES', 'NAVER_NEWS_CLIENT_ID', 'NAVER_NEWS_CLIENT_SECRET',
         'DART_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'ANTHROPIC_API_KEY',
     }
-    return {
+    result = {
         key: value for key, value in environment.items()
         if key.upper() not in unused_credentials
     }
+    if state_dir is not None:
+        result[APP_RESEARCH_ARCHIVE_ROOT] = str(state_dir.resolve())
+    return result
 
 
 def _record_research_operation_owner(files: Mapping[str, Path], process: object, kind: str) -> bool:
@@ -380,7 +387,7 @@ class ResearchDialog(QDialog):
                 '--result', str(files['result']), '--cancel', str(files['cancel']),
             ])
             self._manager.start(command, Path.cwd(), below_normal_priority=True,
-                                env=_research_process_environment(os.environ))
+                                env=_research_process_environment(os.environ, self._state_dir))
         except (OSError, ValueError, RuntimeError):
             self._clear_campaign_registration()
             raise
@@ -974,7 +981,7 @@ class ResearchDialog(QDialog):
         ])
         try:
             self._manager.start(command, Path.cwd(), below_normal_priority=True,
-                                env=_research_process_environment(os.environ))
+                                env=_research_process_environment(os.environ, self._state_dir))
         except OSError as exc:
             self._campaign_status.setText(f'캠페인 실행 실패 · {exc}')
             self._finish_worker('FAILED', f'launch_error: {exc}')
@@ -1121,7 +1128,7 @@ class ResearchDialog(QDialog):
         try:
             self._manager.start(
                 command, Path.cwd(), below_normal_priority=True,
-                env=_research_process_environment(os.environ),
+                env=_research_process_environment(os.environ, self._state_dir),
             )
         except OSError as exc:
             self._status.setText(f"실행 실패 · {exc}")
@@ -1680,7 +1687,7 @@ class DevelopmentValidationDialog(QDialog):
                 '--validate-partitions', str(files['request']), '--result', str(files['result']),
                 '--cancel', str(files['cancel']),
                 '--validation-owner-token', 'development-ui-owner-' + operation_id]),
-                Path.cwd(), below_normal_priority=True, env=_research_process_environment(os.environ))
+                Path.cwd(), below_normal_priority=True, env=_research_process_environment(os.environ, self._state_dir))
             try:
                 if not _record_research_operation_owner(files, process, 'development_validation'):
                     self._status.setToolTip('자식 프로세스 시작 토큰을 확인할 수 없어 비정상 종료 자동 판정은 보류합니다.')
@@ -2050,7 +2057,7 @@ class FinalHoldoutDialog(QDialog):
                 '--cancel', str(files['cancel']),
             ])
             process = self._manager.start(command, Path.cwd(), below_normal_priority=True,
-                                          env=_research_process_environment(os.environ))
+                                          env=_research_process_environment(os.environ, self._state_dir))
             if source_path is None or not request.recoveries:
                 try:
                     if not _record_research_operation_owner(files, process, 'final_holdout'):
@@ -2126,7 +2133,7 @@ class FinalHoldoutDialog(QDialog):
                 '--cancel', str(files['cancel']),
             ])
             self._manager.start(command, Path.cwd(), below_normal_priority=True,
-                                env=_research_process_environment(os.environ))
+                                env=_research_process_environment(os.environ, self._state_dir))
             self._run.setEnabled(False)
             self._resume.setEnabled(False)
             self._cancel.setEnabled(True)
@@ -2424,7 +2431,7 @@ class IndependentComparisonDialog(QDialog):
             }, ensure_ascii=False), encoding='utf-8')
             self._manager.start(build_auxiliary_command('kiwoom_monitor.research_process', '--research-process', [
                 '--compare-runs', str(files['request']), '--result', str(files['result']), '--cancel', str(files['cancel']),
-            ]), Path.cwd(), below_normal_priority=True, env=_research_process_environment(os.environ))
+            ]), Path.cwd(), below_normal_priority=True, env=_research_process_environment(os.environ, self._state_dir))
         except (OSError, TypeError, ValueError) as exc:
             self._clear_operation()
             self._status.setText(f'비교 시작 실패 · {exc}')

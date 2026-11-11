@@ -12,6 +12,10 @@ NEWS_ANALYSIS_SCHEMA_VERSION = "news-analysis-v2"
 SUPPLY_CONTRACT_RULE_VERSION = "supply-contract-rule-v2"
 
 
+class NewsArchiveUnavailable(OSError):
+    """A retained reference cannot currently be resolved to its exact payload."""
+
+
 def stable_document_hash(document: Mapping[str, Any]) -> str:
     encoded = json.dumps(
         dict(document), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,

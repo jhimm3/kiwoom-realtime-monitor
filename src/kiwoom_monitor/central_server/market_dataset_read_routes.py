@@ -9,6 +9,7 @@ from typing import Any, Protocol, TYPE_CHECKING
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from kiwoom_monitor.application.stock_enrichment import NXT_CATALOG_KIND
+from .pc_history_reads import PCHistoryReadUnavailable, display_snapshot_history
 
 if TYPE_CHECKING:
     from .autonomous_top20 import AutonomousTop20Service
@@ -46,7 +47,17 @@ def create_market_dataset_read_router(
         if kind == "top20_membership" and limit == 1 and prefer_live and top20_service is not None:
             latest = top20_service.latest_membership_snapshot(subject)
         values = [latest] if latest is not None else await asyncio.to_thread(store.load_dataset_snapshots, kind, subject, limit)
+        archive_available = True
+        if latest is None:
+            try:
+                values = await asyncio.to_thread(display_snapshot_history, store, values, kind, subject, limit)
+            except PCHistoryReadUnavailable:
+                if not values:
+                    raise
+                archive_available = False
         response: dict[str, object] = {"kind": kind, "subject": subject, "snapshots": values}
+        if not archive_available:
+            response["archive_available"] = False
         if kind in {"ranking", "top20_membership"} and limit == 1 and top20_service is not None and values:
             items = values[0].get("payload", {}).get("items", [])
             response["stock_enrichment_codes"] = list(top20_service.stock_enrichment_codes(

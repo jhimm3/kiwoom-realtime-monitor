@@ -405,7 +405,7 @@ class ResearchProcessEnvironmentTests(unittest.TestCase):
             'FinalHoldoutDialog._expose_to_development', 'IndependentComparisonDialog._start',
         }
         self.assertEqual(expected, set(launches))
-        selected_environment = ast.parse('_research_process_environment(os.environ)', mode='eval').body
+        selected_environment = ast.parse('_research_process_environment(os.environ, self._state_dir)', mode='eval').body
         for name, call in launches.items():
             with self.subTest(caller=name):
                 environment = [keyword.value for keyword in call.keywords if keyword.arg == 'env']

@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from .research_contract import OBSERVATION_REVISION_SCHEMA_VERSION, RESEARCH_OBSERVATION_KINDS
+from .pc_history_archive import PC_HISTORY_ARCHIVE_KIND, RESEARCH_FILE_SOURCE, research_chunk_bytes, valid_history_source
 from .time_basis import KST
 
 
@@ -17,6 +18,7 @@ from .time_basis import KST
 MAX_OBSERVATION_ARCHIVE_BYTES = 32 * 1024 * 1024
 OBSERVATION_ARCHIVE_PATH = "/api/v1/archive/observation-batches"
 PROGRAM_FLOW_ARCHIVE_KIND = "program_flow"
+NEWS_BODY_ARCHIVE_KIND = "news_body"
 SQLITE_ARCHIVE_DURABILITY = "sqlite_wal_synchronous_full"
 POSTGRES_ARCHIVE_DURABILITY = "postgresql_fsync_synchronous_commit_on"
 _RECEIPT_FIELDS = {"status", "accepted_at", "receipt_sequence", "durability", "storage_only"}
@@ -134,7 +136,8 @@ class ObservationArchiveBatch:
         captured = manifest.get("captured_range")
         observations = body["observations"]
         if (manifest.get("dataset_id") != batch_id or type(manifest.get("schema_version")) is not int
-                or manifest["schema_version"] != 1 or kind not in RESEARCH_OBSERVATION_KINDS | {PROGRAM_FLOW_ARCHIVE_KIND}
+                or manifest["schema_version"] != 1 or kind not in RESEARCH_OBSERVATION_KINDS | {
+                    PROGRAM_FLOW_ARCHIVE_KIND, NEWS_BODY_ARCHIVE_KIND, PC_HISTORY_ARCHIVE_KIND}
                 or not isinstance(captured, dict) or set(captured) != {"start", "end"}
                 or not isinstance(manifest.get("subject"), str) or manifest.get("observations_file") != "observations.jsonl"
                 or manifest.get("bundle_version") is not None or manifest.get("research_session_profile") is not None
@@ -152,6 +155,51 @@ class ObservationArchiveBatch:
             if manifest["subject"]:
                 raise ValueError("program flow archive requires the completed trading date scope")
             revision_ids = _program_snapshot_ids(observations, start, end)
+            lines = ()
+        elif kind == PC_HISTORY_ARCHIVE_KIND:
+            if not valid_history_source(manifest["subject"]) or not observations.endswith("\n"):
+                raise ValueError("PC history archive requires an approved source")
+            keys = set()
+            for line in observations[:-1].split("\n"):
+                row = _object(line)
+                if (set(row) != {"key", "subject", "sort", "data"} or not isinstance(row["data"], dict)
+                        or not isinstance(row["key"], str) or not row["key"] or row["key"] in keys
+                        or not isinstance(row["subject"], str) or not isinstance(row["sort"], str)
+                        or archive_json(row) != line.encode("utf-8")):
+                    raise ValueError("invalid PC history record")
+                keys.add(row["key"])
+                if manifest["subject"] == RESEARCH_FILE_SOURCE:
+                    try:
+                        research_chunk_bytes(row)
+                    except (KeyError, TypeError, ValueError) as error:
+                        raise ValueError("invalid archived research file chunk") from error
+                revision_ids.append(archive_sha256(line.encode("utf-8")))
+            lines = ()
+        elif kind == NEWS_BODY_ARCHIVE_KIND:
+            if manifest["subject"] or not observations.endswith("\n"):
+                raise ValueError("news archive requires complete body records")
+            body_ids = set()
+            previous_sequence = 0
+            for line in observations[:-1].split("\n"):
+                row = _object(line)
+                body = row.get("body")
+                if (set(row) != {"body", "article", "filings", "processed"}
+                        or not isinstance(body, dict) or not isinstance(row["article"], dict)
+                        or not isinstance(row["filings"], list) or not isinstance(row["processed"], dict)
+                        or not isinstance(body.get("body_revision_id"), str) or not body["body_revision_id"]
+                        or body["body_revision_id"] in body_ids
+                        or type(body.get("accepted_sequence")) is not int
+                        or body["accepted_sequence"] <= previous_sequence
+                        or type(body.get("available_at")) not in (int, float)
+                        or not start.timestamp() <= body["available_at"] < end.timestamp()
+                        or not isinstance(body.get("body_text"), str) or not body["body_text"]
+                        or body.get("article_revision_id") != row["article"].get("article_revision_id")
+                        or body.get("content_hash") != archive_sha256(archive_json({"body": body["body_text"]}))
+                        or archive_json(row) != line.encode("utf-8")):
+                    raise ValueError("invalid archived news body record")
+                body_ids.add(body["body_revision_id"])
+                previous_sequence = body["accepted_sequence"]
+                revision_ids.append(archive_sha256(line.encode("utf-8")))
             lines = ()
         else:
             lines = observations.splitlines()

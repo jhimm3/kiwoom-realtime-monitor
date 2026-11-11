@@ -407,6 +407,8 @@ class Top20NasDataWorker(QThread):
         super().__init__()
         self._client = client
         self._request = request
+        self.result: object = None
+        self.error_message = ""
 
     def run(self) -> None:
         kind, value = self._request
@@ -430,6 +432,8 @@ class Top20NasDataWorker(QThread):
                 raise ValueError("지원하지 않는 TOP20 NAS 조회입니다.")
             if result is None:
                 raise RuntimeError("NAS TOP20 저장 자료를 불러오지 못했습니다.")
+            self.result = result
             self.completed.emit(self._request, result)
         except Exception as error:
-            self.failed.emit(self._request, str(error))
+            self.error_message = str(error)
+            self.failed.emit(self._request, self.error_message)

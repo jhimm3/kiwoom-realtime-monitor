@@ -306,7 +306,7 @@ def load_stored_news_evidence(
     if cancelled():
         raise _EvidenceCancelled
     body_response = client.load_news_history(
-        "body", target=article_revision_id, limit=20, stock_code=stock_code,
+        "body", target=article_revision_id, limit=1, stock_code=stock_code,
     )
     if cancelled():
         raise _EvidenceCancelled

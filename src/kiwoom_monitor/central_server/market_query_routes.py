@@ -8,6 +8,7 @@ from kiwoom_monitor.domain.time_basis import as_kst, kst_now
 from .market_ingest import fundamentals_document_is_current, nxt_eligibility_document_is_current
 from .market_observations import KST
 from .market_read_routes import _archive_coverage_ready
+from .pc_history_reads import display_daily_history, display_minute_history
 
 if TYPE_CHECKING:
     from fastapi import APIRouter
@@ -136,7 +137,7 @@ def _archived_chart_response(store: Any, api_id: str, body: dict[str, Any]) -> d
         coverage = store.load_documents("market_data_coverage", f"{day}:{code}:{market}", 1)
         if not _archive_coverage_ready(coverage, day, "minute"):
             return None
-        bars = store.load_minute_bars(code, day, market)
+        bars = display_minute_history(store, store.load_minute_bars(code, day, market), code, day, day, market)
         if not bars:
             return None
         return {"stk_min_pole_chart_qry": [{
@@ -156,6 +157,7 @@ def _archived_chart_response(store: Any, api_id: str, body: dict[str, Any]) -> d
         from .postgres_access import db_call_source
         with db_call_source("api.kiwoom.archive_daily_bars"):
             stored_bars = store.load_daily_bars(code, market, 5000)
+            stored_bars = display_daily_history(store, stored_bars, code, market, 5000, last=day + "T24")
         bars = [
             bar for bar in stored_bars
             if str(bar.get("trading_date", "")) <= day

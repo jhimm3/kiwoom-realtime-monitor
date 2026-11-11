@@ -186,6 +186,9 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
             program_flow_archive = ProgramFlowArchive(
                 store, database_path.with_name(database_path.name + ".program-archive"),
                 Path(active.program_flow_archive_target_file), active.program_flow_archive_source_stream,
+                news_enabled=active.news_body_archive_enabled or active.pc_history_archive_enabled,
+                history_enabled=active.pc_history_archive_enabled,
+                history_compact_before=active.pc_history_compact_before,
             )
         if diagnostic_tools is not None:
             diagnostic_inputs = diagnostic_tools.compose_application_inputs(store)
@@ -194,6 +197,10 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
         krx_calendar = KrxCalendarEvidence(store, KrxMarketCalendar(), server_now)
         realtime_hub = RealtimeHub(now_provider=server_now, observer=diagnostic_inputs.get("hub"))
         store.initialize()
+        if active.pc_history_archive_enabled:
+            store.prepare_pc_history_archive()
+        elif hasattr(store, "discover_pc_history_archive"):
+            store.discover_pc_history_archive()
         if active.observation_archive_grants:
             store.prepare_observation_archive()
         credential_statuses: dict[str, str] = {}
@@ -1009,6 +1016,12 @@ def create_app(settings: CentralServerSettings | None = None, *, market_theme_sh
                     raise cancelled
 
         app = FastAPI(title="Kiwoom Monitor Personal Server", version="1", lifespan=lifespan)
+        from fastapi.responses import JSONResponse
+        from .pc_history_reads import PCHistoryReadUnavailable
+
+        @app.exception_handler(PCHistoryReadUnavailable)
+        async def pc_history_unavailable(_request, error):
+            return JSONResponse(status_code=503, content={"detail": str(error)})
         app.state.credential_statuses = credential_statuses
         app.state.credential_runtime = credential_runtime
         app.state.realtime_hub = realtime_hub

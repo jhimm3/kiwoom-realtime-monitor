@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import sqlite3
 from datetime import date, datetime, time, timedelta
 from itertools import groupby
 from pathlib import Path
@@ -10,16 +12,17 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from kiwoom_monitor.domain.observation_archive import (
-    MAX_OBSERVATION_ARCHIVE_BYTES, PROGRAM_FLOW_ARCHIVE_KIND, ObservationArchiveBatch,
+    MAX_OBSERVATION_ARCHIVE_BYTES, NEWS_BODY_ARCHIVE_KIND, PROGRAM_FLOW_ARCHIVE_KIND, ObservationArchiveBatch,
     ObservationArchiveLimit, archive_json, archive_sha256, archive_source_stream,
 )
 from kiwoom_monitor.domain.time_basis import KST, as_kst
 from kiwoom_monitor.domain.ranking import normalize_stock_code
-from kiwoom_monitor.infrastructure.observation_archive_delivery import deliver_observation_archive
+from kiwoom_monitor.infrastructure.observation_archive_delivery import archive_connection, deliver_observation_archive
 from kiwoom_monitor.infrastructure.persistence.backup_file import write_immutable_bytes
 
 from .async_lifetime import await_owned_task, owned_create_task, owned_to_thread
 from .database_research_export import _observation_export_manifest
+from .pc_history_archive import PCHistoryArchive
 
 
 logger = logging.getLogger(__name__)
@@ -28,13 +31,25 @@ _MAX_ENCODED_SNAPSHOTS_BYTES = MAX_OBSERVATION_ARCHIVE_BYTES - 8192
 
 
 class ProgramFlowArchive:
-    def __init__(self, store, directory: Path, target_connection: Path, source_stream: str) -> None:
+    def __init__(self, store, directory: Path, target_connection: Path, source_stream: str,
+                 *, news_enabled: bool = False, history_enabled: bool = False,
+                 history_compact_before: str = "") -> None:
         self._store = store
         self._directory = directory
         self._target_connection = target_connection
         self._source_stream = archive_source_stream(source_stream)
+        self._news_enabled = news_enabled
+        self._news_directory = directory / "news"
+        self._news_position = ("", 0)
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        if hasattr(store, "set_news_archive_reader"):
+            store.set_news_archive_reader(self._read_archived_news)
+        self._history_enabled = history_enabled
+        self._history = (PCHistoryArchive(
+            store, directory / "history", directory.parent / "journal.sqlite3",
+            target_connection, self._source_stream, compact_before=history_compact_before, news_enabled=news_enabled,
+        ) if hasattr(store, "set_pc_history_reader") else None)
 
     def start(self) -> None:
         if self._task is None:
@@ -49,15 +64,29 @@ class ProgramFlowArchive:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        if self._history is not None:
+            self._history.close()
 
     async def freeze_day(self, day: str, completed_at: datetime, *, excluded_codes: frozenset[str] = frozenset()) -> None:
+        if self._history_enabled:
+            return
         await await_owned_task(owned_create_task(owned_to_thread(self._freeze, day, completed_at, excluded_codes),
                                                 name="pc-program-flow-archive-freeze"))
         self._wake.set()
 
     async def freeze_observations(self, day: str, completed_at: datetime, *, excluded_codes: frozenset[str] = frozenset()) -> None:
-        await await_owned_task(owned_create_task(owned_to_thread(self._freeze_observations, day, completed_at, excluded_codes),
-                                                name="pc-market-archive-freeze"))
+        if self._history_enabled:
+            await await_owned_task(owned_create_task(owned_to_thread(self._history.schedule, completed_at, excluded_codes),
+                                                    name="pc-history-archive-cut"))
+        else:
+            await await_owned_task(owned_create_task(owned_to_thread(
+                self._freeze_observations, day, completed_at, excluded_codes), name="pc-market-archive-freeze"))
+        if self._news_enabled:
+            cut = as_kst(completed_at)
+            await await_owned_task(owned_create_task(owned_to_thread(
+                write_immutable_bytes, self._news_directory / f"{int(cut.timestamp() * 1_000_000)}.cut",
+                cut.isoformat().encode("ascii"),
+            ), name="pc-news-archive-cut"))
         self._wake.set()
 
     def _freeze_observations(self, day: str, completed_at: datetime, excluded_codes: frozenset[str]) -> None:
@@ -151,6 +180,91 @@ class ProgramFlowArchive:
         value = ObservationArchiveBatch.from_artifact(self._source_stream, manifest_bytes, observations)
         write_immutable_bytes(staged / (value.batch_id + ".batch"), value.raw)
 
+    def _news_archive_step(self) -> str:
+        """Process one durable batch, leaving the cut and exact outbox on failure."""
+        cuts = sorted(self._news_directory.glob("*.cut"))
+        batch = next(iter(self._news_directory.glob("*.batch")), None)
+        if batch is None:
+            if not cuts:
+                return "idle"
+            cut = datetime.fromisoformat(cuts[-1].read_text(encoding="ascii"))
+            last_cut, last_sequence = self._news_position
+            rows = self._store.read_news_archive_records(
+                cut.timestamp(), after_sequence=last_sequence if last_cut == cut.isoformat() else 0, limit=16)
+            if not rows:
+                for path in cuts:
+                    path.unlink()
+                return "idle"
+            first_available = datetime.fromtimestamp(rows[0]["body"]["available_at"], KST)
+            start = datetime.combine(first_available.date(), time(), KST)
+            end = start + timedelta(days=1)
+            lines, size = [], 0
+            for row in rows:
+                body = row["body"]
+                if not start.timestamp() <= body["available_at"] < end.timestamp():
+                    break
+                line = archive_json(row)
+                length = _encoded_line_size(line)
+                if length > _MAX_ENCODED_SNAPSHOTS_BYTES:
+                    if lines:
+                        break
+                    logger.warning("뉴스 보관 배치 한도 초과, PC 원문 보존: %s", body["body_revision_id"])
+                    self._news_position = (cut.isoformat(), body["accepted_sequence"])
+                    return "progress"
+                if size + length > _MAX_ENCODED_SNAPSHOTS_BYTES:
+                    break
+                lines.append(line)
+                size += length
+            batch_id = str(uuid4())
+            self._write_archive_batch(self._news_directory, {
+                "dataset_id": batch_id, "fixed_watermark": batch_id, "schema_version": 1,
+                "kinds": [NEWS_BODY_ARCHIVE_KIND], "subject": "",
+                "captured_range": {"start": start.isoformat(), "end": end.isoformat()},
+                "exported_at": cut.isoformat(), "revision_count": len(lines),
+                "revision_ids_hash": archive_sha256("\n".join(map(archive_sha256, lines)).encode("utf-8")),
+            }, lines)
+            batch = self._news_directory / f"{batch_id}.batch"
+        outcome = deliver_observation_archive(batch, self._target_connection)
+        if outcome["status"] != "delivered":
+            return "pending"
+        value = ObservationArchiveBatch.parse(batch.read_bytes())
+        ack_path = batch.with_name(batch.name + ".ack.json")
+        ack = json.loads(ack_path.read_bytes())
+        receipt = value.verify_receipt(ack["receipt"])
+        if value.kind != NEWS_BODY_ARCHIVE_KIND or receipt != outcome["receipt"]:
+            raise ValueError("news archive acknowledgement changed")
+        document = value.document()
+        lines = document["observations"][:-1].split("\n")
+        for index, line in enumerate(lines):
+            row = json.loads(line)
+            reference = {
+                "target": ack["target"], "receipt": receipt, "record_sha256": archive_sha256(line.encode("utf-8")),
+            }
+            if index == 0:
+                # The receiver checks the full stored batch hash before returning one record.
+                self._read_archived_news(row["body"]["body_revision_id"], reference)
+            self._store.retain_news_archive_reference(row, reference)
+        self._news_position = (json.loads(document["manifest"])["exported_at"], row["body"]["accepted_sequence"])
+        batch.unlink()
+        ack_path.unlink(missing_ok=True)
+        batch.with_name(batch.name + ".target.json").unlink(missing_ok=True)
+        return "progress"
+
+    def _read_archived_news(self, body_id: str, reference: dict) -> dict:
+        receipt = reference["receipt"]
+        stream = receipt["source_stream"]
+        url, client = archive_connection(self._target_connection, stream)
+        if url != reference["target"]:
+            raise ValueError("news archive is pinned to a different target")
+        stored = client.load_observation_archive(receipt["batch_id"], source_stream=stream, news_body_id=body_id)
+        if receipt["kind"] != NEWS_BODY_ARCHIVE_KIND or stored["receipt"] != receipt:
+            raise ValueError("news archive receipt does not match the retained reference")
+        record = stored["record"]
+        if (record["body"]["body_revision_id"] != body_id
+                or archive_sha256(archive_json(record)) != reference["record_sha256"]):
+            raise ValueError("news archive is missing the retained body")
+        return record
+
     def _pending_batches(self) -> list[Path]:
         return sorted(batch for pattern in ("[0-9]*/*.batch", "observations/[0-9]*/*.batch")
                       for batch in self._directory.glob(pattern)
@@ -171,8 +285,22 @@ class ProgramFlowArchive:
                     if outcome["status"] != "delivered":
                         logger.warning("장후 자료 보관 전송 대기: %s %s", batch.name, outcome)
                         retry = True
-            except OSError as error:
-                logger.warning("장후 자료 보관 대기 목록 조회 실패: %s", type(error).__name__)
+                if self._news_enabled:
+                    while True:
+                        news_status = await await_owned_task(owned_create_task(
+                            owned_to_thread(self._news_archive_step), name="pc-news-archive-send"))
+                        if news_status != "progress":
+                            retry = retry or news_status == "pending"
+                            break
+                if self._history_enabled:
+                    while True:
+                        history_status = await await_owned_task(owned_create_task(
+                            owned_to_thread(self._history.step, self._write_archive_batch), name="pc-history-archive-send"))
+                        if history_status != "progress":
+                            retry = retry or history_status == "pending"
+                            break
+            except (OSError, RuntimeError, sqlite3.Error, ValueError) as error:
+                logger.warning("장후 자료 보관 재시도 대기: %s", type(error).__name__)
                 retry = True
             if retry:
                 try:

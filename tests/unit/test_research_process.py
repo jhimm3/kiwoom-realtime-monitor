@@ -1127,6 +1127,8 @@ class ResearchProcessTests(unittest.TestCase):
 
     def test_section12_micro_request_pins_receipts_and_persists_the_result(self) -> None:
         from kiwoom_monitor import research_process
+        from kiwoom_monitor.central_server.pc_research_files import discover_research_sources
+        from kiwoom_monitor.infrastructure.research_archive_ownership import APP_RESEARCH_ARCHIVE_ROOT
         from tests.unit.test_micro_execution_evidence import _entry_market, _event, _policy, _scenario
 
         with tempfile.TemporaryDirectory() as directory:
@@ -1146,7 +1148,7 @@ class ResearchProcessTests(unittest.TestCase):
                 "policy": _policy(), "database": "research.sqlite3", "runs_dir": "runs",
             }), encoding="utf-8")
             result_path = root / "result.json"
-            with patch("sys.stdout"):
+            with patch("sys.stdout"), patch.dict("os.environ", {APP_RESEARCH_ARCHIVE_ROOT: str(root / "research")}):
                 self.assertEqual(0, research_process._run_research_process([
                     "--request", str(request_path), "--result", str(result_path),
                 ]))
@@ -1156,6 +1158,11 @@ class ResearchProcessTests(unittest.TestCase):
                                              result["result"]["protected_quantity"]))
             self.assertEqual(digest, manifest["spec"]["dataset_sha256"])
             self.assertFalse(manifest["order_authorized"])
+            ownership_errors = []
+            archived = discover_research_sources(root, ownership_errors)
+            self.assertEqual([], ownership_errors)
+            self.assertEqual({(root / "research.sqlite3").resolve(): {result["run_id"]}}, archived.runs)
+            self.assertEqual([Path(result["manifest"]).resolve()], [item[0] for item in archived.artifacts])
             parsed = load_research_process_request(request_path)
             self.assertEqual(result["run_id"], execute_process_request(parsed)["run_id"])
             from tests.unit.test_micro_execution_evidence import _frozen_scenario
@@ -1175,6 +1182,7 @@ class ResearchProcessTests(unittest.TestCase):
             self.assertEqual(frozen["events"], frozen_result["result"]["evidence"])
             self.assertEqual(frozen_result["run_id"], execute_process_request(frozen_request)["run_id"])
             self.assertFalse(frozen_manifest["order_authorized"])
+            self.assertEqual(archived.runs, discover_research_sources(root, []).runs)
             evidence.write_bytes(encoded + b" ")
             with self.assertRaisesRegex(ValueError, "hash does not match"):
                 execute_process_request(parsed)

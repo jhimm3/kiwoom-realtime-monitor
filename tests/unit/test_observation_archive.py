@@ -134,6 +134,496 @@ class ObservationArchiveTests(unittest.TestCase):
     def _url(path):
         return "sqlite:///" + path.as_posix()
 
+    def test_registered_research_run_and_frozen_input_are_restored_from_verified_file_chunks(self):
+        from kiwoom_monitor.domain.pc_history_archive import RESEARCH_FILE_CATALOG, RESEARCH_FILE_CHUNK_BYTES
+        from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
+        from kiwoom_monitor.observation_archive import restore_research_file
+
+        day = datetime(2026, 11, 11, 20, 5, tzinfo=KST)
+        outbox = self.root / "outbox"
+        research_root = self.root / "research"
+        database = research_root / "study.sqlite3"
+        runs = research_root / "runs"
+        finished = runs / "verified-run"
+        finished.mkdir(parents=True)
+        frozen = research_root / "frozen"
+        frozen.mkdir()
+        values = b"recorded-study-input\n" * (RESEARCH_FILE_CHUNK_BYTES // 20 + 1)
+        observations = frozen / "observations.jsonl"
+        observations.write_bytes(values)
+        digest = archive_sha256(values)
+        frozen_manifest = archive_json({
+            "dataset_id": "frozen-input", "observations_file": observations.name, "observations_file_hash": digest,
+        })
+        (frozen / "manifest.json").write_bytes(frozen_manifest)
+        run_manifest = archive_json({
+            "format": "kiwoom-monitor-research-run", "version": 3, "run_id": "verified-run",
+            "repository": database.name, "logical_result_hash": "a" * 64, "spec": {},
+            "input_dataset_id": "frozen-input", "input_revision_ids_hash": "b" * 64,
+        })
+        (finished / "manifest.json").write_bytes(run_manifest)
+        (finished / "scratch.tmp").write_bytes(b"not research evidence")
+        ResearchRepository(database)
+        with closing(sqlite3.connect(database)) as db:
+            for run_id, status in (("verified-run", "completed"), ("active-run", "running")):
+                db.execute("""
+                    INSERT INTO research_runs
+                        (run_id,status,started_at,finished_at,spec_json,input_manifest_json,logical_result_hash)
+                    VALUES(?,?,?,?,?,?,?)
+                    """, (run_id, status, day.isoformat(), day.isoformat(), "{}",
+                          json.dumps({"dataset_id": "frozen-input", "revision_ids_hash": "b" * 64}), "a" * 64))
+            db.execute("""
+                INSERT INTO research_campaign_input_sources(source_id,campaign_id,template_job_id,root)
+                VALUES('input','campaign','job',?)
+                """, (str(frozen),))
+            db.execute("INSERT INTO research_campaign_input_acceptances VALUES('input','fingerprint',?,'job',?)",
+                       (str(frozen), archive_sha256(frozen_manifest)))
+            db.execute("""
+                INSERT INTO research_search_jobs
+                    (job_id,experiment_id,dataset_id,dataset_hash,status,created_at,updated_at)
+                VALUES('job','experiment','frozen-input','hash','completed',?,?)
+                """, (day.isoformat(), day.isoformat()))
+            db.execute("""
+                INSERT INTO research_campaign_jobs
+                    (campaign_id,job_id,source_kind,input_path,request_json,state,accepted_sequence)
+                VALUES('campaign','job','native',?,'{}','COMPLETED',1)
+                """, (str(frozen),))
+            db.execute("""
+                INSERT INTO research_search_trials
+                    (trial_id,experiment_id,ordinal,status,run_id,finished_at,document_json)
+                VALUES('trial','experiment',0,'completed','verified-run',?,'{}')
+                """, (day.isoformat(),))
+            db.execute("""
+                INSERT INTO research_campaign_storage_operations
+                    (operation_id,source_id,campaign_id,root,storage_cap_bytes,owner_token,generation,
+                     state,started_at,finished_at,input_path)
+                VALUES('storage','input','campaign',?,0,'worker',1,'PUBLISHED',?,?,?)
+                """, (str(frozen.parent), day.isoformat(), day.isoformat(), str(frozen)))
+            db.commit()
+        (research_root / "research_campaign_selection.json").write_bytes(archive_json({
+            "version": "research_campaign_selection/v1", "database": str(database),
+            "runs_dir": str(runs), "campaign_id": "campaign",
+        }))
+        with wire_server(query_app(receiver_settings(self._url(self.target)))) as (target_url, _):
+            save_connection(self.target_connection, target_url, ARCHIVE_TOKEN)
+            remote = CentralContentClient.for_observation_archive(target_url, STREAM, ARCHIVE_TOKEN)
+            with closing(SQLiteQueryStore(self.source, now_provider=lambda: day, observation_history_enabled=True)) as store:
+                store.initialize()
+                store.prepare_pc_history_archive()
+                archive = ProgramFlowArchive(store, outbox, self.target_connection, STREAM, history_enabled=True)
+                asyncio.run(archive.freeze_observations(day.date().isoformat(), day))
+                for _ in range(250):
+                    if archive._history.step(archive._write_archive_batch) == "idle":
+                        break
+                else:
+                    self.fail("registered research file archive did not finish")
+                self.assertEqual(["verified-run"], [row["record"]["data"]["run_id"]
+                    for row in remote.load_pc_archive_history(STREAM, "research/research_runs")])
+                catalog = [row["record"]["data"] for row in remote.load_pc_archive_history(STREAM, RESEARCH_FILE_CATALOG)]
+                self.assertEqual({digest, archive_sha256(run_manifest), archive_sha256(frozen_manifest)},
+                                 {row["sha256"] for row in catalog})
+                report = json.loads(next((outbox / "history").glob("*.report.json")).read_bytes())
+                self.assertEqual(set(row["sha256"] for row in catalog), {row["sha256"] for row in report["research_files"]})
+                output = self.root / "restored" / observations.name
+                restored = restore_research_file(self.target_connection, STREAM, digest, output)
+                self.assertEqual({"sha256": digest, "bytes": len(values), "chunks": 2}, restored)
+                self.assertEqual(values, output.read_bytes())
+                self.assertEqual(values, observations.read_bytes())
+
+    def test_only_app_owned_research_and_market_store_are_archived_and_restored(self):
+        from kiwoom_monitor.domain.pc_history_archive import RESEARCH_FILE_CATALOG, RESEARCH_FILE_SOURCE
+        from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
+        from kiwoom_monitor.infrastructure.research_archive_ownership import record_app_research_artifact
+        from kiwoom_monitor.observation_archive import restore_research_file, restore_research_input
+
+        day = datetime(2026, 11, 11, 20, 5, tzinfo=KST)
+        research = self.root / "research"
+        research.mkdir()
+        detached = self.root / "separate-pc"
+        detached.mkdir()
+        roots = (research / "existing", detached / "study")
+        file_content = {"observations.jsonl": b'{"source":"app research evidence"}\n'}
+        reconstruction = {
+            "dataset_id": "frozen-input", "observations_file": "observations.jsonl",
+            "observations_file_hash": archive_sha256(file_content["observations.jsonl"]),
+        }
+        for index, root in enumerate(roots):
+            finished = root / "runs" / "same-run"
+            finished.mkdir(parents=True)
+            database = root / "research.sqlite3"
+            ResearchRepository(database)
+            logical_hash = str(index) * 64
+            with closing(sqlite3.connect(database)) as db:
+                for run_id, status in (("same-run", "completed"), ("still-running", "running"),
+                                       ("unowned-dev-run", "completed")):
+                    db.execute("""
+                        INSERT INTO research_runs
+                            (run_id,status,started_at,finished_at,spec_json,input_manifest_json,logical_result_hash)
+                        VALUES(?,?,?,?,?,?,?)
+                        """, (run_id, status, day.isoformat(), day.isoformat(), "{}",
+                              json.dumps({"dataset_id": "frozen-input", "revision_ids_hash": "b" * 64}),
+                              logical_hash))
+                db.commit()
+            (finished / "manifest.json").write_bytes(archive_json({
+                    "format": "kiwoom-monitor-research-run", "version": 3, "run_id": "same-run",
+                    "repository": database.name, "logical_result_hash": logical_hash, "spec": {},
+                    "input_dataset_id": "frozen-input", "input_revision_ids_hash": "b" * 64,
+            }))
+            record_app_research_artifact(finished / "manifest.json", state_dir=research,
+                                         database=database, run_id="same-run")
+        inputs = roots[0] / "frozen"
+        inputs.mkdir()
+        file_content["manifest.json"] = archive_json(reconstruction)
+        for name, content in file_content.items():
+            (inputs / name).write_bytes(content)
+        record_app_research_artifact(inputs / "manifest.json", state_dir=research, bundle=True)
+        bad = roots[0] / "broken"
+        bad.mkdir()
+        broken_manifest = archive_json({**reconstruction, "dataset_id": "bad-input",
+                                        "observations_file_hash": "f" * 64})
+        (bad / "manifest.json").write_bytes(broken_manifest)
+        (bad / "observations.jsonl").write_bytes(b"wrong version\n")
+        record_app_research_artifact(bad / "manifest.json", state_dir=research, bundle=True)
+        held = roots[1] / "held"
+        held.mkdir()
+        (held / "nas-transfer-hold.json").write_bytes(b'{"hold":true}')
+        (held / "manifest.json").write_bytes(b'{"not":"for transfer"}')
+        record_app_research_artifact(held / "manifest.json", state_dir=research)
+        evidence = detached / "review.json"
+        evidence.write_bytes(b'{"cost_percent":0.23}')
+        record_app_research_artifact(evidence, state_dir=research)
+        unrelated = roots[0] / "developer-notes.json"
+        unrelated.write_bytes(b'{"temporary":true}')
+        desktop = detached / "monitor.sqlite3"
+        for database, price in ((self.root / "monitor.sqlite3", 10), (desktop, 20)):
+            with closing(sqlite3.connect(database)) as db:
+                db.execute("CREATE TABLE minute_bars (code TEXT PRIMARY KEY, price INT)")
+                db.execute("INSERT INTO minute_bars VALUES ('005930', ?)", (price,))
+                db.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)")
+                db.execute("INSERT INTO settings VALUES ('test_private_setting', 'do-not-archive')")
+                db.commit()
+        registry = research / "research_archive_sources.json"
+        registry.write_bytes(archive_json({
+            "version": "research_archive_sources/v1", "research_roots": [str(roots[1])],
+            "desktop_databases": [str(desktop)],
+            "evidence": [{"label": "review/unowned.json", "path": str(unrelated),
+                          "sha256": archive_sha256(unrelated.read_bytes())}],
+        }))
+        outbox = self.root / "outbox"
+        with wire_server(query_app(receiver_settings(self._url(self.target)))) as (target_url, _):
+            save_connection(self.target_connection, target_url, ARCHIVE_TOKEN)
+            remote = CentralContentClient.for_observation_archive(target_url, STREAM, ARCHIVE_TOKEN)
+            with closing(SQLiteQueryStore(self.source, now_provider=lambda: day, observation_history_enabled=True)) as store:
+                store.initialize()
+                store.prepare_pc_history_archive()
+                archive = ProgramFlowArchive(store, outbox, self.target_connection, STREAM, history_enabled=True)
+                asyncio.run(archive.freeze_observations(day.date().isoformat(), day))
+                for _ in range(350):
+                    if archive._history.step(archive._write_archive_batch) == "idle":
+                        break
+                else:
+                    self.fail("detached research archive did not finish")
+            runs = remote.load_pc_archive_history(STREAM, "research/research_runs")
+            self.assertEqual({"0" * 64, "1" * 64},
+                             {row["record"]["data"]["logical_result_hash"] for row in runs})
+            self.assertEqual(["same-run", "same-run"], [row["record"]["data"]["run_id"] for row in runs])
+            rows = remote.load_pc_archive_history(STREAM, "desktop_market/minute_bars")
+            self.assertEqual([10], [row["record"]["data"]["price"] for row in rows])
+            catalog = remote.load_pc_archive_history(STREAM, RESEARCH_FILE_CATALOG)
+            self.assertNotIn(archive_sha256(broken_manifest), {row["record"]["data"]["sha256"] for row in catalog})
+            self.assertNotIn(archive_sha256(unrelated.read_bytes()), {row["record"]["data"]["sha256"] for row in catalog})
+            self.assertEqual([], remote.load_pc_archive_history(STREAM, RESEARCH_FILE_SOURCE,
+                                                               subject="f" * 64, limit=1))
+            report = json.loads(next((outbox / "history").glob("*.report.json")).read_bytes())
+            self.assertEqual([], report["count_differences"])
+            self.assertEqual(3, len(report["separate_databases"]))
+            self.assertTrue(any("app_research_artifact_unavailable" in value
+                                for value in report["unclassified"]["separate_storage"]))
+            self.assertEqual("incomplete", report["status"])
+            restored = self.root / "restored"
+            restore_research_input(self.target_connection, STREAM, archive_sha256(file_content["manifest.json"]), restored)
+            self.assertEqual(file_content, {item.name: item.read_bytes() for item in restored.iterdir()})
+            with self.assertRaises(ValueError):
+                restore_research_input(self.target_connection, STREAM, archive_sha256(broken_manifest),
+                                       self.root / "should-not-exist")
+            self.assertFalse((self.root / "should-not-exist").exists())
+            restore_research_file(self.target_connection, STREAM, archive_sha256(evidence.read_bytes()),
+                                  restored / "review.json")
+            self.assertEqual(evidence.read_bytes(), (restored / "review.json").read_bytes())
+            self.assertEqual(file_content["observations.jsonl"], (inputs / "observations.jsonl").read_bytes())
+            with closing(sqlite3.connect(desktop)) as db:
+                self.assertEqual([(20,)], db.execute("SELECT price FROM minute_bars").fetchall())
+            with closing(sqlite3.connect(self.target)) as db:
+                self.assertIsNone(db.execute("SELECT 1 FROM central_pc_archive_history WHERE source=?",
+                                             ("desktop_market/settings",)).fetchone())
+
+    def test_pc_history_covers_external_data_and_keeps_the_existing_screen_continuous_after_late_updates(self):
+        from kiwoom_monitor.central_server.database_pc_history import history_sources
+
+        old_day = "2026-09-01"
+        old_daily = "2000-01-03"
+        cut = datetime(2026, 11, 11, 20, 5, tzinfo=KST)
+        outbox = self.root / "outbox"
+        code = "005930"
+        timestamp = cut.timestamp()
+        bar = {"trading_date": old_day, "minute": "09:00", "code": code, "market": "KRX",
+               "open": 100, "high": 105, "low": 99, "close": 102, "volume": 50,
+               "trade_value_million_won": 1, "updated_at": timestamp}
+        stock = {"items": [{"stk_cd": code}]}
+        target = query_app(receiver_settings(self._url(self.target)))
+        with closing(sqlite3.connect(self.root / "journal.sqlite3")) as journal:
+            journal.execute("CREATE TABLE trade_fills(fill_id TEXT PRIMARY KEY, symbol TEXT)")
+            journal.execute("INSERT INTO trade_fills VALUES('confirmed-fill',?)", (code,))
+            journal.commit()
+        with wire_server(target) as (target_url, _):
+            save_connection(self.target_connection, target_url, ARCHIVE_TOKEN)
+            remote = CentralContentClient.for_observation_archive(target_url, STREAM, ARCHIVE_TOKEN)
+            with closing(SQLiteQueryStore(self.source, now_provider=lambda: cut, observation_history_enabled=True)) as store:
+                store.initialize()
+                store.prepare_pc_history_archive()
+                store.save_minute_bars([bar])
+                daily_bar = {key: value for key, value in bar.items() if key != "minute"}
+                store.replace_daily_bars([{**daily_bar, "trading_date": old_daily}])
+                store.upsert_documents("market_data_coverage_daily", [{"owner": f"{code}:KRX", "key": "coverage",
+                    "document": {"kind": "daily", "as_of": old_daily, "window_closed": True, "session_finalized": True}}])
+                for kind, subject, key, payload in (
+                    ("ranking", "5", old_day + "T09:00:00", stock),
+                    ("top20_membership", old_day, old_day + "T09:00:00", stock),
+                    ("program_flow", code, "20260901:REALTIME:090000", {"rows": [{"trade_time": "090000"}]}),
+                ):
+                    store.save_dataset_snapshot(kind, subject, key, payload)
+                store.save_external_bars([
+                    {"provider": "fixture", "instrument": instrument, "contract": contract, "timeframe": "5m",
+                     "bar_time": old_day + "T20:00:00+09:00", "open": price, "high": price, "low": price,
+                     "close": price, "volume": 1, "updated_at": timestamp}
+                    for instrument, contract, price in (("WTI_FUTURES", "CLV26.NYM", 77), ("NASDAQ_FUTURES", "MNQU26.CME", 21000))
+                ])
+                store.upsert_documents("fixture_unregistered_business_source", [
+                    {"owner": code, "key": "unknown", "document": {"fixture": True}}])
+                with closing(sqlite3.connect(self.source)) as db:
+                    db.executemany("INSERT INTO central_execution_intents VALUES(?,?,?,?,?,?,?,?,?,?)", [
+                        (identifier, "run", "mock", "account", state, "order", None, cut.isoformat(), cut.isoformat(), "{}")
+                        for identifier, state in (("completed", "FILLED"), ("working", "PARTIALLY_FILLED"))
+                    ])
+                    db.executemany("INSERT INTO central_execution_events VALUES(?,?,?,?,?,?,?,?)", [
+                        (number, "event-" + intent, intent, state, cut.isoformat(), cut.isoformat(), "", "{}")
+                        for number, intent, state in ((1, "completed", "FILLED"), (2, "working", "PARTIALLY_FILLED"))
+                    ])
+                    db.execute("INSERT INTO central_execution_runtime_leases VALUES(?,?,?,?)",
+                               ("runtime", "pc-only", cut.isoformat(), cut.isoformat()))
+                    db.commit()
+                archive = ProgramFlowArchive(store, outbox, self.target_connection, STREAM, history_enabled=True,
+                                             history_compact_before="2026-10-01")
+                asyncio.run(archive.freeze_observations(cut.date().isoformat(), cut))
+                history = archive._history
+                with patch("kiwoom_monitor.infrastructure.central_content_client._result_urlopen",
+                           side_effect=TimeoutError("receiver offline")):
+                    for _ in range(100):
+                        if history.step(archive._write_archive_batch) == "pending":
+                            break
+                    else:
+                        self.fail("isolated offline receiver did not leave a pending batch")
+                    self.assertEqual(102, store.load_minute_bars(code, old_day, "KRX")[0]["close"])
+
+                def finish_history():
+                    for _ in range(250):
+                        if history.step(archive._write_archive_batch) == "idle":
+                            return
+                    self.fail("the after-close history did not finish")
+
+                finish_history()
+                self.assertEqual([], store.load_minute_bars(code, old_day, "KRX"))
+                self.assertEqual([], store.load_dataset_snapshots("ranking", "5"))
+                self.assertEqual([], store.load_dataset_snapshots("top20_membership", old_day))
+                self.assertEqual([], store.load_dataset_snapshots("program_flow", code))
+                self.assertEqual(old_daily, store.load_daily_bars(code, "KRX")[0]["trading_date"])
+                self.assertEqual([77, 21000], [
+                    remote.load_pc_archive_history(STREAM, "central_external_bars", subject=name + ":5m")[0]["record"]["data"]["close"]
+                    for name in ("WTI_FUTURES", "NASDAQ_FUTURES")])
+                self.assertEqual("confirmed-fill", remote.load_pc_archive_history(
+                    STREAM, "journal/trade_fills")[0]["record"]["data"]["fill_id"])
+                self.assertEqual(["completed"], [row["record"]["data"]["intent_id"] for row in
+                    remote.load_pc_archive_history(STREAM, "central_execution_events")])
+                with closing(sqlite3.connect(self.source)) as db:
+                    self.assertEqual(("PARTIALLY_FILLED",), db.execute(
+                        "SELECT state FROM central_execution_intents WHERE intent_id='working'").fetchone())
+                    self.assertEqual(("pc-only",), db.execute("SELECT owner_token FROM central_execution_runtime_leases").fetchone())
+                report = json.loads(next((outbox / "history").glob("*.report.json")).read_bytes())
+                self.assertEqual("incomplete", report["status"])
+                self.assertIn("fixture_unregistered_business_source", report["unclassified"]["collections"])
+                self.assertEqual(2, report["sources"]["central_external_bars"]["received"])
+
+                with patch("kiwoom_monitor.central_server.app.create_query_store", return_value=store):
+                    source = create_app(input_settings(self._url(self.source)))
+                with wire_server(source) as (source_url, _), httpx.Client(
+                    base_url=source_url, headers={"Authorization": "Bearer " + QUERY}) as screen:
+                    query = {"code": code, "trading_date": old_day, "market": "KRX"}
+                    self.assertEqual(102, screen.get("/api/v1/market/minute-bars", params=query).json()["bars"][0]["close"])
+                    for kind, subject in (("ranking", "5"), ("top20_membership", old_day), ("program_flow", code)):
+                        response = screen.get(f"/api/v1/market/snapshots/{kind}", params={"subject": subject})
+                        self.assertEqual(200, response.status_code)
+                        self.assertEqual(1, len(response.json()["snapshots"]))
+                    with patch("kiwoom_monitor.infrastructure.central_content_client._result_urlopen",
+                               side_effect=TimeoutError("receiver unavailable after local compaction")):
+                        self.assertEqual(503, screen.get("/api/v1/market/minute-bars", params=query).status_code)
+                    store.save_minute_bars([{**bar, "close": 104}])
+                    store.save_dataset_snapshot("program_flow", code, "20260901:REALTIME:090000",
+                                                {"rows": [{"trade_time": "090000"}], "late": True})
+                    next_cut = cut + timedelta(days=1)
+                    asyncio.run(archive.freeze_observations(next_cut.date().isoformat(), next_cut))
+                    finish_history()
+                    self.assertEqual([], store.load_minute_bars(code, old_day, "KRX"))
+                    self.assertEqual(104, screen.get("/api/v1/market/minute-bars", params=query).json()["bars"][0]["close"])
+                    self.assertEqual(104, remote.load_pc_archive_history(
+                        STREAM, "central_minute_bars", subject=code)[0]["record"]["data"]["close"])
+                    self.assertTrue(screen.get("/api/v1/market/snapshots/program_flow", params={
+                        "subject": code}).json()["snapshots"][0]["payload"]["late"])
+
+                    historical, = remote.load_pc_archive_history(STREAM, "central_daily_bars", subject=code)
+                    origin = datetime.fromisoformat(old_daily).date()
+                    store.replace_daily_bars([
+                        {**daily_bar, "trading_date": (origin + timedelta(days=offset)).isoformat()}
+                        for offset in range(1, 5001)
+                    ])
+                    daily_source = next(item for item in history_sources() if item.name == "central_daily_bars")
+                    self.assertEqual(1, store.acknowledge_pc_history(
+                        daily_source, [historical["record"]], target=target_url,
+                        batch_id=historical["batch_id"], compact_before="2026-10-01"))
+                    native = store.load_daily_bars(code, "KRX", 5000)
+                    self.assertEqual(5000, len(native))
+                    self.assertNotIn(old_daily, [row["trading_date"] for row in native])
+                    chart = screen.post("/api/v1/kiwoom/query", json={
+                        "api_id": "ka10081", "path": "/api/dostk/chart", "body": {"stk_cd": code, "base_dt": "20000103"}})
+                    self.assertEqual(200, chart.status_code)
+                    self.assertTrue(chart.json()["archive_hit"])
+                    self.assertEqual(["20000103"], [row["date"] for row in chart.json()["payload"]["stk_dt_pole_chart_qry"]])
+
+    def test_news_archive_retries_then_reads_past_body_and_links_a_new_correction_after_restart(self):
+        from kiwoom_monitor.application.news_material import received_strategy_material
+        from kiwoom_monitor.central_server.news_jobs import NewsJobRunner
+        from kiwoom_monitor.infrastructure.central_content_client import CentralContentHttpError, CentralContentUnavailableError
+        from kiwoom_monitor.infrastructure.central_news_client import CentralNewsClient
+        from kiwoom_monitor.presentation.news_workers import load_stored_news_evidence
+        from tests.unit.test_news_material import _at, _dart
+        from tests.unit.test_news_observation_history import _article
+
+        original, correction = _dart(1), _dart(2)
+        clock = [datetime.fromisoformat(_at(2))]
+        html = {
+            original: "<table><tr><td>해지금액</td><td>1,000</td></tr></table>"
+                      + "<!--" + ("original filing " * 4096) + "-->",
+            correction: ("<table><tr><th>정정항목</th><th>정정전</th><th>정정후</th></tr>"
+                         "<tr><td>계약 상태</td><td>해지</td><td>계약 해지 자체를 철회하였습니다.</td></tr></table>"),
+        }
+        outbox = self.root / "outbox"
+
+        async def receive(store, url, title):
+            item = _article(title)[0]
+            item["key"] = url
+            item["document"].update(identity=url, link=url, original_link=url, published_at=clock[0].isoformat())
+            store.upsert_documents("news_article", [item])
+            runner = NewsJobRunner(store, now_provider=lambda: clock[0], filing_fetcher=lambda ref, **_kwargs: {
+                "filing_url": ref, "document_url": ref.replace("/dsaf001/main.do", "/report/viewer.do"),
+                "filing_html": html[ref], "original_filing_url": original if ref == correction else "",
+            })
+            try:
+                self.assertEqual(1, await runner.run_once(preferred_stage="BODY"))
+                self.assertEqual(1, await runner.run_once(preferred_stage="RULE"))
+            finally:
+                await runner.close()
+            return item
+
+        target = query_app(receiver_settings(self._url(self.target)))
+        with wire_server(target) as (target_url, _):
+            save_connection(self.target_connection, target_url, ARCHIVE_TOKEN)
+            with closing(SQLiteQueryStore(self.source, now_provider=lambda: clock[0],
+                                          observation_history_enabled=True)) as store:
+                store.initialize()
+                item = asyncio.run(receive(store, original, "단일판매ㆍ공급계약해지"))
+                article, = store.load_news_history("article", target="005930", identity=original)
+                body, = store.load_news_history("body", target=article["article_revision_id"])
+                before = store.load_strategy_material_inputs("005930", clock[0])
+                self.assertTrue(body["body_text"])
+                with closing(sqlite3.connect(self.source)) as db:
+                    free_pages_before, = db.execute("PRAGMA freelist_count").fetchone()
+                archive = ProgramFlowArchive(store, outbox, self.target_connection, STREAM, news_enabled=True)
+                cut = clock[0].replace(hour=20, minute=5)
+                asyncio.run(archive.freeze_observations(cut.date().isoformat(), cut))
+                with patch("kiwoom_monitor.infrastructure.central_content_client._result_urlopen",
+                           side_effect=TimeoutError("isolated archive outage")):
+                    self.assertEqual("pending", archive._news_archive_step())
+                    self.assertEqual(body, store.load_news_body_revision(body["body_revision_id"]))
+                archive = ProgramFlowArchive(store, outbox, self.target_connection, STREAM, news_enabled=True)
+                def fail_archive_read(request, **kwargs):
+                    if request.method == "GET":
+                        raise TimeoutError("isolated outage after archive commit")
+                    return _result_urlopen(request, **kwargs)
+                with patch("kiwoom_monitor.infrastructure.central_content_client._result_urlopen",
+                           side_effect=fail_archive_read):
+                    with self.assertRaises(CentralContentUnavailableError):
+                        archive._news_archive_step()
+                    self.assertEqual(body, store.load_news_body_revision(body["body_revision_id"]))
+                async def resume_archive():
+                    archive.start()
+                    try:
+                        async with asyncio.timeout(8):
+                            while list((outbox / "news").glob("*.cut")):
+                                await asyncio.sleep(0.02)
+                    finally:
+                        await archive.close()
+
+                asyncio.run(resume_archive())
+                self.assertEqual(before, store.load_strategy_material_inputs("005930", clock[0]))
+                with closing(sqlite3.connect(self.source)) as db:
+                    self.assertEqual(("",), db.execute("SELECT body_text FROM central_news_body_revisions").fetchone())
+                    free_pages_after, = db.execute("PRAGMA freelist_count").fetchone()
+                    self.assertGreater(free_pages_after, free_pages_before)
+                filing, = store.load_documents("news_official_filing", "005930")
+                self.assertNotIn("filing_html", filing["document"])
+                self.assertEqual([], list((outbox / "news").glob("*.batch")))
+
+            with closing(SQLiteQueryStore(self.source, now_provider=lambda: clock[0])) as reopened:
+                ProgramFlowArchive(reopened, outbox, self.target_connection, STREAM)
+                with patch("kiwoom_monitor.central_server.app.create_query_store", return_value=reopened):
+                    source = create_app(input_settings(self._url(self.source)))
+                with wire_server(source) as (source_url, _):
+                    client = CentralNewsClient(source_url, QUERY)
+                    response = client.load_news_history("body", target=article["article_revision_id"],
+                                                        stock_code="005930", limit=1)
+                    self.assertEqual([body], response["revisions"])
+                    self.assertIsNotNone(response["assessment"])
+                    reference = reopened.load_document("news_body_archive_reference", body["body_revision_id"],
+                                                       body["body_revision_id"])["document"]
+                    payload = reopened._news_archive_reader(body["body_revision_id"], reference)
+                    self.assertEqual(html[original], json.loads(payload["filings"][0]["document_json"])["filing_html"])
+                    self.assertTrue(payload["processed"]["documents"])
+                    restored = self.root / "restored-news"
+                    receipt = restore_observation_archive(
+                        self.target_connection, STREAM, reference["receipt"]["batch_id"], restored)
+                    self.assertEqual(reference["receipt"], receipt)
+                    self.assertEqual(payload, json.loads((restored / "observations.jsonl").read_bytes()))
+                    reopened.upsert_documents("news_article", [item])
+                    self.assertEqual([article], reopened.load_news_history("article", target="005930", identity=original))
+                    clock[0] = datetime.fromisoformat(_at(6)) + timedelta(days=1)
+                    asyncio.run(receive(reopened, correction, "[기재정정]단일판매ㆍ공급계약해지"))
+                    _, context = received_strategy_material(
+                        "005930", clock[0], **reopened.load_strategy_material_inputs("005930", clock[0]))
+                    event, = context["events"]
+                    self.assertEqual(("INTACT", correction), (event["effect"], event["source_ref"]))
+                    older, _ = client.stored_page("005930", "삼성전자", offset=1)
+                    evidence = load_stored_news_evidence(client, "005930", older[0])
+                    self.assertEqual(body["body_revision_id"], evidence.body_revision_id)
+                    self.assertIn("해지금액", evidence.body_text)
+                    with patch("kiwoom_monitor.infrastructure.central_content_client._result_urlopen",
+                               side_effect=TimeoutError("isolated archive read outage")):
+                        recent, _ = client.stored_page("005930", "삼성전자")
+                        older, _ = client.stored_page("005930", "삼성전자", offset=1)
+                        self.assertEqual([correction, original], [item.original_link for item in recent])
+                        self.assertEqual([original], [item.original_link for item in older])
+                        with self.assertRaises(CentralContentHttpError) as failure:
+                            client.load_news_history("body", target=article["article_revision_id"], limit=1)
+                        self.assertEqual(503, failure.exception.status_code)
+
     def test_isolated_sor_day_resumes_physical_orders_and_archives_one_day(self):
         from kiwoom_monitor.central_server.isolated_sor_day import run_day
 

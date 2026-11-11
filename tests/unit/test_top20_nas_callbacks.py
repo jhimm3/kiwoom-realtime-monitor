@@ -128,14 +128,40 @@ class Top20NasCallbackTests(unittest.TestCase):
         self.assertIs(self.window.thread(), observed[0][2])
         self.assertEqual({}, self.window._top20_nas_callbacks)
 
+    def test_result_waits_for_native_thread_exit_before_gui_callback_and_release(self):
+        client = self.hold()
+        result_ready, native_exit = Event(), Event()
+        observed = []
+
+        class HeldAfterResultWorker(Top20NasDataWorker):
+            def run(self):
+                super().run()
+                result_ready.set()
+                native_exit.wait(4)
+
+        with patch('kiwoom_monitor.presentation.main_window.Top20NasDataWorker', HeldAfterResultWorker):
+            self.window._start_top20_nas_request(('date', '2026-10-22'),
+                lambda result: observed.append((result, worker.isRunning(), self.window.sender())))
+            worker = next(iter(self.window._top20_nas_workers))
+            client.release.set()
+            try:
+                self.assertTrue(result_ready.wait(1))
+                self.assertTrue(worker.isRunning())
+                self.app.processEvents()
+                self.assertEqual([], observed)
+                self.assertIn(worker, self.window._top20_nas_workers)
+                self.assertIn(worker, self.window._top20_nas_callbacks)
+            finally:
+                native_exit.set()
+                self.wait_until(lambda: not self.window._top20_nas_workers)
+        self.assertEqual([(client.result, False, worker)], observed)
+
     def test_missing_sender_cannot_consume_an_owned_pending_callback(self):
         client = self.hold()
         observed = []
         self.window._start_top20_nas_request(('date', '2026-10-22'), observed.append)
         self.assertTrue(client.entered.wait(1))
         with self.assertLogs('kiwoom_monitor.presentation.main_window', level='WARNING'):
-            self.window._on_top20_nas_completed(('date', '2026-10-22'), {'wrong': True})
-            self.window._on_top20_nas_failed(('date', '2026-10-22'), 'wrong')
             self.window._release_top20_nas_worker()
         self.assertEqual(1, len(self.window._top20_nas_workers))
         self.assertEqual(1, len(self.window._top20_nas_callbacks))

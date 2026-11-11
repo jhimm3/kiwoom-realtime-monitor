@@ -70,6 +70,7 @@ from kiwoom_monitor.application.research_queue import (
 from kiwoom_monitor.infrastructure.persistence.research_repository import ResearchRepository
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentClient, CentralContentHttpError, CentralContentUnavailableError
 from kiwoom_monitor.infrastructure.central_server_config import DataSourceConfig
+from kiwoom_monitor.infrastructure.research_archive_ownership import record_app_research_artifact
 from kiwoom_monitor.infrastructure.research_data_source import prepare_campaign_nas_input
 from kiwoom_monitor.infrastructure.research_data_source import FrozenStrategyReferences, load_frozen_strategy_references, load_research_input, research_input_encoded_bytes, campaign_input_scope, campaign_input_fingerprint
 from kiwoom_monitor.application.section12_minute_research import BREAKOUT_STUDY_FAMILY, MINUTE_EXPERIMENT_LABELS, MinuteExperiment
@@ -497,6 +498,7 @@ def execute_final_holdout_evaluation(prepared: PreparedFinalHoldoutEvaluation, *
                 raise RuntimeError('final scientific run identity mismatch')
             repository.finish_final_holdout_execution(batch.batch_id, candidate_hash, run_id=run_id,
                 owner_token=owner_token, outcome='COMPLETED', logical_result_hash=result.logical_result_hash)
+            record_app_research_artifact(result.output_manifest, database=repository.path, run_id=run_id)
             row.update(state='COMPLETED', logical_result_hash=result.logical_result_hash,
                        performance_status=result.performance_status, report_status=result.report_status)
         except (ResearchRunCancelled, ResearchResourceBlocked) as exc:
@@ -1332,6 +1334,7 @@ def execute_process_request(
             run = execute_research(dataset, repository, request.runs_dir, request.strategy, request.execution,
                 request.evaluation, cancelled, request.session_profile, resource_guard,
                 strategy_references=strategy_references, market_entry_trial=trial)
+            record_app_research_artifact(run.output_manifest, database=repository.path, run_id=run.run_id)
             events = repository.load_execution_events(run.run_id)
             entries = [dict(symbol=row["symbol"], at=row["occurred_at"], quantity=row["quantity"],
                             notional_won=row["notional_won"],
@@ -1523,6 +1526,9 @@ def execute_process_request(
             ):
                 repository.interrupt_trial_attempt(attempt_id, 'execution_lease_lost', owner_token=owner_token, generation=generation)
                 raise TrialAttemptInterrupted("execution_lease_lost")
+            if outcome.run_id:
+                record_app_research_artifact(request.runs_dir / outcome.run_id / "manifest.json",
+                                             database=repository.path, run_id=outcome.run_id)
             completed_now += 1
 
         try:
@@ -1598,6 +1604,10 @@ def execute_process_request(
             request.session_profile,
             resource_guard,
         )
+        for run_id in (result.baseline_run_id, result.variant_run_id):
+            record_app_research_artifact(request.runs_dir / run_id / "manifest.json",
+                                         database=repository.path, run_id=run_id)
+        record_app_research_artifact(result.output_manifest)
         return {
             "status": "ok", "kind": "rank_comparison",
             "comparison_id": result.comparison_id,
@@ -1615,6 +1625,10 @@ def execute_process_request(
             cancelled, request.session_profile, resource_guard, strategy_references=strategy_references,
             reconstructed_market_proxy=market_proxy,
         )
+        for run in runs:
+            record_app_research_artifact(run.output_manifest, database=repository.path, run_id=run.run_id)
+        for pair in pairs:
+            record_app_research_artifact(pair.output_manifest)
         context = _section12_minute_result(repository, runs[0].run_id, tuple(config.policy.variant for config in configs))
         if market_proxy is not None:
             context["reconstructed_market_proxy"] = {
@@ -1641,6 +1655,7 @@ def execute_process_request(
         strategy_references=strategy_references,
         shadow_only=request.shadow_only,
     )
+    record_app_research_artifact(result.output_manifest, database=repository.path, run_id=result.run_id)
     document = {
         "status": "ok", "kind": "single_run", "run_id": result.run_id,
         "report_status": result.report_status, "manifest": str(result.output_manifest),
@@ -1828,6 +1843,7 @@ def _execute_evidence_experiment(request, guard, cancelled) -> dict[str, Any]:
         "spec": spec, "logical_result_hash": result_hash, "result": result, "order_authorized": False,
     })
     repository.finish_run(run_id, result_hash)
+    record_app_research_artifact(manifest, database=repository.path, run_id=run_id)
     context = {"family": spec["family"], "source_kind": spec["source_kind"],
                "dataset_sha256": spec["dataset_sha256"], "execution_scope": scope, **identity}
     if isinstance(result.get("variant"), str):
@@ -2295,6 +2311,7 @@ def discover_campaign_inputs(repository, campaign_id, worker_claim, *, cancel_re
                 checkpoint()
                 summary['nas_prepared'] = summary.get('nas_prepared', 0) + int(prepared['status'] == 'prepared')
                 if prepared['status'] == 'prepared':
+                    record_app_research_artifact(Path(prepared['path']) / "manifest.json", bundle=True)
                     register_paths([Path(prepared['path'])])
                 if rolling_day is not None:
                     if prepared['status'] != 'empty' and not any(
@@ -2629,6 +2646,7 @@ def execute_development_validation(batch: DevelopmentValidationRequest, *, cance
                     expected_code_hash=implementation_hash)
                 if result.run_id != run_id:
                     raise RuntimeError('validation scientific run identity mismatch')
+                record_app_research_artifact(result.output_manifest, database=repository.path, run_id=run_id)
                 row['state'] = 'COMPLETED'
         except (ResearchRunCancelled, ResearchResourceBlocked) as exc:
             if claimed and repository.load_run(row['run_id'])['status'] == 'running':

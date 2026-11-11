@@ -4,6 +4,7 @@ import os
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -106,6 +107,9 @@ class CentralServerSettings:
     observation_archive_grants: tuple[ProducerGrant, ...] = field(default=(), repr=False)
     program_flow_archive_target_file: str = field(default="", repr=False)
     program_flow_archive_source_stream: str = ""
+    news_body_archive_enabled: bool = False
+    pc_history_archive_enabled: bool = False
+    pc_history_compact_before: str = ""
 
     def __post_init__(self) -> None:
         if self.local_chatgpt_config_path and (
@@ -120,6 +124,14 @@ class CentralServerSettings:
             raise ValueError("local mock credentials require an isolated loopback server")
         if bool(self.program_flow_archive_target_file) != bool(self.program_flow_archive_source_stream):
             raise ValueError("program flow archive requires a target connection file and source stream")
+        if self.news_body_archive_enabled and not self.program_flow_archive_target_file:
+            raise ValueError("news body archive requires a configured after-close archive target")
+        if self.pc_history_archive_enabled and not self.program_flow_archive_target_file:
+            raise ValueError("PC history archive requires a configured after-close archive target")
+        if self.pc_history_compact_before:
+            if (not self.pc_history_archive_enabled
+                    or date.fromisoformat(self.pc_history_compact_before).isoformat() != self.pc_history_compact_before):
+                raise ValueError("PC history cleanup requires an enabled archive and an explicit ISO date")
         if self.query_access_token and self.query_access_token == self.access_token:
             raise ValueError("조회 토큰과 관리자 토큰은 달라야 합니다.")
         tokens = {self.access_token, self.query_access_token}
@@ -254,6 +266,11 @@ class CentralServerSettings:
             observation_archive_grants=_producer_grants_from_environment("MONITOR_SERVER_OBSERVATION_ARCHIVE_GRANTS_JSON"),
             program_flow_archive_target_file=os.environ.get("MONITOR_SERVER_PROGRAM_ARCHIVE_TARGET_FILE", "").strip(),
             program_flow_archive_source_stream=os.environ.get("MONITOR_SERVER_PROGRAM_ARCHIVE_SOURCE_STREAM", "").strip(),
+            news_body_archive_enabled=os.environ.get("MONITOR_SERVER_NEWS_BODY_ARCHIVE_ENABLED", "0").strip().casefold()
+            in {"1", "true", "yes", "on"},
+            pc_history_archive_enabled=os.environ.get("MONITOR_SERVER_PC_HISTORY_ARCHIVE_ENABLED", "0").strip().casefold()
+            in {"1", "true", "yes", "on"},
+            pc_history_compact_before=os.environ.get("MONITOR_SERVER_PC_HISTORY_COMPACT_BEFORE", "").strip(),
             selected_research_artifact_file=os.environ.get("MONITOR_SERVER_SELECTED_RESEARCH_ARTIFACT_FILE", "").strip(),
             host=os.environ.get("KIWOOM_SERVER_HOST", "0.0.0.0").strip() or "0.0.0.0",
             port=port,

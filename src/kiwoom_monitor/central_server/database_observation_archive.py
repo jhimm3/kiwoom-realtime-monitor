@@ -9,11 +9,59 @@ from kiwoom_monitor.domain.observation_archive import (
     SQLITE_ARCHIVE_DURABILITY, archive_batch_id, archive_json, archive_sha256,
 )
 from kiwoom_monitor.domain.time_basis import as_kst
+from kiwoom_monitor.domain.pc_history_archive import PC_HISTORY_ARCHIVE_KIND, RESEARCH_FILE_SOURCE
 
 from .postgres_access import DBWriterContext, owned_connection_scope
 
 
 _TABLE = "central_observation_archive_batches"
+_HISTORY = "central_pc_archive_history"
+
+
+def _history_schema() -> tuple[str, str]:
+    return (
+        f"CREATE TABLE IF NOT EXISTS {_HISTORY} ("
+        "source_stream TEXT NOT NULL,source TEXT NOT NULL,item_key TEXT NOT NULL,subject TEXT NOT NULL,"
+        "sort_key TEXT NOT NULL,record_json TEXT NOT NULL,batch_id TEXT NOT NULL,"
+        "PRIMARY KEY(source_stream,source,item_key))",
+        f"CREATE INDEX IF NOT EXISTS idx_pc_archive_history_read ON {_HISTORY}"
+        "(source_stream,source,subject,sort_key DESC,item_key)",
+    )
+
+
+def _index_pc_history(cursor, placeholder: str, value: ObservationArchiveBatch) -> None:
+    document = value.document()
+    source = json.loads(document["manifest"])["subject"]
+    records = [json.loads(line) for line in document["observations"].split("\n") if line]
+    cursor.executemany(
+        f"INSERT INTO {_HISTORY} VALUES({','.join((placeholder,) * 7)}) "
+        "ON CONFLICT(source_stream,source,item_key) DO UPDATE SET subject=excluded.subject,"
+        "sort_key=excluded.sort_key,record_json=excluded.record_json,batch_id=excluded.batch_id",
+        [(value.source_stream, source, row["key"], row["subject"], row["sort"],
+          "" if source == RESEARCH_FILE_SOURCE else archive_json(row).decode(), value.batch_id) for row in records],
+    )
+
+
+def _read_pc_history(cursor, p: str, source_stream: str, source: str, subject: str,
+                     first: str, last: str, limit: int, batch_id: str = "") -> list[dict]:
+    sql = f"SELECT record_json,batch_id,item_key FROM {_HISTORY} WHERE source_stream={p} AND source={p}"
+    values: list = [source_stream, source]
+    for column, operator, value in (("subject", "=", subject), ("sort_key", ">=", first),
+                                    ("sort_key", "<", last), ("batch_id", "=", batch_id)):
+        if value:
+            sql += f" AND {column}{operator}{p}"
+            values.append(value)
+    cursor.execute(sql + f" ORDER BY sort_key DESC,item_key LIMIT {p}", (*values, limit))
+    rows = cursor.fetchall()
+    if source != RESEARCH_FILE_SOURCE:
+        return [{"record": json.loads(row[0]), "batch_id": row[1]} for row in rows]
+    restored = {}
+    for _, identity, _ in rows:
+        if identity not in restored:
+            stored = _load_batch(cursor, p, source_stream, identity, True)
+            restored[identity] = {row["key"]: row for row in map(
+                json.loads, stored["batch"]["observations"].splitlines())}
+    return [{"record": restored[identity][key], "batch_id": identity} for _, identity, key in rows]
 
 
 def _archive_schema(*, postgres: bool) -> str:
@@ -57,6 +105,8 @@ def _accept_batch(cursor, placeholder, value, now_provider, durability) -> dict[
         (value.source_stream, value.batch_id, receipt["receipt_sequence"], value.content_sha256,
          archive_json(receipt).decode("utf-8"), value.raw),
     )
+    if value.kind == PC_HISTORY_ARCHIVE_KIND:
+        _index_pc_history(cursor, placeholder, value)
     return receipt
 
 
@@ -109,6 +159,13 @@ class SQLiteObservationArchiveStoreMixin:
         with self._lock, self._connection() as connection:
             _begin_sqlite_archive(connection)
             connection.execute(_archive_schema(postgres=False))
+            for statement in _history_schema():
+                connection.execute(statement)
+
+    def load_pc_archive_history(self, source_stream: str, source: str, subject: str,
+                                first: str, last: str, limit: int, batch_id: str = "") -> list[dict]:
+        with self._lock, self._connection() as connection:
+            return _read_pc_history(connection.cursor(), "?", source_stream, source, subject, first, last, limit, batch_id)
 
     def accept_observation_archive(self, source_stream: str, raw: bytes, expected_sha256: str) -> dict[str, Any]:
         value = _authenticated_batch(source_stream, raw, expected_sha256)
@@ -131,6 +188,15 @@ class PostgresObservationArchiveStoreMixin:
         with owned_connection_scope(self._connect, writer) as connection, connection.cursor() as cursor:
             _begin_postgres_archive(cursor, "schema")
             cursor.execute(_archive_schema(postgres=True))
+            for statement in _history_schema():
+                cursor.execute(statement)
+
+    def load_pc_archive_history(self, source_stream: str, source: str, subject: str,
+                                first: str, last: str, limit: int, batch_id: str = "") -> list[dict]:
+        reader = DBWriterContext(writer_family="read.archive.observation", writer_kind="pc_history",
+                                 operation="load_pc_archive_history", access_mode="read")
+        with owned_connection_scope(self._connect, reader) as connection, connection.cursor() as cursor:
+            return _read_pc_history(cursor, "%s", source_stream, source, subject, first, last, limit, batch_id)
 
     def accept_observation_archive(self, source_stream: str, raw: bytes, expected_sha256: str) -> dict[str, Any]:
         value = _authenticated_batch(source_stream, raw, expected_sha256)

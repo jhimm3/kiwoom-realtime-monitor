@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol, TYPE_CHECKING
 
 from .market_observations import as_kst
+from .pc_history_reads import display_daily_history, display_minute_history
 from kiwoom_monitor.application.market_data_coverage import evaluate_coverage
 from kiwoom_monitor.domain.market_data_contract import MarketDatasetKind, CoverageObservation
 
@@ -54,8 +55,10 @@ def create_market_live_read_router(
     async def load_display_minute_bars(code: str, day: str, market: str) -> list[dict[str, Any]]:
         current_collector = get_collector()
         if current_collector is not None:
-            return await current_collector.load_live_minute_bars(code, day, market)
-        return await asyncio.to_thread(store.load_minute_bars, code, day, market)
+            values = await current_collector.load_live_minute_bars(code, day, market)
+        else:
+            values = await asyncio.to_thread(store.load_minute_bars, code, day, market)
+        return await asyncio.to_thread(display_minute_history, store, values, code, day, day, market)
 
     @router.get("/api/v1/market/minute-bars", dependencies=[Depends(authorize)])
     async def minute_bars(
@@ -112,6 +115,12 @@ def create_market_live_read_router(
             values = await asyncio.to_thread(
                 store.load_recent_minute_bars, code, start_date, end_date, requested_market, trading_days,
             )
+        values = await asyncio.to_thread(
+            display_minute_history, store, values, code, start_date, end_date,
+            "" if requested_market == "COMBINED" else requested_market,
+        )
+        recent = set(sorted({row["trading_date"] for row in values})[-trading_days:])
+        values = [row for row in values if row["trading_date"] in recent]
         if requested_market == "COMBINED":
             values = _combined_minute_bars(values)
         found_days = {str(value['trading_date']) for value in values}
@@ -202,6 +211,7 @@ def create_market_archive_read_router(
         from kiwoom_monitor.application.daily_bar_coverage import COLLECTION, choose_daily_coverage
         with db_call_source("api.market.daily_bars"):
             values = await asyncio.to_thread(store.load_daily_bars, code, market.upper(), limit)
+            values = await asyncio.to_thread(display_daily_history, store, values, code, market.upper(), limit)
             documents = await asyncio.to_thread(store.load_documents, COLLECTION, f"{code}:{market.upper()}", 2)
         coverage = choose_daily_coverage(values, documents, code=code, market=market.upper(),
                                         query_basis_date=as_kst((now_provider or kst_now)()).date().isoformat())

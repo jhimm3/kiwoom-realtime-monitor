@@ -3366,10 +3366,8 @@ class MainWindow(QMainWindow):
         worker.setParent(self._app_controller)
         self._top20_nas_workers.add(worker)
         self._top20_nas_callbacks[worker] = (on_completed, on_failed)
-        worker.completed.connect(self._on_top20_nas_completed)
-        worker.failed.connect(self._on_top20_nas_failed)
+        # Read the retained outcome only after the native thread has exited.
         worker.finished.connect(self._release_top20_nas_worker)
-        worker.finished.connect(worker.deleteLater)
         worker.start()
 
     def _start_market_cap_reference_loading(self, codes: tuple[str, ...]) -> None:
@@ -3437,22 +3435,6 @@ class MainWindow(QMainWindow):
         self._market_cap_reference_pending.difference_update(requested)
         logger.warning("NAS 마지막 0B 시가총액 복원 실패: %s", message)
 
-    @Slot(object, object)
-    def _on_top20_nas_completed(self, _request: object, result: object) -> None:
-        worker = self.sender()
-        if worker not in self._top20_nas_workers:
-            logger.warning("등록되지 않은 NAS 시장자료 작업의 완료 신호를 받았습니다.")
-            return
-        self._finish_top20_nas_request(worker, result, "")
-
-    @Slot(object, str)
-    def _on_top20_nas_failed(self, _request: object, message: str) -> None:
-        worker = self.sender()
-        if worker not in self._top20_nas_workers:
-            logger.warning("등록되지 않은 NAS 시장자료 작업의 실패 신호를 받았습니다.")
-            return
-        self._finish_top20_nas_request(worker, None, message)
-
     def _finish_top20_nas_request(
         self, worker: Top20NasDataWorker, result: object, message: str,
     ) -> None:
@@ -3476,8 +3458,14 @@ class MainWindow(QMainWindow):
         if worker not in self._top20_nas_workers:
             logger.warning("등록되지 않은 NAS 시장자료 작업의 종료 신호를 받았습니다.")
             return
-        self._top20_nas_callbacks.pop(worker, None)
-        self._top20_nas_workers.discard(worker)
+        if worker.isRunning():
+            return
+        try:
+            self._finish_top20_nas_request(worker, worker.result, worker.error_message)
+        finally:
+            self._top20_nas_callbacks.pop(worker, None)
+            self._top20_nas_workers.discard(worker)
+            worker.deleteLater()
 
     @staticmethod
     def _nas_top20_rows(payload: object) -> list[tuple[datetime, float, float, float]]:

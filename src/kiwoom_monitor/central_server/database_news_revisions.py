@@ -24,6 +24,7 @@ from kiwoom_monitor.domain.news_observation import (
     news_article_content_hash, news_projection_article_hash, NewsBodyConflict,
 )
 from .database_codec import bounded_limit, document_value_rows, json_mapping
+from .database_news_archive import SQLiteNewsArchiveStoreMixin, has_news_archive_reference
 from kiwoom_monitor.domain.news_ai_contract import (
     decode_news_ai_provenance, decode_news_input_source, native_news_source_sequence,
     news_ai_source_version_status, news_ai_shared_applies, validate_news_ai_input,
@@ -65,7 +66,7 @@ def _news_ai_has_source_binding(reference: object) -> bool:
     return isinstance(binding, dict) and binding.get("status") != "UNKNOWN"
 
 
-class SQLiteNewsRevisionStoreMixin:
+class SQLiteNewsRevisionStoreMixin(SQLiteNewsArchiveStoreMixin):
     def claim_news_body_job(self, owner: str, *, now: float):
         with self._lock, self._connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -74,7 +75,10 @@ class SQLiteNewsRevisionStoreMixin:
     def load_news_body_job_input(self, owner: str, key: str, attempts: int):
         with self._lock, self._connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            return _news_body_input(db,owner,key,attempts,postgres=False)
+            result = _news_body_input(db, owner, key, attempts, postgres=False)
+        if result["cached_body"] is not None:
+            result["cached_body"] = self.restore_archived_news_body(result["cached_body"])
+        return result
 
     def load_news_body_job_receipt(self, owner: str, key: str, attempts: int):
         with self._lock, self._connection() as db:
@@ -120,9 +124,10 @@ class SQLiteNewsRevisionStoreMixin:
                           available_at: float | None = None, limit: int = 100,
                           before_revision_id: str = "") -> list[dict[str, Any]]:
         with self._lock, self._connection() as connection:
-            return _load_sqlite_news_history(
+            rows = _load_sqlite_news_history(
                 connection, kind, target, identity, available_at, limit, before_revision_id,
             )
+        return [self.restore_archived_news_body(row) for row in rows] if kind == "body" else rows
 
     def load_latest_news_body(self, article_revision_id: str) -> dict[str, Any] | None:
         values = self.load_news_history("body", target=article_revision_id, limit=1)
@@ -145,7 +150,7 @@ class SQLiteNewsRevisionStoreMixin:
                 "available_at,status,body_text,error FROM central_news_body_revisions "
                 "WHERE body_revision_id=?", (body_revision_id,),
             ).fetchone()
-        return _decode_news_history("body", [row])[0] if row else None
+        return self.restore_archived_news_body(_decode_news_history("body", [row])[0]) if row else None
 
     def load_news_article_revision(self, article_revision_id: str) -> dict[str, Any] | None:
         with self._lock, self._connection() as connection:
@@ -1747,9 +1752,14 @@ def _news_body_cached(db, ref, *, postgres):
         return None
     row=_news_body_execute(db,"SELECT body_revision_id,article_revision_id,content_hash,extractor_version,fetched_at,available_at,status,body_text,error "
         "FROM central_news_body_revisions WHERE body_revision_id=?",(ref,),postgres=postgres).fetchone()
-    if not row or stable_document_hash({'body':row[7]})!=row[2]:
+    if not row or not _cached_body_matches(db, row, postgres=postgres):
         raise NewsBodyConflict('admitted BODY reference changed or disappeared')
     return row
+
+
+def _cached_body_matches(db, row, *, postgres):
+    return stable_document_hash({"body": row[7]}) == row[2] or (
+        not postgres and row[7] == "" and has_news_archive_reference(db, row[0]))
 
 def _news_body_execute(db, sql, values=(), *, postgres):
     if postgres:
@@ -1799,7 +1809,7 @@ def _news_body_input(db, owner, key, attempts, *, postgres):
     columns="SELECT body_revision_id,article_revision_id,content_hash,extractor_version,fetched_at,available_at,status,body_text,error FROM central_news_body_revisions "
     if row[15] is None:
         body=_news_body_execute(db,columns+"WHERE article_revision_id=? ORDER BY accepted_sequence DESC LIMIT 1",(row[1],),postgres=postgres).fetchone()
-        if body and stable_document_hash({'body':body[7]})!=body[2]:
+        if body and not _cached_body_matches(db, body, postgres=postgres):
             raise NewsBodyConflict('native cached BODY bytes differ from their hash')
         pin={'source_hash':source_hash,'ref':body[0] if body else '',
              'body_hash':body[2] if body else '', 'body_status':body[6] if body else ''}

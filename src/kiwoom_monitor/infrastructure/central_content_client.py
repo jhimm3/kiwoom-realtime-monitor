@@ -148,12 +148,24 @@ class CentralContentClient:
                              document, compact_json=True, expected_archive_stream=source_stream)
 
     def load_observation_archive(
-        self, batch_id: str, *, source_stream: str, include_body: bool = False,
+        self, batch_id: str, *, source_stream: str, include_body: bool = False, news_body_id: str = "",
     ) -> dict[str, Any]:
         from kiwoom_monitor.domain.observation_archive import OBSERVATION_ARCHIVE_PATH, archive_batch_id
 
         path = OBSERVATION_ARCHIVE_PATH + "/" + quote(archive_batch_id(batch_id), safe="")
+        if news_body_id:
+            return self._request("GET", path + "?" + urlencode({"news_body_id": news_body_id}),
+                                 expected_archive_stream=source_stream)
         return self._request("GET", path if include_body else path + "/receipt", expected_archive_stream=source_stream)
+
+    def load_pc_archive_history(self, source_stream: str, source: str, *, subject: str = "",
+                                first: str = "", last: str = "", limit: int = 1000, batch_id: str = "") -> list[dict]:
+        from kiwoom_monitor.domain.observation_archive import OBSERVATION_ARCHIVE_PATH
+
+        query = urlencode({"source": source, "subject": subject, "first": first, "last": last, "limit": limit,
+                           "batch_id": batch_id})
+        return self._request("GET", OBSERVATION_ARCHIVE_PATH + "/pc-history?" + query,
+                             expected_archive_stream=source_stream)["records"]
 
     def claim_news_body_job(self, *, expected_owner: str) -> dict[str, Any]:
         return self._request("POST", "/api/v1/news/body-jobs/claim", {}, expected_result_owner=expected_owner)

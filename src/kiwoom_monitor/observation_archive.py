@@ -2,16 +2,22 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Any
 
 from kiwoom_monitor.domain.observation_archive import (
-    MAX_OBSERVATION_ARCHIVE_BYTES, PROGRAM_FLOW_ARCHIVE_KIND, ObservationArchiveBatch, ObservationArchiveLimit, archive_json,
+    MAX_OBSERVATION_ARCHIVE_BYTES, NEWS_BODY_ARCHIVE_KIND, PROGRAM_FLOW_ARCHIVE_KIND,
+    ObservationArchiveBatch, ObservationArchiveLimit, archive_json,
 )
 from kiwoom_monitor.domain.research_contract import RESEARCH_OBSERVATION_KINDS
+from kiwoom_monitor.domain.pc_history_archive import (
+    PC_HISTORY_ARCHIVE_KIND, RESEARCH_FILE_CATALOG, RESEARCH_FILE_SOURCE, research_chunk_bytes,
+)
 from kiwoom_monitor.domain.time_basis import KST, aware_iso_kst
 from kiwoom_monitor.infrastructure.central_content_client import CentralContentHttpError
 from kiwoom_monitor.infrastructure.observation_archive_delivery import archive_connection, deliver_observation_archive
@@ -64,9 +70,97 @@ def restore_observation_archive(
     write_immutable_bytes(output / "observations.jsonl", body["observations"].encode("utf-8"))
     write_immutable_bytes(output / "theme_snapshots.jsonl", b"")
     write_immutable_bytes(output / "manifest.json", body["manifest"].encode("utf-8"))
-    if value.kind != PROGRAM_FLOW_ARCHIVE_KIND:
+    if value.kind not in {PROGRAM_FLOW_ARCHIVE_KIND, NEWS_BODY_ARCHIVE_KIND, PC_HISTORY_ARCHIVE_KIND}:
         load_frozen_research_export(output)
     return receipt
+
+
+def restore_research_file(target_connection: Path, source_stream: str, digest: str, output: Path) -> dict:
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError("research file SHA-256 is required")
+    _, client = archive_connection(target_connection, source_stream)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with NamedTemporaryFile(dir=output.parent, prefix=f".{output.name}.", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            actual = hashlib.sha256()
+            size = index = 0
+            count = 1
+            expected_size = None
+            while index < count:
+                key = f"{index:012d}"
+                rows = client.load_pc_archive_history(source_stream, RESEARCH_FILE_SOURCE, subject=digest,
+                                                      first=key, last=f"{index + 1:012d}", limit=1)
+                if len(rows) != 1:
+                    raise ValueError("research archive is missing a file chunk")
+                row = rows[0]["record"]
+                chunk = research_chunk_bytes(row)
+                data = row["data"]
+                if row["subject"] != digest or data["chunk_index"] != index:
+                    raise ValueError("research archive returned a different file chunk")
+                if index == 0:
+                    count, expected_size = data["chunk_count"], data["total_bytes"]
+                if (data["chunk_count"], data["total_bytes"]) != (count, expected_size):
+                    raise ValueError("research archive file chunks disagree")
+                stream.write(chunk)
+                actual.update(chunk)
+                size += len(chunk)
+                index += 1
+            if size != expected_size or actual.hexdigest() != digest:
+                raise ValueError("restored research file hash does not match its source")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, output)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return {"sha256": digest, "bytes": size, "chunks": count}
+
+
+def restore_research_input(target_connection: Path, source_stream: str, digest: str, output: Path) -> dict:
+    """Restore a published input with its original relative layout in a new directory."""
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError("research input manifest SHA-256 is required")
+    if output.exists():
+        raise FileExistsError(output)
+    _, client = archive_connection(target_connection, source_stream)
+    prefix = f"input/{digest}/"
+    manifest = prefix + "manifest.json"
+    published = client.load_pc_archive_history(source_stream, RESEARCH_FILE_CATALOG, subject="input",
+                                              first=manifest, last=manifest + "/", limit=1)
+    if (not published or published[0]["record"]["key"] != manifest
+            or published[0]["record"]["data"]["sha256"] != digest):
+        raise ValueError("research input is missing or has not been fully verified")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    files = size = 0
+    with TemporaryDirectory(dir=output.parent, prefix=".research-restore-") as temporary:
+        staged = Path(temporary) / "input"
+        last = prefix[:-1] + "0"
+        while rows := client.load_pc_archive_history(source_stream, RESEARCH_FILE_CATALOG, subject="input",
+                                                      first=prefix, last=last, limit=128):
+            for row in rows:
+                record = row["record"]
+                label = record["key"]
+                if not label.startswith(prefix) or label != record["sort"] or label != record["data"]["file"]:
+                    raise ValueError("invalid research input catalog entry")
+                relative = label.removeprefix(prefix)
+                if ("\\" in relative or ":" in relative
+                        or any(part in ("", ".", "..") for part in relative.split("/"))):
+                    raise ValueError("invalid research input member path")
+                saved = restore_research_file(target_connection, source_stream, record["data"]["sha256"],
+                                              staged / relative)
+                if (saved["bytes"], saved["chunks"]) != (record["data"]["bytes"], record["data"]["chunks"]):
+                    raise ValueError("restored research input member differs from its catalog")
+                files += 1
+                size += saved["bytes"]
+            last = rows[-1]["record"]["sort"]
+        if not (staged / "manifest.json").is_file():
+            raise ValueError("research input manifest disappeared during restoration")
+        if output.exists():
+            raise FileExistsError(output)
+        staged.rename(output)
+    return {"sha256": digest, "files": files, "bytes": size}
 
 
 def inspect_program_flow(batch_path: Path, *, symbol: str, market: str, recorded_through: datetime) -> dict[str, Any]:
@@ -133,6 +227,16 @@ def main(argv=None) -> int:
     restore.add_argument("--source-stream", required=True)
     restore.add_argument("--batch-id", required=True)
     restore.add_argument("--output", required=True, type=Path)
+    restore_file = commands.add_parser("restore-research-file")
+    restore_file.add_argument("--target-connection", required=True, type=Path)
+    restore_file.add_argument("--source-stream", required=True)
+    restore_file.add_argument("--sha256", required=True)
+    restore_file.add_argument("--output", required=True, type=Path)
+    restore_input = commands.add_parser("restore-research-input")
+    restore_input.add_argument("--target-connection", required=True, type=Path)
+    restore_input.add_argument("--source-stream", required=True)
+    restore_input.add_argument("--sha256", required=True, help="Archived input manifest SHA-256.")
+    restore_input.add_argument("--output", required=True, type=Path)
     inspect_flow = commands.add_parser("inspect-program-flow", help="Inspect archived 0w research context locally.")
     inspect_flow.add_argument("--batch", required=True, type=Path)
     inspect_flow.add_argument("--symbol", required=True)
@@ -150,6 +254,14 @@ def main(argv=None) -> int:
         elif args.command == "restore":
             result = {"status": "restored", "receipt": restore_observation_archive(
                 args.target_connection, args.source_stream, args.batch_id, args.output,
+            )}
+        elif args.command == "restore-research-file":
+            result = {"status": "restored", **restore_research_file(
+                args.target_connection, args.source_stream, args.sha256, args.output,
+            )}
+        elif args.command == "restore-research-input":
+            result = {"status": "restored", **restore_research_input(
+                args.target_connection, args.source_stream, args.sha256, args.output,
             )}
         else:
             result = {"status": "inspected", **inspect_program_flow(

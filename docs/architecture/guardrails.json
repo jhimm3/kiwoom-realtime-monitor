@@ -3442,6 +3442,68 @@
         "db|src/kiwoom_monitor/infrastructure/persistence/research_repository.py|ResearchRepository.load_search_experiment|connection.execute": 1
       },
       "evidence": ["tests/unit/test_research_discovery.py", "docs/RESEARCH_REQUEST_FORMAT.md#new-strategy-discovery"]
+    },
+    {
+      "id": "N03-after-close-news-body-archive-20261110",
+      "reason": "Keep PC article and correction evidence available while moving acknowledged raw news bodies and official HTML to long-term storage.",
+      "connection": "Opt-in PC SQLite reuses the existing after-close owner and durable archive transport. The exact source payload is cleared in the same transaction that pins its read reference. Full payload reads resolve after releasing SQLite locks.",
+      "validation": "Archive scans advance by accepted sequence and read bounded chunks on one snapshot. Additional lookups occur for archived body access or cached BODY proof. Existing article-list and strategy reads perform no archive I/O.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_news_archive.py|SQLiteNewsArchiveStoreMixin.read_news_archive_records|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_archive.py|SQLiteNewsArchiveStoreMixin.restore_archived_news_body|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_archive.py|SQLiteNewsArchiveStoreMixin.retain_news_archive_reference|db.execute": 7,
+        "db|src/kiwoom_monitor/central_server/database_news_archive.py|_records|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_news_archive.py|has_news_archive_reference|db.execute": 1
+      },
+      "evidence": ["docs/architecture/canonical-offline-followup-20261107.md#after-close-news-body-archive", "tests/unit/test_observation_archive.py"]
+    },
+    {
+      "id": "N03-pc-history-and-research-archive-20261111",
+      "reason": "Archive explicit PC history owners and registered research files, then confirm readable NAS records before PC cleanup.",
+      "connection": "Existing after-close lifecycle owns a bounded source sweep, the original archive transaction owns both immutable receipt and read index, and historical display reads use that index only for relevant compacted slices. Research and journal databases are opened read-only.",
+      "validation": "Source-page reads and exact-version cleanup occur after close. The stored record is read back before cleanup. Only an explicit historical read checks the local receipt scope, and no market writer or live order loop gains a storage query.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/database_observation_archive.py|PostgresObservationArchiveStoreMixin.prepare_observation_archive|cursor.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_observation_archive.py|SQLiteObservationArchiveStoreMixin.prepare_observation_archive|connection.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_observation_archive.py|_index_pc_history|cursor.executemany": 1,
+        "db|src/kiwoom_monitor/central_server/database_observation_archive.py|_read_pc_history|cursor.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|SQLitePCHistoryStoreMixin.acknowledge_pc_history|db.execute": 4,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|SQLitePCHistoryStoreMixin.acknowledge_pc_history|db.executemany": 1,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|SQLitePCHistoryStoreMixin.discover_pc_history_archive|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|SQLitePCHistoryStoreMixin.pc_history_inventory|db.execute": 3,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|SQLitePCHistoryStoreMixin.pc_history_record_verified|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|SQLitePCHistoryStoreMixin.prepare_pc_history_archive|db.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|SQLitePCHistoryStoreMixin.read_pc_history|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|SQLitePCHistoryStoreMixin.require_pc_history_target|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|SQLitePCHistoryStoreMixin.scan_pc_history_page|db.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|SQLitePCHistoryStoreMixin.scan_pc_history_page|source_db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|SQLitePCHistoryStoreMixin.scan_pc_history_page|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|_can_compact|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|_primary_key|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|_read_source_page|db.execute": 2,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|read_pc_history_file_tables|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/database_pc_history.py|read_pc_history_file_tables|sqlite3.connect": 1,
+        "db|src/kiwoom_monitor/central_server/pc_research_files.py|_catalog|db.execute": 3,
+        "db|src/kiwoom_monitor/central_server/pc_research_files.py|_catalog|sqlite3.connect": 1
+      },
+      "evidence": [
+        "docs/architecture/canonical-offline-followup-20261107.md#pc-history-archive-coverage",
+        "tests/unit/test_observation_archive.py"
+      ]
+    },
+    {
+      "id": "2026-11-11-app-owned-research-archive",
+      "reason": "One read-only campaign lookup at each after-close cut verifies the older app campaign's completed run membership before archiving its rows. It does not enumerate or import development workspaces.",
+      "connection": "The existing PC archive sweep reads a saved app campaign selection and matches its completed trial IDs to existing durable result manifests. Separate app artifact markers do not query development folders.",
+      "validation": "The isolated archive test restores the selected campaign and owned files and distinguishes other completed runs and separate desktop data.",
+      "limits": {
+        "db|src/kiwoom_monitor/central_server/pc_research_files.py|_load_campaign|db.execute": 1,
+        "db|src/kiwoom_monitor/central_server/pc_research_files.py|_load_campaign|sqlite3.connect": 1
+      },
+      "evidence": [
+        "docs/architecture/canonical-offline-followup-20261107.md#pc-history-archive-coverage",
+        "tests/unit/test_observation_archive.py"
+      ]
     }
   ]
 }
